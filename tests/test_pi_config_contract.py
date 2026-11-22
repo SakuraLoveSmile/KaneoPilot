@@ -28,12 +28,12 @@ DEFAULTS = {
     "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high", "sandbox": "workspace-write"},
 }
 # v3（§5.23.3）：load/get 响应新增 backend + pi_desktop 顶层键。
-# v4（§5.24.1）：另增 controller_backend（只控制 dispatch/monitor 控制端）。
+# v4（§5.24.1）曾另增 controller_backend；kp-e02 已退役该字段（调度是确定性流程）。
 # 执行期提问等待上限（exec_config._merge :74 写入
 # constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS）也是 load/get 响应顶层键。
 # §5.27（2026-11-19）：一次性 AI 处理的模型覆盖 one_shot（未设置时为 null）。
 CONFIG_KEYS = set(DEFAULTS) | {
-    "updated_at", "backend", "pi_desktop", "controller_backend",
+    "updated_at", "backend", "pi_desktop",
     "execution_question_max_wait_seconds", "one_shot",
 }
 
@@ -102,16 +102,10 @@ def test_set_partial_payload_merges_defaults(cli):
 
 def test_exec_capabilities_shape_and_no_internal_fields(cli):
     resp = cli("exec-capabilities", {})
+    # kp-e02：调度没有控制端，exec-capabilities 不再返回 controller。
     assert set(resp) == {"ok", "pi", "pi_desktop", "providers", "presets",
-                         "checks", "controller", "codex"}
-    # v4（§5.24.2）：控制端就绪态独立展示（backend/available/detail），
-    # 与任务执行分支分开，不用其一推断其二。
-    assert set(resp["controller"]) == {"backend", "available", "detail"}
-    assert resp["controller"]["backend"] in ("pi", "pi_desktop")
-    assert isinstance(resp["controller"]["available"], bool)
-    assert resp["controller"]["detail"] is None or isinstance(
-        resp["controller"]["detail"], str
-    )
+                         "checks", "codex"}
+    assert "controller" not in resp
     assert isinstance(resp["ok"], bool)
 
     blob = json.dumps(resp, ensure_ascii=False)
@@ -240,32 +234,19 @@ PLUS_BLOCK = {
 }
 
 
-def test_controller_backend_saves_offline_and_coexists(cli):
-    # v5 legacy controller choice is display-only; active execution remains pi.
-    out = cli("set-exec-config", {"controller_backend": "pi_desktop"})
-    assert out["config"]["controller_backend"] == "pi_desktop"
-    assert out["config"]["backend"] == "pi"
-    assert cli("set-exec-config", {"backend": "pi_desktop"}, expect=1)["code"] == "bad_request"
+def test_controller_backend_is_retired(cli):
+    # kp-e02：controller_backend 已退役——保存时被当作未知字段拒绝。
+    out = cli("set-exec-config", {"controller_backend": "pi_desktop"}, expect=1)
+    assert out["code"] == "bad_request"
 
-    # 服务离线也能保存（任务执行 + 控制端两个后端各存各的）。
+    # 同一次保存去掉该字段即可（服务离线也能保存，五字段只做结构校验）。
     saved = cli("set-exec-config", {
         "backend": "pi_desktop",
-        "controller_backend": "pi_desktop",
         "pi_desktop": PLUS_BLOCK,
     })["config"]
-    assert saved["controller_backend"] == "pi_desktop"
+    assert saved["backend"] == "pi_desktop"
     assert saved["pi_desktop"]["permission_mode"] == "ask"
-
-    # 未知控制端后端拒绝。
-    out = cli("set-exec-config", {"controller_backend": "dsh"}, expect=1)
-    assert out["code"] == "bad_request"
-    assert "controller_backend" in out["error"]
-
-    # 切回 pi 只改控制端，不删除 Plus 分支已存字段。
-    back = cli("set-exec-config", {"controller_backend": "pi"})["config"]
-    assert back["controller_backend"] == "pi"
-    assert back["backend"] == "pi_desktop"
-    assert back["pi_desktop"]["model_id"] == "model-1"
+    assert "controller_backend" not in saved
 
 
 def test_planner_and_review_backend_are_independent(cli):
@@ -333,8 +314,8 @@ def test_role_capability_commands_report_each_branch(cli):
     assert planner["backends"]["pi_desktop"]["available"] is False
 
     exec_caps = cli("exec-capabilities", {})
-    assert exec_caps["controller"]["backend"] == "pi"
-    assert isinstance(exec_caps["controller"]["available"], bool)
+    # kp-e02：调度没有控制端，exec-capabilities 不再有 controller。
+    assert "controller" not in exec_caps
 
 # ---------------------------------------------------------------------------
 # unittest discover 收集入口（本机无 pytest；见 tests/unittest_compat.py）

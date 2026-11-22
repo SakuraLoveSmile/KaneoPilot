@@ -114,7 +114,7 @@ if let caps = decode(PlannerCapabilitiesResponse.self, legacyPlannerCapsJSON) {
     expect(caps.specPlanMethod?.reason == "插件未安装", "旧核心 spec_plan 原因保留")
 }
 
-// MARK: - 夹具 2：exec-capabilities.controller（§5.24.2）+ exec_config.controller_backend
+// MARK: - 夹具 2：exec-capabilities（§5.23.3）+ exec_config 后端字段（kp-e02：无 controller）
 
 let execCapsJSON = """
 {"ok":false,
@@ -122,22 +122,16 @@ let execCapsJSON = """
  "pi_desktop":{"available":true,"detail":"9 项工具齐备"},
  "providers":[{"id":"p1","display_name":"P1","models":[{"id":"m1","reasoning_efforts":["low"]}]}],
  "presets":[{"id":"default","name":"默认"}],
- "checks":[{"name":"credential","ok":false,"detail":"missing"}],
- "controller":{"backend":"pi_desktop","available":true,"detail":"控制端探测通过"}}
+ "checks":[{"name":"credential","ok":false,"detail":"missing"}]}
 """
 if let caps = decode(ExecCapabilitiesResponse.self, execCapsJSON) {
-    expect(caps.controller?.backend == "pi_desktop", "controller.backend 应解码")
-    expect(caps.controller?.readinessText == "控制端探测通过" || caps.controller?.readinessText == "控制端探测通过",
-           "controller 就绪文案应取 detail")
     expect(caps.ok == false, "PI CLI 顶层 ok 保留（不能当作 Plus 保存门）")
     expect(caps.piDesktop?.available == true, "pi_desktop 分支就绪态仍保留")
-    expect(caps.controller?.available == true && caps.piDesktop?.available == true,
-           "控制器就绪态与任务执行就绪态独立解码")
 }
 
 let execConfigJSON = """
 {"provider":"closeai","model":"deepseek-flash","reasoning_effort":"low","agent_preset":"default",
- "backend":"pi","controller_backend":"pi_desktop",
+ "backend":"pi",
  "pi_desktop":{"connection_file":"/Users/x/.pi-desktop-plus/mcp-control.json",
                "provider_id":"deepseek","model_id":"deepseek/deepseek-v4.1-flash",
                "thinking_level":"high","permission_mode":"ask"},
@@ -145,14 +139,12 @@ let execConfigJSON = """
 """
 if let config = decode(ExecConfig.self, execConfigJSON) {
     expect(config.effectiveBackend == "pi", "任务执行后端应为 pi")
-    expect(config.effectiveControllerBackend == "pi_desktop", "派发与监控运行端应为 pi_desktop")
     expect(config.piDesktop?.isComplete == true, "Plus 五字段应判定齐备")
     expect(config.piDesktop?.permissionMode == "ask", "permission_mode 保留用户显式值")
 }
 // 旧配置零迁移：缺 backend/controller_backend → pi / pi。
 if let legacy = decode(ExecConfig.self, #"{"provider":"closeai","model":"m"}"#) {
     expect(legacy.effectiveBackend == "pi", "缺 backend 按 pi 解释")
-    expect(legacy.effectiveControllerBackend == "pi", "缺 controller_backend 按 pi 解释")
     expect(legacy.piDesktop == nil, "旧配置无桌面块")
 }
 

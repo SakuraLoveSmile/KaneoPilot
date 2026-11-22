@@ -606,8 +606,6 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
             "codex": (False, "dict"),
             # §5.27：一次性 AI 处理的模型覆盖（空对象=跟随通用执行配置）。
             "one_shot": (False, "dict"),
-            # v4（§5.24.1）：dispatch/monitor 控制端后端（缺省 pi）。
-            "controller_backend": (False, "str"),
         },
         cmd_config.cmd_set_exec_config,
     ),

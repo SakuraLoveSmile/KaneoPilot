@@ -1027,11 +1027,11 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 - `set-review-config {mode, provider?, model?, reasoning_effort?}`：`custom` 时 provider/model/effort 必填并经 `exec-capabilities` 校验（同 §5.17.2 规则）；校验失败 `bad_request`，旧值不变；成功 → 原子保存 + event `review_config_updated`（detail 脱敏快照）。
 - `custom` 生效点：`executor_runner --stage review` 启动时把 `{provider, model, reasoning_effort}` 固化为 pi 参数（本轮 review 会话专用），记录脱敏快照到运行日志；保存只影响**下一次** review 控制端启动，不改运行中进程。固定提示词仍来自 `core/executor_prompts/review.md`，不复用任务执行的 `agent_preset`。评审修复计划属规划环境，不走 review_config。
 
-### 5.23.5 控制端配置来源（v3 明确；v4 由 §5.24.1/§5.24.4 扩展）
+### 5.23.5 控制端配置来源（v3 明确；v4 扩展；kp-e02 收敛）
 
-- `dispatch`/`monitor` 控制端来源 = `exec_config.controller_backend`（v4）：`pi`（缺省）继承 PI 默认会话设置；`pi_desktop` 使用 `exec_config.pi_desktop` 五字段快照。不再笼统声称两者恒继承 PI 默认。
+- `dispatch`/`monitor` **没有控制端配置**：它们是确定性流程（§5.27、`auto_dispatch`/`auto_monitor`），不经模型、不读任何后端字段。v4 的 `exec_config.controller_backend` 已随 kp-e02 删除（旧值读取后忽略，零迁移）。
 - `review` 控制端来源 = `review_config.backend`（v4）：`pi` 分支按 `review_config.mode`（inherit→PI 默认；custom→固化快照）；`pi_desktop` 分支使用 `review_config.pi_desktop` 五字段。
-- 任务执行轮次来源 = `exec_config.backend` 分支（§5.23.3）。四个来源独立展示，互不覆盖。
+- 任务执行轮次来源 = `exec_config.backend` 分支（§5.23.3）。三个来源独立展示，互不覆盖。
 
 ### 5.23.6 Plus 本地目录读取 `pi-desktop-catalog`（T3.5）
 
@@ -1207,13 +1207,12 @@ _id, created_at}`，提示先核对 Plus 会话。
 
 ### 5.24.1 角色后端与配置形状（v4）
 
-四个模型调用点各有**独立**后端选择，互不隐式联动：
+三个模型调用点各有**独立**后端选择，互不隐式联动（dispatch/monitor/delivery 是确定性流程，没有后端选择）：
 
 | 调用点 | 配置键 | 新增字段 | 缺省解释 |
 |---|---|---|---|
 | 规划（standard/review_fix） | `settings.planner_config` | `backend: "codex"|"pi_desktop"` + `pi_desktop` 五字段块 | 缺 `backend` → `codex` |
 | 任务执行 | `settings.exec_config.backend` | 无（沿用 §5.23.3） | 缺 → `pi` |
-| dispatch/monitor 控制端 | `settings.exec_config` | `controller_backend: "pi"|"pi_desktop"` | 缺 → `pi` |
 | review 控制端 | `settings.review_config` | `backend: "pi"|"pi_desktop"` + `pi_desktop` 五字段块 | 缺 `backend` → `pi` |
 
 - `pi_desktop` 五字段沿用 §5.23.3：`connection_file/provider_id/model_id/thinking_level/permission_mode`；`permission_mode`：新规划固定 `auto`，Review 固定 `auto`，执行/控制端仍须用户显式保存；默认连接路径仍是 `~/.pi-desktop-plus/mcp-control.json`，不扫描 `.pi-desktop` 或其他 HOME。
@@ -1225,7 +1224,7 @@ _id, created_at}`，提示先核对 Plus 会话。
 ### 5.24.2 能力查询（v4）
 
 - `planner-capabilities` 顶层增加 `backends`：`{codex:{…沿用 §5.22.6 字段…}, pi_desktop:{available,detail,tools_ok,version}}`。`pi_desktop` 分支只检测**已保存**的 `planner_config.pi_desktop` 五字段与 Plus 连接；`available=false` 时 `detail` 给中文原因（未保存配置/连接文件缺失/`active≠true`/PID 不存活/工具缺失/型号不在本地目录）。工具门 = §5.23.3 基础工具 + `pi_plans_pending`/`pi_plans_resolve`。
-- `exec-capabilities`（§5.23.3）顶层增加 `controller`：`{backend, available, detail}`。`pi` 分支沿用 PI CLI 检查；`pi_desktop` 分支与任务执行用同一探针但只要求基础工具集（控制端不建 Goal 会话）。控制器就绪态与任务执行就绪态**分开**展示，不用其一推断其二。
+- `exec-capabilities`（§5.23.3）不再有 `controller` 字段（kp-e02 删除）：调度没有控制端，任务执行就绪态由 `ok`/`pi_desktop` 分支表达。
 - 新增只读 `review-capabilities {}` → `{pi:{available,detail}, pi_desktop:{available,detail,tools_ok,version}}`：`pi` 分支 = `review_config` 的 pi 可用性（inherit，或 custom 时目标 provider/model/effort 在 PI 目录内）；`pi_desktop` 分支 = 五字段 + 连接 + 基础工具 + 契约审批工具。扩展响应时保留旧字段。
 - 候选模型复用 `pi-desktop-catalog`（§5.23.6），严格 `source:"cache"`，不 refresh、不调远端 `/models`、不调用付费模型。
 - 所有 `available=true` 只代表**本机配置与协议工具可用**，不证明凭据有效、模型在线或费用可用。缺配置/缺工具/型号不在目录 → 明确失败并给原因，**不**自动降级到 codex/pi，也不为 Plus 分支调用 Codex provider 解析或 PI auth check。
@@ -1250,7 +1249,11 @@ _id, created_at}`，提示先核对 Plus 会话。
 
 ### 5.24.4 Plus dispatch / monitor 控制端（v4）
 
-> 本节保留 v4 控制轮历史契约；v5 新的 dispatch/monitor 调度改用 §5.27 的确定性流程，不创建模型控制会话。
+> **已退役（kp-e02，2026-11-22）**：dispatch/monitor 是 §5.27 的确定性流程
+> （`auto_dispatch`/`auto_monitor`，不经模型、不读 `controller_backend`）。本节以下内容
+> 只是 v4 历史契约：`exec_config.controller_backend`、`PI_DESKTOP_CONTROLLER_TOOLS` 的
+> 控制端工具门、`mode="agent"` 控制会话与 `executor_prompts/{dispatch,monitor}.md` 均已删除；
+> `pi_desktop_controller` 只保留 review/desktop 复用的工具函数。
 
 - `executor_runner --stage dispatch|monitor` 按 `exec_config.controller_backend` 分流：`pi` 分支行为不变（runner 渲染 prompt 后以 `pi -p --mode json` 执行）；`pi_desktop` 分支创建独立 `mode:"agent"` 控制会话（`pi_session_create` → 必要时 `pi_session_configure(permissionMode=exec_config.pi_desktop.permission_mode, confirm:true)` → `pi_agent_prompt(渲染后的 <stage>.md)`），运行现有相应角色 prompt，模型/权限来自 `exec_config.pi_desktop`；该分支**不再**拉起 `pi -p`。调度器仍只拉 runner。
 - **宿主环境必须显式传入**：Plus 的 shell 工具在宿主进程执行，不继承 runner 环境。控制轮 prompt 必须携带本控制轮固定的 `KANPILOT_DB`、`KANPILOT_APP_SUPPORT`、`KANPILOT_PLAN_ROOT`、`KANPILOT_REPOS_ROOT`、`KANPILOT_LEGACY_ROOT`、`KANEO_CREDENTIALS_PATH` 与核心根/可执行路径，经正确 shell 引号或 runner 生成的**固定本地包装器**调用既有 CLI；包装器只启动现有 CLI 并注入这些环境，不得暴露 token、绕过核心规则或变成替代状态管理脚本。工作目录使用独立控制目录，不更改 Plus 全局当前项目。
@@ -1289,9 +1292,9 @@ _id, created_at}`，提示先核对 Plus 会话。
 - `APP_SUPPORT = ~/Library/Application Support/KaneoPilot`（DB、备份、报告缓存）
 - `TODO_SLUGS = {to-do, todo}`；`REVIEW_SLUGS = {in-review, review}`；`DONE_SLUGS = {done}`。
 - 计划 frontmatter 必填：`task_id project_id project_name repository source_sha256 requirements_sha256 planner_model reasoning_effort implementation_status generated_at`；planner_model/reasoning_effort 须与该请求的**运行快照**一致——codex 为 `model_config`（§5.22.6），Plus（`planner_backend="pi_desktop"`）为 `runtime_config.model_id`/`runtime_config.thinking_level`（§5.24.3）；旧记录两份快照都缺时才回落默认 `standard=gpt-6-astra/medium`、`review_fix=gpt-5.6-sol/xhigh`。review_fix 另含 `review_report_path review_report_sha256 review_source_task_id review_key`。
-- v4（§5.24 T6 全流程 Plus 接入）：`PLANNER_BACKENDS=(codex,pi_desktop)`（缺省 `codex`）、`CONTROLLER_BACKENDS=(pi,pi_desktop)`（缺省 `pi`，存 `exec_config.controller_backend`）、`REVIEW_BACKENDS=(pi,pi_desktop)`（缺省 `pi`，存 `review_config.backend`）；每个后端分支各存自己的脱敏快照，切换不删除另一分支。
-- v4 工具门：Plus **控制端**（dispatch/monitor）= `PI_DESKTOP_REQUIRED_TOOLS`；Plus **计划/Review** = `PI_DESKTOP_REQUIRED_TOOLS + PI_DESKTOP_GOAL_TOOLS`（`pi_plans_pending`/`pi_plans_resolve` 用于读取并安全关闭产物检点）；Plus **任务执行** = `PI_DESKTOP_DISPATCH_TOOLS`（基础 + 契约审批）。缺任一即 `tools_ok=false`，不做事后半残派发。
-- v4 会话模式与权限：Plus 计划/Review 固定 `mode=plan`；新规划固定 `permission_mode=auto`，Review 固定 `auto`。Plan 模式不是 OS 只读沙箱，规划可无需工具确认运行 Bash 并修改文件；旧规划请求保留原权限快照；控制端固定 `mode=agent` 并使用用户显式选定的 `permission_mode`；任务执行固定 `mode=goal`（§5.23.9）。没有自动批准 Plus 工具权限的通道。
+- v4（§5.24 T6 全流程 Plus 接入）：`PLANNER_BACKENDS=(codex,pi_desktop)`（缺省 `codex`）、`REVIEW_BACKENDS=(pi,pi_desktop)`（缺省 `pi`，存 `review_config.backend`）；每个后端分支各存自己的脱敏快照，切换不删除另一分支。`CONTROLLER_BACKENDS` 已随 kp-e02 删除（调度无控制端）。
+- v4 工具门：Plus **计划/Review** = `PI_DESKTOP_REQUIRED_TOOLS + PI_DESKTOP_GOAL_TOOLS`（`pi_plans_pending`/`pi_plans_resolve` 用于读取并安全关闭产物检点）；Plus **任务执行** = `PI_DESKTOP_DISPATCH_TOOLS`（基础 + 契约审批）。缺任一即 `tools_ok=false`，不做事后半残派发。
+- v4 会话模式与权限：Plus 计划/Review 固定 `mode=plan`；新规划固定 `permission_mode=auto`，Review 固定 `auto`。Plan 模式不是 OS 只读沙箱，规划可无需工具确认运行 Bash 并修改文件；旧规划请求保留原权限快照；任务执行固定 `mode=goal`（§5.23.9）；kp-e02 后不再有控制端会话。没有自动批准 Plus 工具权限的通道。
 - v4 Review fix 优先级枚举：`no-priority|low|medium|high|urgent`；`register-review` 身份字段：`request_id`、`expected_execution_run_id`（新自动链路必传）。
 - 已知限制：Kaneo 服务端无 CAS，桥接的先读后写有远端并发窗口；本地事务只序列化本地写入，不声称阻止人工远端竞争。
 

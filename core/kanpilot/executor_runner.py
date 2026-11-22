@@ -19,12 +19,11 @@ CLI：``python -m kanpilot.executor_runner --stage <dispatch|monitor|review>``
 
 退出码：0=正常结束（无请求立即结束也属正常）；1=拉起失败/超时/异常。
    v4（§5.24.4/§5.24.5，T6.3）：按该 stage 的**控制端后端**分流——
-   dispatch/monitor 读 ``settings.exec_config.controller_backend``，review 读
-   ``settings.review_config.backend``；``pi``（缺省）分支行为与 v1.6 完全相同
-   （本文件一字不改地继续拉起 pi CLI）；``pi_desktop`` 分支交给
-   ``kanpilot.pi_desktop_controller``（dispatch/monitor）与
-   ``kanpilot.pi_desktop_review``（review），在 Plus 本机 MCP 控制面建独立
-   会话运行同一角色 prompt，**不再**拉起 ``pi -p``。
+   只有 review 会走到本文件下面的模型分支：``review_config.backend`` 为
+   ``pi_desktop`` 时交给 ``kanpilot.pi_desktop_review``，否则拉起 ``pi -p``。
+   dispatch / monitor / delivery 是确定性流程（``auto_dispatch`` /
+   ``auto_monitor`` / ``delivery_runner``），kp-e02 后退伍的
+   ``controller_backend`` 不再参与任何选择。
 
 """
 
@@ -125,23 +124,6 @@ def _record_run(conn, stage: str, **fields) -> dict:
     return entry
 
 
-def controller_backend(conn, stage: str) -> str:
-    """该 stage 的控制端后端（§5.24.1）。
-
-    dispatch/monitor 读 ``settings.exec_config.controller_backend``，review 读
-    ``settings.review_config.backend``；缺失/非法值一律按 ``pi`` 解释（旧数据
-    零迁移）。``pi_desktop`` 支持模块缺失时同样回落 ``pi``——**不让** Plus
-    控制端模块的存在与否影响 pi 分支。
-    """
-    try:
-        from . import pi_desktop_controller
-    except (ImportError, SyntaxError):
-        return constants.CONTROLLER_BACKEND
-    if stage == "review":
-        return pi_desktop_controller.review_round_config(conn)[0]
-    return pi_desktop_controller.controller_round_config(conn)[0]
-
-
 def run_stage(stage: str, resume: bool = False) -> int:
     if stage not in STAGES:
         print(f"unknown stage: {stage}", file=sys.stderr)
@@ -158,7 +140,7 @@ def run_stage(stage: str, resume: bool = False) -> int:
         if resume:
             runs = db.get_setting(conn, "executor_runs", {}) or {}
             saved = runs.get("review") or {}
-            selected_review_backend = saved.get("backend") or controller_backend(conn, stage)
+            selected_review_backend = saved.get("backend") or review_config.backend(conn)
         else:
             candidate = cmd_exec._select_candidate(conn, "review", None, util.now_dt())
             if candidate is None:
@@ -182,18 +164,21 @@ def run_stage(stage: str, resume: bool = False) -> int:
         return cli_review.run_stage(stage, conn=conn, db_path=constants.default_db_path(), timeout=timeout,
                                     log_path=log_path, record_run=lambda **fields: _record_run(conn, stage, **fields), resume=resume,
                                     request_id=selected_request_id, config_override=selected_review_config)
+    # kp-e02：dispatch / monitor / delivery 在上面的确定性分支就返回了，
+    # 走到这里的只可能是 review；其余情况是内部调用错误，直接报错而不是
+    # 去渲染一份已经不存在的 prompt。
+    if stage != "review":
+        print(f"stage {stage} 由确定性 worker 处理，不走 prompt 路径", file=sys.stderr)
+        return 2
     prompt = render_prompt(stage)
     sessions_dir = _sessions_dir(stage)
 
-    # v4（§5.24.4/§5.24.5）：按该 stage 的控制端后端分流。pi_desktop 分支在
-    # Plus 本机 MCP 控制面建独立会话运行同一角色 prompt，**不**拉起 pi -p；
-    # pi 分支（缺省）以下代码与 v1.6 完全一致。
-    if (selected_review_backend if stage == "review" else controller_backend(conn, stage)) == "pi_desktop":
-        from . import pi_desktop_controller, pi_desktop_review
+    # kp-e02：只有 review 会到这里。review_config.backend=pi_desktop 时在 Plus
+    # 本机 MCP 控制面建会话跑同一角色 prompt；否则下面按 v1.6 的 pi 路径拉起。
+    if selected_review_backend == "pi_desktop":
+        from . import pi_desktop_review
 
-        runner = (
-            pi_desktop_review if stage == "review" else pi_desktop_controller
-        )
+        runner = pi_desktop_review
         return runner.run_stage(
             stage, conn=conn, db_path=constants.default_db_path(),
             prompt=prompt, timeout=timeout, log_path=log_path,

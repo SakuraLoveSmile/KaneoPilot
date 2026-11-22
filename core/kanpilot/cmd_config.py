@@ -17,11 +17,11 @@ from . import (
     constants, db, exec_config, pi_desktop_backend, project_config, review_config, util,
 )
 
-# set-exec-config 允许的字段：契约四字段 + v3 后端扩展 + v4 控制器后端。
+# set-exec-config 允许的字段：契约四字段 + v3 后端扩展。
+# kp-e02：controller_backend 已退役（调度是确定性流程），不再接受该字段。
 _SET_FIELDS = (
     ("execution_question_max_wait_seconds",) + constants.EXEC_CONFIG_KEYS
-    + ("backend", "pi_desktop", "codex", constants.CONTROLLER_BACKEND_KEY,
-       constants.ONE_SHOT_CONFIG_KEY)
+    + ("backend", "pi_desktop", "codex", constants.ONE_SHOT_CONFIG_KEY)
 )
 _PI_DESKTOP_THINKING_LEVELS = (
     "off", "minimal", "low", "medium", "high", "xhigh", "max",
@@ -75,18 +75,17 @@ def cmd_get_exec_config(ctx, payload: dict) -> dict:
 
 def cmd_set_exec_config(ctx, payload: dict) -> dict:
     """set-exec-config {provider?, model?, reasoning_effort?, agent_preset?,
-    backend?, controller_backend?, pi_desktop?}（至少一个字段）。校验/保存经
-    ``exec_config.save``——当前生效 backend/controller_backend 的必填组合整体
-    校验，失败 bad_request + 中文原因（不静默降级、不自动换模型/agent/后端）。
-    成功写 event exec_config_updated（detail 脱敏：pi 分支四字段 +
-    controller_backend；pi_desktop 分支五字段含 connection_file 路径——token
-    绝不记）→ {"config": {...}}。"""
+    backend?, pi_desktop?}（至少一个字段）。校验/保存经
+    ``exec_config.save``——当前生效 backend 的必填组合整体校验，失败
+    bad_request + 中文原因（不静默降级、不自动换模型/agent/后端）。
+    成功写 event exec_config_updated（detail 脱敏：pi 分支四字段；pi_desktop
+    分支五字段含 connection_file 路径——token 绝不记）→ {"config": {...}}。"""
     fields = {key: payload[key] for key in _SET_FIELDS if key in payload}
     if not fields:
         raise util.bad_request(
             "set-exec-config 至少提供一个字段"
             "（provider / model / reasoning_effort / agent_preset / "
-            "backend / controller_backend / pi_desktop / codex）"
+            "backend / pi_desktop / codex）"
         )
     config = exec_config.save(ctx.conn, fields, ctx.now_iso)
     db.add_event(
@@ -97,20 +96,14 @@ def cmd_set_exec_config(ctx, payload: dict) -> dict:
 
 
 def _exec_config_event_detail(config: dict) -> dict:
-    """事件 detail 脱敏快照：pi 分支沿用契约四字段 + ``controller_backend``
-    （v4 扩展，保留旧字段）；pi_desktop 分支记 backend + controller_backend +
-    五字段（connection_file 为普通路径可记，token 绝不记）。"""
-    controller = (
-        config.get(constants.CONTROLLER_BACKEND_KEY) or "pi"
-    )
+    """事件 detail 脱敏快照：pi 分支沿用契约四字段；pi_desktop 分支记
+    backend + 五字段（connection_file 为普通路径可记，token 绝不记）。"""
     if config.get("backend") == "codex":
-        return {"backend": "codex", constants.CONTROLLER_BACKEND_KEY: controller,
-                "codex": dict(config.get("codex") or {})}
+        return {"backend": "codex", "codex": dict(config.get("codex") or {})}
     if config.get("backend") == "pi_desktop":
         block = config.get("pi_desktop") or {}
         detail = {
             "backend": "pi_desktop",
-            constants.CONTROLLER_BACKEND_KEY: controller,
             **{key: block.get(key)
                for key in constants.EXEC_PI_DESKTOP_KEYS},
         }
@@ -120,10 +113,7 @@ def _exec_config_event_detail(config: dict) -> dict:
             detail[constants.ONE_SHOT_CONFIG_KEY] = {
                 key: one_shot.get(key) for key in constants.ONE_SHOT_CONFIG_KEYS}
         return detail
-    return {
-        **{key: config[key] for key in constants.EXEC_CONFIG_KEYS},
-        constants.CONTROLLER_BACKEND_KEY: controller,
-    }
+    return {key: config[key] for key in constants.EXEC_CONFIG_KEYS}
 
 
 def cmd_exec_capabilities(ctx, payload: dict) -> dict:

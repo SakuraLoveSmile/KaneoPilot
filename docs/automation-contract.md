@@ -1,6 +1,6 @@
 # KaneoPilot 执行端契约（现状）
 
-现行冻结契约以 protocol §5.27 为准。App 的 EngineSupervisor 监督 engine run 并读取核心状态；引擎 intake 每 300 秒；dispatch/monitor/delivery 均为确定性 Python，不调用控制模型。controller_backend 只作旧配置展示，不作为保存或运行门。
+现行冻结契约以 protocol §5.27 为准。App 的 EngineSupervisor 监督 engine run 并读取核心状态；引擎 intake 每 300 秒；dispatch/monitor/delivery 均为确定性 Python，不调用控制模型。controller_backend 已随 kp-e02（2026-11-22）退役：核心不再读写该字段，旧值忽略、零迁移。
 
 跨 Harness 边界见 [harness-contract.md](harness-contract.md)（protocol §5.30）。新规划、执行、评审与交付冻结 `kp-stage-v1` 输入，并在既有业务核证后消费结果信封；新记录损坏或缺必要结果不降级为旧记录。能力按语义探测，unknown 不代表支持。当前执行仍限实际可控的 Plus；Codex/Claude CLI 接入共同规划/评审契约，不因此取得执行权限。验证命令始终由执行端运行。
 
@@ -12,7 +12,7 @@
 
 本节覆盖当前生效行为；完整接口、载荷和失败语义见 protocol §5.27。
 
-- **dispatch/monitor** 不再调用模型，不看 controller_backend，经 `cli.run` 驱动确定性流程；monitor 使用 `task.run_id` 观察执行，`advance-task` 不传 `request_id`，被动同步 `in-review`/`in-review` 与 `done`/`done` 均允许。
+- **dispatch/monitor** 不调用模型、也不再有控制端配置，经 `cli.run` 驱动确定性流程；monitor 使用 `task.run_id` 观察执行，`advance-task` 不传 `request_id`，被动同步 `in-review`/`in-review` 与 `done`/`done` 均允许。
 - 所有普通项目统一使用新引擎，以核心结构化 verdict 与已验证提交树为判定源；质量失败自动补救，身份不明与环境失败分别进入 attention，旧模式不绕过验证，见 protocol §5.27.7/11–12。
 - intake 每 300 秒，只接收开启且就绪项目的 To Do，保留人工筛选前提；自动确认由 tick 执行。
 - Review 统一结算：手动任务保留跨任务修复，自动化任务 `changes_requested` 在同任务分支最多修复 2 轮并受段预算约束，`pass` 只登记。

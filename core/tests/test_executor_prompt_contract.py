@@ -1,6 +1,6 @@
 """执行端 prompt 契约（protocol.md §5.24.4/§5.24.5，v4 T6.3）。
 
-四个 prompt（_preamble/dispatch/monitor/review）必须与冻结契约一致：
+kp-e02 之后只剩 review（与它的 _preamble）走 prompt 路径；dispatch/monitor 是确定性流程。
 
 - 角色流程 + 控制端后端分支都写明（``pi`` 分支遵守核心命令契约；``pi_desktop`` 分支在
   Plus ``mode="agent"`` 控制会话里跑同一角色 prompt，**不**拉起 ``pi -p``）。
@@ -26,75 +26,10 @@ def read(name: str) -> str:
     return (PROMPTS / name).read_text(encoding="utf-8")
 
 
-class DispatchPromptBackendContractTests(unittest.TestCase):
-    def test_prepare_and_confirm_use_claimed_backend_and_config_snapshot(self):
-        prompt = read("dispatch.md")
-
-        self.assertIn("pi_desktop", prompt)
-        self.assertIn('"backend":<context.backend>', prompt)
-        self.assertIn("context.exec_config 原样", prompt)
-        self.assertNotIn('"backend":"pi"', prompt)
-
-    def test_controller_backend_branches_are_documented(self):
-        prompt = read("dispatch.md")
-
-        self.assertIn("controller_backend", prompt)
-        self.assertIn('`mode="agent"`', prompt)
-        self.assertIn("`pi -p --mode json`", prompt)
-        self.assertIn("{KANPILOT}", prompt)
-        self.assertIn("queued", prompt)
-
-    def test_plus_branch_keeps_same_role_flow_and_stop_policy(self):
-        prompt = read("dispatch.md")
-
-        # 角色流程与命令一字未变（Plus 分支只改控制轮，不改流程）。
-        for token in ("dispatch-prepare", "dispatch-begin-send",
-                      "dispatch-start", "dispatch-confirm", "dispatch-fail"):
-            self.assertIn(token, prompt, token)
-        self.assertIn("stale_run", prompt)
-        self.assertIn("不**重发", prompt)
-
-
-class PreambleContractTests(unittest.TestCase):
-    def test_explicit_host_environment_and_wrapper(self):
-        preamble = read("_preamble.md")
-
-        for key in HOST_ENV_KEYS:
-            self.assertIn(key, preamble, key)
-        self.assertIn("包装器", preamble)
-        self.assertIn("{KANPILOT}", preamble)
-        self.assertIn("不继承", preamble)
-
-    def test_queue_control_round_and_permission_semantics(self):
-        preamble = read("_preamble.md")
-
-        self.assertIn("已排队 ≠ 已开始", preamble)
-        self.assertIn("控制模型回合", preamble)
-        self.assertIn("权限", preamble)
-        self.assertIn("send_state=unknown", preamble)
-        self.assertIn("**不重发**", preamble)
-
-    def test_report_root_is_task_and_run_scoped(self):
-        preamble = read("_preamble.md")
-
-        self.assertIn("<task_id>/<run_id>.md", preamble)
-        self.assertIn("{APP_SUPPORT}/reports", preamble)
-
-
-class MonitorPromptContractTests(unittest.TestCase):
-    def test_monitor_never_creates_execution_sessions(self):
-        prompt = read("monitor.md")
-
-        self.assertIn("新建任务执行会话", prompt)
-        self.assertIn("round-observe", prompt)
-        self.assertIn("session-messages", prompt)
-        self.assertIn("控制模型回合结束", prompt)
-
-
 class ReviewPromptContractTests(unittest.TestCase):
     def test_plus_branch_requires_raw_markdown_transport(self):
         prompt = read("review.md")
-
+        self.assertIn("pi_desktop", prompt)
         self.assertIn("review_text_v1", prompt)
         self.assertIn("**不要输出 JSON**", prompt)
         self.assertIn("pass/changes_requested/blocked", prompt)
@@ -136,7 +71,7 @@ class ReviewPromptContractTests(unittest.TestCase):
 
 
 class PromptRenderingContractTests(unittest.TestCase):
-    """渲染层：四种 prompt 仍能展开 {PREAMBLE} 与固定路径占位符。"""
+    """渲染层：review prompt 仍能展开 {PREAMBLE} 与固定路径占位符（kp-e02 后只剩它）。"""
 
     def setUp(self):
         import sys
@@ -146,7 +81,7 @@ class PromptRenderingContractTests(unittest.TestCase):
         self.executor_runner = executor_runner
 
     def test_render_expands_preamble_for_every_stage(self):
-        for stage in ("dispatch", "monitor", "review"):
+        for stage in ("review",):
             prompt = self.executor_runner.render_prompt(stage)
             self.assertNotIn("{PREAMBLE}", prompt, stage)
             self.assertNotIn("{PYTHON}", prompt, stage)
@@ -163,7 +98,7 @@ class PromptRenderingContractTests(unittest.TestCase):
         for executable in (sys.executable,
                            "/Applications/Kaneo Pilot.app/Contents/Resources/python/bin/python3"):
             with mock.patch.object(sys, "executable", executable):
-                prompt = self.executor_runner.render_prompt("dispatch")
+                prompt = self.executor_runner.render_prompt("review")
             command = f"{shlex.quote(executable)} {core_script} <command>"
             self.assertIn(command, prompt, executable)
         # 路径含空格时必须带引号，否则执行端 shell 会把它拆成两个词。
@@ -176,7 +111,7 @@ class PromptRenderingContractTests(unittest.TestCase):
         for empty in ("", None):
             with mock.patch.object(sys, "executable", empty):
                 with self.assertRaises(self.executor_runner.util.KanpilotError) as ctx:
-                    self.executor_runner.render_prompt("dispatch")
+                    self.executor_runner.render_prompt("review")
             self.assertEqual(ctx.exception.code, "validation_failed")
         self.assertNotIn("python3 {KANPILOT}", read("_preamble.md"))
 

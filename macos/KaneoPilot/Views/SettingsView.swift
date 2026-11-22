@@ -248,8 +248,6 @@ struct SettingsView: View {
     @State private var plProviderId = ""
     @State private var plModelId = ""
     @State private var plThinkingLevel = ""
-    /// 派发与监控运行端（controller_backend：pi|pi_desktop；缺省 pi）。
-    @State private var selControllerBackend = "pi"
     /// Review 运行端（pi|pi_desktop；缺省 pi）与 Plus 五字段草稿。
     @State private var reviewBackend = "pi"
     @State private var rvModelSource = "custom"
@@ -383,12 +381,6 @@ struct SettingsView: View {
             Task { await model.refreshReviewCapabilities() }
         }
         .onChange(of: selBackend) { _, _ in
-            invalidatePiDesktopCatalog()
-            guard plusBlockInPlay else { return }
-            ensurePiDesktopConnectionFile()
-            Task { await refreshPiDesktopCatalog() }
-        }
-        .onChange(of: selControllerBackend) { _, _ in
             invalidatePiDesktopCatalog()
             guard plusBlockInPlay else { return }
             ensurePiDesktopConnectionFile()
@@ -1188,27 +1180,6 @@ struct SettingsView: View {
         return "当前生效：\(RoleBackend.label(base.effectiveBackend))（\(saved)）"
     }
 
-    /// §5.24.1：派发与监控运行端实际生效值。
-    private var controllerEffectiveText: String {
-        guard let base = execConfig else {
-            return "当前生效：Pi CLI（缺省，未保存）"
-        }
-        return "当前生效：\(RoleBackend.label(base.effectiveControllerBackend))"
-    }
-
-    /// §5.24.2：控制器就绪态与任务执行就绪态分开展示。
-    private func controllerReadinessText(_ caps: ExecCapabilitiesResponse) -> String {
-        guard let controller = caps.controller else {
-            return "核心未上报控制端（controller）就绪态"
-        }
-        let backend = RoleBackend.shortLabel(
-            controller.backend ?? selControllerBackend)
-        guard let text = controller.readinessText else {
-            return "控制端 \(backend)：就绪态未知"
-        }
-        return "控制端 \(backend)：\(text)"
-    }
-
     /// v3 §5.23.3 pi_desktop 分支：连接文件（mcp-control.json）+ provider/
     /// model/thinking_level/permission_mode + 只读「检测」。
     @ViewBuilder
@@ -1660,8 +1631,6 @@ struct SettingsView: View {
         execCodexModel = base.codex?.model ?? execDefaults?.codex?.model ?? ""
         execCodexEffort = base.codex?.reasoningEffort ?? execDefaults?.codex?.reasoningEffort ?? ""
         execCodexSandbox = base.codex?.effectiveSandbox ?? execDefaults?.codex?.effectiveSandbox ?? "workspace-write"
-        // v4 §5.24.1：派发与监控运行端（旧核心未返回 → pi）。
-        selControllerBackend = base.effectiveControllerBackend
         // pi_desktop 五字段草稿（旧核心未返回 → 全空）。
         pdModelSource = base.piDesktop?.effectiveModelSource ?? "custom"
         pdConnectionFile = base.piDesktop?.connectionFile ?? ""

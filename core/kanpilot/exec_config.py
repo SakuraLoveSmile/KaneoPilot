@@ -28,14 +28,9 @@ PI-Desktop 连接文件 token 的内存探测），本模块任何输出都不�
   /§5.23.3）。backend=pi 为既有检查链（含凭据就绪）；backend=pi_desktop
   要求配置块已保存且 probe_connection 可用，失败 → (False, 中文原因)，
   **不自动切回 pi**。
-- v4（§5.24.1）：``controller_backend``（``pi``|``pi_desktop``，缺省 ``pi``）只控制
-  dispatch/monitor 控制端，与任务执行 ``backend`` 并存、互不覆盖；缺字段/未知值
-  一律按 ``pi`` 解释（旧数据零迁移），切换不删除另一分支已存字段。
-- controller_snapshot/controller_capabilities/check_controller_available：控制轮
-  自身的固化快照与就绪态。``pi`` 分支沿用 PI CLI 检查（可执行 + 版本），
-  ``pi_desktop`` 分支复用同一探针但只要求 ``PI_DESKTOP_CONTROLLER_TOOLS``
-  （控制端**不**建 Goal 会话，故不需要契约审批工具）；控制器就绪态与任务执行
-  就绪态分开，不用其一推断另一，失败**不**自动回落 pi。
+- kp-e02（2026-11-22）：``controller_backend`` 已退役。dispatch / monitor /
+  delivery 是确定性流程（``auto_dispatch`` / ``auto_monitor`` / ``delivery_runner``，
+  不经任何模型），因此不存在「控制端后端」这个配置；旧值读取后忽略，零迁移。
 """
 
 from __future__ import annotations
@@ -63,12 +58,11 @@ PI_DESKTOP_THINKING_LEVELS = (
 
 
 def _merge(stored: Optional[dict]) -> dict:
-    """defaults ← stored 合并；v3 起另认 backend/pi_desktop 扩展字段，v4 另认
-    ``controller_backend``。
+    """defaults ← stored 合并；v3 起另认 backend/pi_desktop 扩展字段。
 
-    缺 ``backend`` 按 ``"pi"`` 解释、缺 ``controller_backend`` 同样按 ``"pi"``；
-    stored 里 unknown 值同样回落（旧数据零迁移）。``pi_desktop`` 只保留契约
-    五字段的非空字符串；整块缺失/为空 → None。未知字段忽略。
+    缺 ``backend`` 按 ``"pi"`` 解释，stored 里 unknown 值同样回落（旧数据零迁移）。
+    ``pi_desktop`` 只保留契约五字段的非空字符串；整块缺失/为空 → None。
+    未知字段（含已退役的 ``controller_backend``）忽略。
     """
     config = dict(constants.EXEC_CONFIG_DEFAULTS)
     config["execution_question_max_wait_seconds"] = constants.EXECUTION_QUESTION_MAX_WAIT_SECONDS
@@ -80,15 +74,11 @@ def _merge(stored: Optional[dict]) -> dict:
             if isinstance(value, str) and value:
                 config[key] = value
         config["backend"] = _exec_backend(stored.get("backend"))
-        config[constants.CONTROLLER_BACKEND_KEY] = _controller_backend(
-            stored.get(constants.CONTROLLER_BACKEND_KEY)
-        )
         config["pi_desktop"] = _merge_pi_desktop(stored.get("pi_desktop"))
         config[constants.ONE_SHOT_CONFIG_KEY] = _merge_one_shot(
             stored.get(constants.ONE_SHOT_CONFIG_KEY))
     else:
         config["backend"] = "pi"
-        config[constants.CONTROLLER_BACKEND_KEY] = "pi"
         config["pi_desktop"] = None
         config[constants.ONE_SHOT_CONFIG_KEY] = None
     from . import codex_execution
@@ -101,11 +91,6 @@ def _merge(stored: Optional[dict]) -> dict:
 def _exec_backend(value) -> str:
     """任务执行后端规范化（§5.23.3）：缺省/未知值 → "pi"（旧数据零迁移）。"""
     return value if value in constants.EXEC_BACKENDS else "pi"
-
-
-def _controller_backend(value) -> str:
-    """控制器后端规范化（§5.24.1）：缺省/未知值 → "pi"（旧数据零迁移）。"""
-    return value if value in constants.CONTROLLER_BACKENDS else "pi"
 
 
 def _merge_pi_desktop(block: Optional[dict]) -> Optional[dict]:
@@ -280,8 +265,8 @@ def snapshot_with_model_override(conn: sqlite3.Connection, task) -> dict:
 def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
     """校验并合并保存（§5.23.3 + §5.24.1）。
 
-    fields 可为契约四字段子集、``backend``、``controller_backend``、
-    ``pi_desktop``（dict）。按**当前生效 backend/controller_backend** 的必填组合
+    fields 可为契约四字段子集、``backend``、``pi_desktop``（dict）。
+    按**当前生效 backend** 的必填组合
     整体校验：pi → validate_config；pi_desktop → 五字段齐全 + connection_file
     绝对路径 + thinking_level / permission_mode 合法（不允许缺省/inherit）。
     选择 ``pi_desktop``（任一处）都要求同一五字段块完整。保存切换不删除另一组
@@ -308,15 +293,6 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
             f"（可用：{', '.join(constants.EXEC_BACKENDS)}）"
         )
     merged_stored["backend"] = backend
-    if constants.CONTROLLER_BACKEND_KEY in fields:
-        controller = fields[constants.CONTROLLER_BACKEND_KEY]
-        # 显式提交则必须是合法枚举（不静默回落 pi——保存失败比暗改语义安全）。
-        if controller not in constants.CONTROLLER_BACKENDS:
-            raise util.bad_request(
-                f"{constants.CONTROLLER_BACKEND_KEY} 不支持：{controller}"
-                f"（可用：{', '.join(constants.CONTROLLER_BACKENDS)}）"
-            )
-        merged_stored[constants.CONTROLLER_BACKEND_KEY] = controller
     if "pi_desktop" in fields:
         block = fields["pi_desktop"]
         if not isinstance(block, dict):
@@ -375,8 +351,8 @@ def save(conn: sqlite3.Connection, fields: dict, now: str) -> dict:
 
     # 当前生效 backend 的必填组合整体校验；显式提交的 pi_desktop 块即使
     # backend=pi 也先验完整性（避免保存残块）。
-    # 当前生效 backend/controller_backend 的必填组合整体校验；显式提交的
-    # pi_desktop 块即使两个 backend 都用 pi 也先验完整性（避免保存残块）。
+    # 当前生效 backend 的必填组合整体校验；显式提交的 pi_desktop 块即使
+    # backend 是 pi 也先验完整性（避免保存残块）。
     needs_block = (
         "pi_desktop" in fields
         or merged["backend"] == "pi_desktop"
@@ -737,8 +713,6 @@ def capabilities(
         "codex": codex,
         "pi": {"path": pi_path, "version": version, "home": str(pi_home)},
         "pi_desktop": pi_desktop,
-        # v4（§5.24.2）：控制器就绪态与任务执行就绪态分开计算、分开展示。
-        "controller": controller_capabilities(conn, timeout=timeout),
         "providers": [
             {"id": p["id"], "display_name": p["display_name"],
              "models": p["models"]}
@@ -961,122 +935,5 @@ def check_available(
     if error is not None:
         return False, f"pi 执行配置无效：{error}"
     return True, None
-
-
-# ------------------------------------------------------------- 控制器（v4）
-
-def controller_backend(conn: sqlite3.Connection) -> str:
-    """当前生效的控制器后端（§5.24.1）：pi（缺省）或 pi_desktop。"""
-    return load(conn)[constants.CONTROLLER_BACKEND_KEY]
-
-
-def controller_snapshot(conn: sqlite3.Connection) -> dict:
-    """控制轮固化快照（§5.24.4 / T7.1 / T7.3）：pi → {backend:"pi"}；
-    pi_desktop → {backend:"pi_desktop", 五字段}（脱敏、无 token）。
-    """
-    config = load(conn)
-    if config.get(constants.CONTROLLER_BACKEND_KEY) == "pi_desktop":
-        block = config.get("pi_desktop") or {}
-        resolved, error = resolve_runtime_config(conn, block)
-        if resolved is None:
-            raise util.KanpilotError(
-                "validation_failed",
-                f"pi_desktop 控制端配置快照解析失败：{error or '未知原因'}",
-            )
-        return {"backend": "pi_desktop", **resolved}
-    return {"backend": "pi"}
-
-
-def _controller_block(config: dict) -> Optional[dict]:
-    """控制器分支的五字段块：已保存配置是嵌套块，轮次快照是扁平字段。"""
-    block = config.get("pi_desktop")
-    if block is None:
-        block = {
-            key: config.get(key) for key in constants.EXEC_PI_DESKTOP_KEYS
-        }
-    return block if isinstance(block, dict) else None
-
-
-def controller_capabilities(
-    conn: Optional[sqlite3.Connection] = None, timeout: int = 10, *,
-    config_snapshot: Optional[dict] = None,
-) -> dict:
-    """``exec-capabilities.controller``（§5.24.2）→ {backend, available, detail}。
-
-    - ``pi``（缺省）：沿用 PI CLI 检查（可执行 + 版本）。凭据/模型就绪属任务
-      执行检查（``checks``），不在控制器就绪里重复声称。
-    - ``pi_desktop``：五字段块已保存 + 结构有效 + 连接探测通过，工具门为
-      ``PI_DESKTOP_CONTROLLER_TOOLS``（控制端不建 Goal 会话，故不需要契约
-      审批工具）。失败给中文原因，**不**自动回落 pi。
-    """
-    if config_snapshot is None:
-        config = load(conn) if conn is not None else {
-            **constants.EXEC_CONFIG_DEFAULTS,
-            "backend": "pi",
-            constants.CONTROLLER_BACKEND_KEY: "pi",
-            "pi_desktop": None,
-        }
-    elif isinstance(config_snapshot, dict):
-        config = dict(config_snapshot)
-    else:
-        config = {}
-    backend = _controller_backend(
-        config.get(constants.CONTROLLER_BACKEND_KEY)
-    )
-    if backend == "pi":
-        version, error = _probe_version(timeout)
-        return {
-            "backend": "pi",
-            "available": version is not None,
-            "detail": (
-                f"Pi CLI {version}（继承本机 PI 默认会话配置）"
-                if version is not None
-                else (error or "Pi CLI 不可用")
-            ),
-        }
-    block = _controller_block(config)
-    error = validate_pi_desktop_block(block)
-    if error is not None:
-        return {
-            "backend": "pi_desktop",
-            "available": False,
-            "detail": f"pi_desktop 控制端配置无效：{error}",
-        }
-    probe = _probe_pi_desktop(
-        block, timeout=timeout,
-        required_tools=constants.PI_DESKTOP_CONTROLLER_TOOLS,
-    )
-    detail = probe["detail"]
-    if probe["available"] and not probe["tools_ok"]:
-        # 探测自身已按同一工具门判定；此处只兜底防御，避免「可用」却缺工具。
-        detail = detail or "PI-Desktop 控制面缺少控制器必需工具"
-    return {
-        "backend": "pi_desktop",
-        "available": bool(probe["available"] and probe["tools_ok"]),
-        "detail": detail or (
-            f"PI-Desktop 控制面就绪（协议版本 {probe['version']}）"
-            if probe["available"] else "PI-Desktop 控制面不可用"
-        ),
-    }
-
-
-def check_controller_available(
-    conn: sqlite3.Connection, timeout: int = 10, *,
-    config_snapshot: Optional[dict] = None,
-) -> Tuple[bool, Optional[str]]:
-    """dispatch/monitor 控制端启动前的可用性门（§5.24.4）。
-
-    显式传入的控制轮快照（``controller_snapshot`` 形状，扁平或嵌套块）优先，
-    不回读后来被改动的设置；失败 → (False, 中文原因)，调用方按
-    ``pi_desktop_controller_unavailable`` 明确失败，**不**自动回退 pi。
-    """
-    caps = controller_capabilities(
-        conn, timeout=timeout, config_snapshot=config_snapshot,
-    )
-    if caps["available"]:
-        return True, None
-    return False, caps["detail"]
-
-
 # 兼容 v3 私有名（外部/旧测试引用）。
 _validate_pi_desktop_block = validate_pi_desktop_block
