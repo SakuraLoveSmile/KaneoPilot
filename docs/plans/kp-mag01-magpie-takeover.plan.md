@@ -5,7 +5,7 @@
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261122-feat-kp-mag01-magpie-takeover`
 - 基点：main `b0cafd0`；创建日期 2026-11-22（台北）
 - 合入目标：main（PR）
-- 状态：实现中（核心已落地，桌面 UI 与 Pi-Desktop 提示未做）
+- 状态：实现中（核心 + 桌面面板代码已落地；Swift 编译与实机体验待云端 Packages 验证）
 
 ## 目标与范围
 
@@ -50,6 +50,14 @@
 - `core/kanpilot/cmd_config.py` + `core/kanpilot/cli.py`：新命令
   `magpie-agent {path?}`。
 - `core/tests/test_magpie_agent.py`（新）：11 条隔离用例。
+- `macos/KaneoPilot/Core/Models.swift`：`MagpieAgentResponse`（`magpie-agent` 脱敏视图）。
+- `macos/KaneoPilot/AppViewModel.swift`：`magpieAgent` / `magpieActive` +
+  `loadMagpieAgent()`；`refreshPlannerConfig` 并发读取接管状态。
+- `macos/KaneoPilot/Views/SettingsView.swift`：
+  - 规划/评审运行端只列 `RoleBackends` 白名单（Codex、Codex Desktop、Pi-Desktop-Plus；
+    Review 加 Pi CLI），Claude / Qoder 暂不启用，读到旧值回落并提示；
+  - 接管生效时 Codex 规划两组、Codex Review 改为只读「Magpie 已接管 · 模型 · 网关」
+    行，不再显示模型/思考等级编辑器；评审保存校验跳过空模型。
 - `docs/protocol.md` §5.33。
 - 插件包（仓库外）：`~/Documents/Code/Project/Personal Project/magpie-agent-kaneopilot`
   （`kaneopilot.agent.js`、`package.json`、`icon.png`、`README.md`）。
@@ -67,6 +75,9 @@
 6. 模型替换只作用于 codex/claude，qoder 原样。
 7. 网关连通性（人工，非测试）：`curl /v1/models`、`POST /v1/responses`、
    `POST /v1/messages` 均 200（2026-11-22 实测）。
+8. 面板（待云端编译与实机）：接管生效时规划面板只显示「Magpie 已接管 · 模型 · 网关」，
+   不再出现模型/思考等级编辑器；运行端下拉里没有 Claude / Qoder；已保存 Claude 规划时
+   显示「暂不启用，保存后切回 Codex」。
 
 ## 实测
 
