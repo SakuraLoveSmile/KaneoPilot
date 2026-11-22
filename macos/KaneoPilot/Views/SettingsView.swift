@@ -1643,13 +1643,18 @@ struct SettingsView: View {
         selModel = base.model ?? ""
         selEffort = base.reasoningEffort ?? ""
         selPreset = base.agentPreset ?? ""
-        // 2026-11-22：pi 执行不再支持——旧值回落到 Pi-Desktop-Plus 并在面板提示。
-        let savedExecBackend = base.effectiveBackend
-        if savedExecBackend == "pi" {
-            selBackend = "pi_desktop"
-            execLegacyBackend = "pi"
+        // 2026-11-22：pi 执行不再支持。只在「确实保存过旧值」时提示；
+        // 从未保存过（后端缺省 pi）直接落到新默认 Pi-Desktop-Plus，不吓人。
+        if let savedExecBackend = execConfig?.effectiveBackend {
+            if savedExecBackend == "codex" || savedExecBackend == "pi_desktop" {
+                selBackend = savedExecBackend
+                execLegacyBackend = nil
+            } else {
+                selBackend = "pi_desktop"
+                execLegacyBackend = savedExecBackend
+            }
         } else {
-            selBackend = savedExecBackend
+            selBackend = "pi_desktop"
             execLegacyBackend = nil
         }
         execCodexModel = base.codex?.model ?? execDefaults?.codex?.model ?? ""
@@ -2903,13 +2908,18 @@ struct SettingsView: View {
         selReviewEffort = config?.reasoningEffort ?? ""
         // §5.24.1：Review 运行端与 Plus 五字段草稿（打开面板时的读取与取消才覆盖）。
         // §5.33：Review 只保留 Pi CLI / Codex / Pi-Desktop-Plus；Claude、Qoder 暂不启用。
-        let savedReviewBackend = config?.effectiveBackend ?? RoleBackends.reviewDefault
-        if RoleBackends.review.contains(savedReviewBackend) {
-            reviewBackend = savedReviewBackend
-            reviewLegacyBackend = nil
+        // 只在确实保存过旧值时提示；从未保存过则直接落新默认 Codex CLI。
+        if let savedReviewBackend = reviewConfig?.effectiveBackend {
+            if RoleBackends.review.contains(savedReviewBackend) {
+                reviewBackend = savedReviewBackend
+                reviewLegacyBackend = nil
+            } else {
+                reviewBackend = RoleBackends.reviewDefault
+                reviewLegacyBackend = savedReviewBackend
+            }
         } else {
             reviewBackend = RoleBackends.reviewDefault
-            reviewLegacyBackend = savedReviewBackend
+            reviewLegacyBackend = nil
         }
         reviewClaudeModel = config?.claude?.model ?? "sonnet"
         reviewClaudeEffort = config?.claude?.effort ?? "high"
