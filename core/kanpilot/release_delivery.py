@@ -230,6 +230,20 @@ def _dto(batch,required=False,*,conn=None):
     return value
 
 
+def _prepare_blocker(task,delivery):
+    """The blocker of the last explicit 构建并发布 attempt, while its identity holds.
+
+    发布准备在命令里就失败了（典型：release_target_unverified），它不像同步阶段那样留下
+    观测；没有这条回执，界面只看到一次报错，却拿不到「准备验证」这个下一步。
+    """
+    value=db.task_extra(task).get('release_prepare_blocked') or {}
+    if (value.get('head_sha')!=delivery.get('head_sha') or value.get('merged_at')!=delivery.get('merged_at')
+            or not value.get('code') or not value.get('message')):
+        return None
+    return dict(state='blocked',title='发布受阻',reason=value['message'],
+                blockers=[dict(code=value['code'],message=value['message'])])
+
+
 def _last_preflight_blocker(task,delivery,member_ids):
     """Display an accepted observation only while its delivery identity matches."""
     try:
@@ -387,7 +401,7 @@ def projection(conn,task):
     value=dict(state=state,title=title,reason=reason,
         required=required,channel=policy['channel'],root_task_id=root['task_id'],member_task_ids=ids,
         assets=[],blockers=[],can_start=policy['enabled'] and not waiting,can_reconcile=False)
-    blocked=_last_preflight_blocker(root,delivery,ids) if not waiting else None
+    blocked=(_last_preflight_blocker(root,delivery,ids) or _prepare_blocker(root,delivery)) if not waiting else None
     if blocked:
         value.update(state='blocked',title='发布受阻',reason='上次发布核对：'+blocked['reason'],
                      blockers=blocked['blockers'],can_start=False)
@@ -770,12 +784,24 @@ def cmd_prepare_task_release(ctx,payload):
     if attached:
         return dict(task_id=task['task_id'],context_sha256=attached['context_sha256'],release=projection(ctx.conn,task))
     try:
-        context=_prepare(ctx,task['task_id']);value=projection(ctx.conn,task)
+        context=_prepare(ctx,task['task_id'])
+        with db.write_txn(ctx.conn):
+            fresh=db.require_task(ctx.conn,task['task_id'])
+            if 'release_prepare_blocked' in (db.task_extra(fresh) or {}):
+                extra=db.task_extra(fresh);extra.pop('release_prepare_blocked',None)
+                db.update_task(ctx.conn,fresh['task_id'],ctx.now_iso,extra_json=extra)
+        value=projection(ctx.conn,task)
         if value.get('state')=='blocked' and not value.get('batch_id'):
             value.update(state='ready',title='待构建发布',reason='已核对当前交付证据，可构建并发布版本',blockers=[],can_start=True)
         value.update(context_sha256=context['context_sha256'],target_sha=context['proof']['target_sha'],version=context['version'])
         return dict(task_id=task['task_id'],context_sha256=context['context_sha256'],release=value)
     except (ReleaseBlocked,closeout._Blocked,util.KanpilotError,gh_client.GhError,git_delivery.GitDeliveryError,OSError,ValueError) as exc:
+        code=getattr(exc,'code','release_not_ready')
+        with db.write_txn(ctx.conn):
+            fresh=db.require_task(ctx.conn,task['task_id']);d=core.delivery_of(fresh)
+            db.set_extra(ctx.conn,fresh,ctx.now_iso,release_prepare_blocked=dict(
+                code=code,message=util.redact(str(exc)),head_sha=d.get('head_sha'),
+                merged_at=d.get('merged_at'),at=ctx.now_iso))
         value=projection(ctx.conn,task)
         if value is None:
             value=dict(state='blocked',title='发布受阻',required=False,channel=DEFAULT_POLICY['channel'],root_task_id=task['task_id'],
