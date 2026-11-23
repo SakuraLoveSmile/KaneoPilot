@@ -3273,6 +3273,224 @@ struct PRAutoMergeDTO: Decodable {
     let updatedAt: String?
     var needsAttention: Bool { ["blocked", "unknown"].contains(state) }
 }
+
+// MARK: - KP-DL01 交付页（只读 PR 状态快照）
+
+/// 任务详情「交付」页的数据形状（核心命令 `get-delivery-status`）。
+///
+/// 只读：页面每次读取都会当场向 GitHub 要一次结构化 PR 状态，但从不写库、
+/// 不合并、不重跑检查。解码统一走 `JSONDecoder.kaneo`（snake_case → camelCase）。
+struct DeliveryStatusView: Decodable {
+    let taskId: String
+    let observedAt: String?
+    let live: Bool
+    let error: DeliveryStatusError?
+    let delivery: DeliveryStatusDelivery?
+    let pr: DeliveryStatusPR?
+    let gate: DeliveryStatusGate?
+    let checks: [DeliveryStatusCheck]?
+    let checksSummary: DeliveryStatusChecksSummary?
+
+    /// 已交付到 PR 才算有可观测对象；否则页面显示空态而不是报错。
+    var hasPullRequest: Bool { (delivery?.prNumber ?? 0) > 0 }
+}
+
+struct DeliveryStatusError: Decodable {
+    let code: String?
+    let message: String
+}
+
+struct DeliveryStatusDelivery: Decodable {
+    let mode: String?
+    let prNumber: Int?
+    let prUrl: String?
+    let prState: String?
+    let branch: String?
+    let baseBranch: String?
+    let headSha: String?
+    let mergedAt: String?
+    let lastSyncAt: String?
+    let nextSyncAt: String?
+    let autoMergeEnabled: Bool?
+    let notice: PRAutoMergeDTO?
+    let noticeMatchesHead: Bool?
+
+    /// 落库的上次观测是否仍对应当前交付提交：提交变了就不再把旧结论当现在。
+    var currentNotice: PRAutoMergeDTO? {
+        guard let notice, noticeMatchesHead != false else { return nil }
+        return notice
+    }
+}
+
+struct DeliveryStatusPR: Decodable {
+    let state: String?
+    let isDraft: Bool?
+    let mergeable: String?
+    let mergeStateStatus: String?
+    let reviewDecision: String?
+    let headSha: String?
+    let baseRefName: String?
+    let url: String?
+    let headMatchesDelivery: Bool?
+
+    var stateText: String {
+        switch (state ?? "").uppercased() {
+        case "OPEN": return "开放"
+        case "MERGED": return "已合并"
+        case "CLOSED": return "已关闭"
+        case "": return "未知"
+        default: return state ?? "未知"
+        }
+    }
+
+    var mergeableText: String {
+        switch (mergeable ?? "").uppercased() {
+        case "MERGEABLE": return "可合并"
+        case "CONFLICTING": return "有冲突"
+        case "UNKNOWN": return "GitHub 尚未算出"
+        case "": return "未知"
+        default: return mergeable ?? "未知"
+        }
+    }
+
+    var mergeStateText: String {
+        switch (mergeStateStatus ?? "").uppercased() {
+        case "CLEAN": return "就绪"
+        case "UNSTABLE": return "检查未全部通过"
+        case "BLOCKED": return "被保护规则阻塞"
+        case "BEHIND": return "落后于目标分支"
+        case "DIRTY": return "存在合并冲突"
+        case "DRAFT": return "草稿"
+        case "HAS_HOOKS": return "等待状态钩子"
+        case "": return "未知"
+        default: return mergeStateStatus ?? "未知"
+        }
+    }
+
+    var reviewText: String {
+        let value = reviewDecision ?? ""
+        switch value {
+        case "": return "未要求评审"
+        case "APPROVED": return "已通过"
+        case "CHANGES_REQUESTED": return "要求修改"
+        case "REVIEW_REQUIRED": return "等待评审"
+        default: return value
+        }
+    }
+}
+
+/// 合并门结论：直接来自核心的同一份 allow-list，不在这里另算一套。
+struct DeliveryStatusGate: Decodable {
+    let state: String
+    let reason: String
+    let ready: Bool?
+
+    var title: String { DeliveryPhase.text(state) }
+    /// 受阻/未就绪用警告色，与自动合并通知同一语义。
+    var needsAttention: Bool { !(ready ?? false) }
+}
+
+struct DeliveryStatusChecksSummary: Decodable {
+    let total: Int
+    let passed: Int
+    let failed: Int
+    let running: Int
+    let unknown: Int
+
+    var summaryText: String {
+        var parts: [String] = []
+        if passed > 0 { parts.append("\(passed) 通过") }
+        if failed > 0 { parts.append("\(failed) 失败") }
+        if running > 0 { parts.append("\(running) 运行中") }
+        if unknown > 0 { parts.append("\(unknown) 未知") }
+        return "共 \(total) 项" + (parts.isEmpty ? "" : " · " + parts.joined(separator: " · "))
+    }
+}
+
+/// 单项检查：按同名检查的最新一轮归组，`supersededRuns` 记更早的轮次数。
+struct DeliveryStatusCheck: Decodable, Identifiable {
+    let name: String
+    let workflow: String?
+    let state: String
+    let conclusion: String?
+    let url: String?
+    let startedAt: String?
+    let completedAt: String?
+    let supersededRuns: Int?
+
+    var id: String { (workflow ?? "") + "/" + name }
+    /// 与 GitHub 页面同口径的「workflow/检查名」。
+    var title: String { workflow.map { "\($0)/\(name)" } ?? name }
+    var stateKind: DeliveryCheckState { DeliveryCheckState(rawValue: state.lowercased()) ?? .unknown }
+    var stateText: String { stateKind.title }
+    /// 「上一轮 2 次」提示：同名检查有多轮时不让旧结果看起来像当前结果。
+    var supersededText: String? {
+        guard let supersededRuns, supersededRuns > 0 else { return nil }
+        return "另有 \(supersededRuns) 轮更早结果"
+    }
+
+    func durationText(now: Date = Date()) -> String? {
+        guard let start = TimeFormat.parse(Self.stamp(startedAt)) else { return nil }
+        let end = TimeFormat.parse(Self.stamp(completedAt)) ?? (stateKind == .running ? now : nil)
+        guard let end, end >= start else { return nil }
+        return DeliveryElapsed.text(Int(end.timeIntervalSince(start)))
+    }
+
+    /// GitHub 对未完成的检查会给出零值时间（`0001-01-01T00:00:00Z`），按「没有」处理。
+    static func stamp(_ value: String?) -> String? {
+        guard let value, !value.isEmpty, !value.hasPrefix("0001-01-01") else { return nil }
+        return value
+    }
+}
+
+enum DeliveryCheckState: String {
+    case passed, failed, running, unknown
+
+    var title: String {
+        switch self {
+        case .passed: return "通过"
+        case .failed: return "失败"
+        case .running: return "运行中"
+        case .unknown: return "未知"
+        }
+    }
+}
+
+/// 交付状态的统一文案：合并门、通知与 PR 状态共用同一套词，避免两处漂移。
+enum DeliveryPhase {
+    static func text(_ state: String?) -> String {
+        guard let raw = state?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return "未读取"
+        }
+        switch raw.lowercased() {
+        case "ready": return "可以合并"
+        case "waiting_checks": return "等待检查"
+        case "blocked": return "合并受阻"
+        case "merging": return "合并中"
+        case "merged": return "已合并"
+        case "disabled": return "未开启自动合并"
+        case "unknown": return "状态未知"
+        case "open": return "PR 已创建"
+        case "closed": return "PR 已关闭"
+        default: return raw
+        }
+    }
+}
+
+/// 检查耗时文案（秒 → 人读），交付页与夹具共用。
+enum DeliveryElapsed {
+    static func text(_ seconds: Int) -> String {
+        let value = max(0, seconds)
+        if value < 60 { return "\(value) 秒" }
+        let minutes = value / 60
+        let rest = value % 60
+        if minutes < 60 { return rest == 0 ? "\(minutes) 分" : "\(minutes) 分 \(rest) 秒" }
+        let hours = minutes / 60
+        let restMinutes = minutes % 60
+        return restMinutes == 0 ? "\(hours) 小时" : "\(hours) 小时 \(restMinutes) 分"
+    }
+}
+
 /// KP-MG03 #4：用户接受本轮评审遗留风险的只读回执。
 struct ReviewRisk: Decodable, Equatable {
     let authorizedAt: String?
