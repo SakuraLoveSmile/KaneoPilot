@@ -175,6 +175,9 @@ def test_run_stage_records_cost_before_settlement(runner_scene, tmp_path, monkey
     assert conn.execute('SELECT state FROM worktree_slots WHERE path=?',
                         (str(seen[0][1]),)).fetchone()['state'] == 'free'
     assert 'kp_task' not in seen[0][2]
+    # CLI 后端只下发 JSON 契约，不能同时要求「不要输出 JSON」的分段文本。
+    assert '<<<KANPILOT_REVIEW_V1>>>' not in seen[0][2]
+    assert '"conclusion"' in seen[0][2]
     commands = [cmd for cmd, _ in calls]
     assert commands.index('record-cost') < commands.index('report')
     cost = next(p for c, p in calls if c == 'record-cost')
@@ -362,3 +365,71 @@ def test_codex_error_events_never_accept_success_json(tmp_path, event):
                                   timeout=2, log_path=tmp_path / 'raw.jsonl', out_path=output)
     assert result['is_error']
     assert result['structured_output'] is None
+
+
+TEXT_FRAME = ('<<<KANPILOT_REVIEW_V1>>>\nconclusion: pass\npriority: no-priority\n'
+              '<<<REPORT>>>\n通过；已核对证据\n<<<FIX_TITLE>>>\n<<<FIX_DESCRIPTION>>>\n'
+              '<<<END_KANPILOT_REVIEW_V1>>>')
+
+
+def _run_codex_with_final(tmp_path, text, name='final.py'):
+    output = tmp_path / 'out.txt'
+    script = tmp_path / name
+    script.write_text('import json\nfrom pathlib import Path\n'
+                      f'Path({str(output)!r}).write_text({text!r})\n'
+                      'print(json.dumps({"type": "turn.completed"}), flush=True)\n')
+    return cli_review.run_codex([sys.executable, str(script)], prompt='', cwd=tmp_path, env={},
+                                timeout=5, log_path=tmp_path / 'raw.jsonl', out_path=output)
+
+
+def test_codex_accepts_review_text_frame_when_schema_not_enforced(tmp_path):
+    """第三方服务商不执行 --output-schema 时，合法 review_text_v1 帧仍可结算。
+
+    真实案例：Magpie 网关下的 deepseek-v4.1-flash 给出结论 pass 的分段文本，
+    last-message.txt 不是 JSON，被判「缺少有效最终 JSON」→ review_blocked。
+    """
+    result = _run_codex_with_final(tmp_path, TEXT_FRAME)
+    assert result['is_error'] is False
+    assert result['result_format'] == 'review_text_v1'
+    assert review_settle.validate_result(result['structured_output']) == RESULT
+
+
+def test_codex_unframed_prose_still_blocks(tmp_path):
+    result = _run_codex_with_final(tmp_path, '结论：通过。未发现代码缺陷。')
+    assert result['is_error'] is True
+    assert '缺少有效最终 JSON' in result['error']
+
+
+def test_cli_instruction_sends_json_frame_only():
+    facts = {'task': {'project_name': 'fixture'}}
+    job = {'task_id': 't1', 'request_id': 'r1', 'run_id': 'rv1', 'execution_run_id': 'e1'}
+    kwargs = dict(job=job, review_root=Path('/review'), materials={'files': {}}, facts=facts)
+    text = review.review_instruction('prompt', output_format=review.OUTPUT_FORMAT_JSON, **kwargs)
+    assert '<<<KANPILOT_REVIEW_V1>>>' not in text
+    assert '不要输出 JSON' not in text
+    assert '"conclusion"' in text
+    plus = review.review_instruction('prompt', **kwargs)
+    assert '<<<KANPILOT_REVIEW_V1>>>' in plus
+    with pytest.raises(ValueError):
+        review.review_instruction('prompt', output_format='yaml', **kwargs)
+
+
+def test_run_stage_keeps_text_frame_source_in_job(runner_scene, tmp_path, monkeypatch):
+    conn, task, calls = runner_scene
+    monkeypatch.setattr(review_config, 'snapshot',
+                        lambda _conn: {'backend': 'codex', 'model': 'm', 'reasoning_effort': 'high'})
+
+    def process(argv, **kwargs):
+        return {'is_error': False, 'structured_output': RESULT, 'total_cost_usd': None,
+                'result_format': 'review_text_v1',
+                'result_normalizations': ['removed_text_frame_commentary']}
+
+    monkeypatch.setattr(cli_review, 'run_codex', process)
+    code = cli_review.run_stage('review', conn=conn, db_path=tmp_path / 'isolated.db', timeout=3,
+                                log_path=tmp_path / 'review.log', record_run=lambda **kwargs: None)
+    assert code == 0
+    jobs = list((tmp_path / 'support' / 'executor-sessions' / 'review').glob('*/job.json'))
+    assert len(jobs) == 1
+    job = json.loads(jobs[0].read_text())
+    assert job['result_format'] == 'review_text_v1'
+    assert job['result_normalizations'] == ['removed_text_frame_commentary']
