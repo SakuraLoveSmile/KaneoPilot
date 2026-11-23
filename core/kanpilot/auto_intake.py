@@ -99,6 +99,22 @@ def _failure(conn, task_id, now, policy, code, message, *, input_id=None, delive
             core.block_task(conn, db.require_task(conn, task_id), now, message, code, "automation", stage="plan")
 
 
+def _material_issue_message(issues) -> str:
+    """把 materials 问题摊进失败详情：界面要能看出该补齐/排除哪一项。"""
+    parts = []
+    for issue in issues[:4]:
+        text = str(issue.get("issue") or "").strip()
+        key = issue.get("remote_id") or issue.get("url") or issue.get("local_path")
+        item = f"{key}：{text}" if key and text else (text or str(key or ""))
+        if item:
+            parts.append(item)
+    detail = "；".join(parts)
+    if len(issues) > 4:
+        detail = f"{detail}；等 {len(issues)} 项" if detail else f"等 {len(issues)} 项"
+    message = "规划材料不完整，请人工补齐或排除附件"
+    return (f"{message}：{detail}" if detail else message)[:600]
+
+
 def _retry_file(root, name):
     content, reason = planner_inputs._read_worktree_material(str(root), name, constants.PLAN_INPUT_FILE_MAX_BYTES)
     util.require(content is not None, '原规划冻结材料缺失或已变化：' + name + '（' + str(reason) + '）',
@@ -250,7 +266,8 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
                               # A14: unattended preparation is not a user action.
                               "actor": "automation"}, db_path)
         if not prepared.get("can_start"):
-            raise util.KanpilotError("validation_failed", "规划材料不完整，请人工补齐或排除附件")
+            raise util.KanpilotError("validation_failed",
+                _material_issue_message(prepared.get("issues") or []))
         task = db.get_task(conn, task_id)
         if not delivery.get("branch"):
             row = db.get_planner_input(conn, prepared["input_id"])

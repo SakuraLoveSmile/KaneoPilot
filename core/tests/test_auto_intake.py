@@ -200,6 +200,26 @@ def test_new_deterministic_prepare_failure_imports_blocked_row(intake, monkeypat
     assert core.automation_of(task)['last_skip']['reason'] == 'validation_failed'
 
 
+def test_material_failure_names_the_blocking_item(intake, monkeypatch):
+    """失败详情要指出被卡住的具体材料项，界面才能说该补齐/排除什么。"""
+    tid = intake.task(1,automation={'plan_wanted':True})
+    real = cli.run
+    def material_issues(command,payload,path):
+        if command=='prepare-plan-input':
+            return {'input_id':'input-blocked','input_sha256':'x'*64,'can_start':False,
+                'issues':[{'url':'https://example.com/a.png','issue':'附件下载失败：HTTP 404'},
+                          {'remote_id':'att-2','issue':'附件类型不支持（x.bin）'}]}
+        return real(command,payload,path)
+    monkeypatch.setattr(cli,'run',material_issues)
+    result = auto_intake.run_once(intake.path, now=NOW)
+    assert result['projects'][0]['skipped'][0]['reason'] == 'validation_failed'
+    row = db.require_task(intake.conn,tid)
+    assert row['status'] == 'needs_user'
+    assert row['failure_reason'].startswith('规划材料不完整，请人工补齐或排除附件：')
+    assert 'https://example.com/a.png：附件下载失败：HTTP 404' in row['failure_reason']
+    assert 'att-2：附件类型不支持（x.bin）' in row['failure_reason']
+
+
 def test_failed_branch_preparation_preserves_manual_delivery(intake, monkeypatch):
     task_id = intake.task(1, automation={'plan_wanted':True}, delivery={'mode':'manual'})
     def fail(*a, **kw):

@@ -34,7 +34,11 @@ from . import (
 
 _IMAGE_SUFFIXES = constants.PLAN_IMAGE_SUFFIXES
 _TEXT_SUFFIXES = constants.PLAN_TEXT_SUFFIXES
-_URL_RE = re.compile(r"https?://[^\s)\]>\"']+")
+# 只认链接语法：Markdown 图片/链接与 HTML 图片。正文里裸写的 URL 是叙述
+# 内容，不是待下载材料（protocol §5.22.1）。
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)")
+_MD_LINK_RE = re.compile(r"(?<!!)\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)")
+_HTML_IMG_RE = re.compile(r"<img\b[^>]*?\bsrc\s*=\s*[\"']?([^\"'\s>]+)", re.IGNORECASE)
 
 
 def _safe_name(name: Any) -> str:
@@ -98,8 +102,28 @@ def _safe_url(url) -> str:
         return "<url>"
 
 
+def _origin_of(url: Any) -> str:
+    """scheme://host[:port]，小写；与 bridge.download_attachment 同口径。"""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(str(url))
+    return f"{parsed.scheme}://{parsed.netloc}".lower()
+
+
+def _kaneo_origin() -> Optional[str]:
+    """Kaneo 同源基准。凭据不可读时返回 None：交由下载环节判定，不在此猜。"""
+    try:
+        return _origin_of(bridge.load_credentials()[0])
+    except bridge.BridgeError:
+        return None
+
+
 def _description_links(source: dict) -> list:
-    """描述/评论中的 Markdown/HTML 链接（图片与文件）→ [{url,where}]。"""
+    """描述/评论中的 Markdown 图片/文件链接与 HTML 图片 → [{url,where,kind}]。
+
+    只收带链接语法的地址（protocol §5.22.1）。正文里裸写的 URL 属于叙述内容
+    （例如反馈里被引用的报错地址），不是待下载材料，不能被当成附件。
+    """
     texts = []
     task = source.get("task") or {}
     texts.append(("description", str(task.get("description") or "")))
@@ -109,17 +133,17 @@ def _description_links(source: dict) -> list:
                                               or comment.get("body") or "")))
         else:
             texts.append((f"comment[{i}]", str(comment)))
-    links = []
+    links, seen = [], set()
     for where, text in texts:
-        for match in _URL_RE.finditer(text):
-            url = match.group(0)
-            # Markdown/HTML 语义粗判：![]()/<img> → image，其余按链接。
-            start = match.start()
-            prefix = text[max(0, start - 30):start]
-            kind = (
-                "image" if ("![" in prefix[-10:] or "<img" in prefix.lower())
-                else "file"
-            )
+        found = []
+        for pattern, kind in ((_MD_IMAGE_RE, "image"), (_MD_LINK_RE, "file"),
+                              (_HTML_IMG_RE, "image")):
+            for match in pattern.finditer(text):
+                found.append((match.start(), match.group(1).strip(), kind))
+        for _start, url, kind in sorted(found, key=lambda item: item[0]):
+            if not url.lower().startswith(("http://", "https://")) or url in seen:
+                continue
+            seen.add(url)
             links.append({"url": url, "where": where, "kind": kind})
     return links
 
@@ -594,10 +618,18 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
         register(dest, "attachment", entry.get("media_type") or (
             "image/*" if kind == "image" else "text/*"))
 
-    # 2d) 描述/评论中的链接（图片/文件）——同源下载，跨源记 issue。
-    for link in _description_links(source):
+    # 2d) 描述/评论中的 Markdown/HTML 链接（图片/文件）——同源下载；跨源只
+    # 登记为备注，不下载（不携带凭据）也不阻塞派发。
+    skipped_links = []
+    links = _description_links(source)
+    kaneo_origin = _kaneo_origin() if links else None
+    for link in links:
         url = link["url"]
         if url in excluded:
+            continue
+        if kaneo_origin is not None and _origin_of(url) != kaneo_origin:
+            skipped_links.append({"url": _safe_url(url), "where": link["where"],
+                                  "reason": "跨源链接，不携带 Kaneo 凭据下载"})
             continue
         kind = link["kind"]
         dest_name = _safe_name(Path(urlparse_path(url)).name or "link-file")
@@ -700,6 +732,9 @@ def prepare_plan_input(ctx, payload: dict) -> dict:
     }
     if execution_worktree is not None:
         manifest["execution_worktree"] = execution_worktree
+    if skipped_links:
+        # 跨源链接只留备注：规划器仍能在 source.json 正文里看到它们。
+        manifest["skipped_links"] = skipped_links
     if remediation:
         manifest["review_remediation"] = remediation
         review_resolution.verify_remediation(conn, local_task)

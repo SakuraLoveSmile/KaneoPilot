@@ -883,8 +883,9 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
 - 每个 To Do 独立规划、独立产出；同一时间只领取一个规划任务。
 - 附件：图片 PNG/JPEG/WebP、日志 UTF-8 文本；单文件 ≤20 MiB、每任务材料合计 ≤100 MiB，超限明确报错（`validation_failed`），不静默截断。
 - 重新规划材料的 `execution_worktree` 分支单独设证据上限（2026-11-12）：`.pi/**` 是执行端私有证据与运行材料（lsof 全量输出、录像、APK、日志），单文件只内联 ≤128 KiB 的文本，超限项仍在 `changes[]` 登记 `reason=evidence_too_large`，让规划器知道有这份改动但不读正文。理由是历史任务整包 222 文件/103.7 MB 的 `.pi/**` 证据把 Codex 规划拖到 1800s 超时并反复重规划。
-- 识别任务附件中的可下载 URL、描述与评论中的 Markdown 图片/文件链接及 HTML 图片；未知附件结构/格式/失效链接列入 `issues[]` 且 `can_start=false`，须补齐或 `excluded_remote_ids` 明确排除后才能开始。
-- 下载只向 Kaneo 同源地址发凭据；跨域/重定向不携带 `Authorization`；不输出凭据或带认证参数的 URL。
+- 只识别带链接语法的地址：任务附件中的可下载 URL、描述与评论中的 Markdown 图片/文件链接（`![alt](url)` / `[text](url)`）及 HTML `<img src>`。正文里裸写的 URL 属于叙述内容（例如反馈正文引用的报错地址），不是待下载材料，不下载也不阻塞（2026-11-23）。未知附件结构/格式/同源失效链接列入 `issues[]` 且 `can_start=false`，须补齐或 `excluded_remote_ids` 明确排除后才能开始。
+- 下载只向 Kaneo 同源地址发凭据；跨源链接不下载、不携带 `Authorization`，只在 manifest `skipped_links` 留备注，不作为 issue、不阻塞开始；重定向逐跳校验同源；不输出凭据或带认证参数的 URL。
+- 自动派发因材料问题停在 `validation_failed` 时，`failure_reason` 必须带上具体 issue（前 4 项明细 + 总数），界面要能指出该补齐或排除哪一项，不再只给一句通用文案。
 - 本地文件与已下载文件复制到应用管理的材料目录 `planner_inputs/<input_id>/`，记录 `name/source/media_type/sha256/size`；不依赖临时剪贴板路径长期存在。
 - 描述/评论链接下载的文件（如无扩展名的 Kaneo `/api/asset/<id>`）按文件头魔数识别图片：PNG（`89 50 4E 47 0D 0A 1A 0A`）、JPEG（`FF D8 FF`）、WebP（`RIFF????WEBP`）。命中时 `media_type` 记 `image/png|image/jpeg|image/webp`；原名不带该类型扩展名时在原名后追加 `.png|.jpg|.webp`（不改原名其余部分、不改文件内容），使 Codex/Claude（按扩展名）与 Plus（按 media_type/扩展名）都把它作为图片附件。未命中保持原名与 `media_type=null`。只看文件内容，不信远端 `Content-Type`。
 - `source_sha256`/`requirements_sha256` 保持原口径；补充说明、附件内容、排除项进入独立 `planner_input_sha256`（= `input_sha256`，对 manifest 规范化重算）。
