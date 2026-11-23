@@ -1,7 +1,7 @@
 """One explicitly authorized repair of the checks that block a PR merge."""
 import re
 
-from . import core, db, exec_config, gh_client, git_delivery, release_github, util
+from . import core, db, exec_config, gh_client, git_delivery, pr_auto_merge, release_github, util
 
 KIND = "check_failure"
 TITLE = "修复失败的检查"
@@ -47,21 +47,27 @@ def gate(conn, task):
 
 
 def _failing(pr, repo):
-    checks = pr.get("statusCheckRollup")
-    if not isinstance(checks, list):
+    """Only the current round of a check name can be repaired or rerun.
+
+    A re-run leaves the superseded failure in the rollup, so reading every entry
+    would spend a model call (or another rerun) on a job that already passed.
+    Grouping is shared with the merge gate and the delivery page: all three must
+    name the same round.
+    """
+    rounds = pr_auto_merge.check_rounds(pr)
+    if rounds is None:
         raise util.KanpilotError("transient", "GitHub 检查结果不可读取")
     failing = []
-    for check in checks:
-        if not isinstance(check, dict) or check.get("__typename") != "CheckRun":
+    for group in rounds:
+        check = group["current"]
+        # 分支保护里的状态上下文没有可修复/可重跑的作业，只留下合并门阻塞。
+        if group["state"] != "failed" or check.get("__typename") != "CheckRun":
             continue
-        if check.get("status") != "COMPLETED" or check.get("conclusion") in ("SUCCESS", "NEUTRAL", "SKIPPED"):
-            continue
-        name = gh_client.redact(str(check.get("name") or "未命名检查"))[:120]
-        workflow = gh_client.redact(str(check.get("workflowName") or ""))[:80]
         match = _RUN_URL.match(str(check.get("detailsUrl") or ""))
         run_id = int(match.group(2)) if match and match.group(1) == repo else None
         job_id = int(match.group(3)) if match and match.group(1) == repo else None
-        failing.append(dict(name=name, workflow=workflow, conclusion=str(check.get("conclusion")),
+        failing.append(dict(name=group["name"], workflow=group["workflow"] or "",
+                            conclusion=str(check.get("conclusion") or ""),
                             run_id=run_id, job_id=job_id))
     if not failing:
         raise util.KanpilotError("conflict", "当前 PR 没有失败的检查，无需修复")

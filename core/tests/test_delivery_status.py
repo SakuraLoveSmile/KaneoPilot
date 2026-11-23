@@ -156,9 +156,10 @@ class DeliveryStatusTest(KanpilotTestCase):
         self.assertIsNone(check["completed_at"])
         self.assertEqual(result["checks_summary"],
                          {"total": 1, "passed": 0, "failed": 0, "running": 1, "unknown": 0})
-        # gate 原样沿用 pr_auto_merge.eligibility：它逐轮看原始 rollup，
-        # 因此被覆盖的旧 FAILURE 仍会挡住合并门（与 checks 的「只留最新一轮」不同）。
-        self.assertEqual(result["gate"]["state"], "blocked")
+        # gate 与 checks 共用 pr_auto_merge.check_rounds：被覆盖的旧 FAILURE 不再挡住
+        # 合并门，页面也不会出现「列表说在跑、门说失败」的矛盾。
+        self.assertEqual(result["gate"]["state"], "waiting_checks")
+        self.assertEqual(result["gate"]["reason"], "检查仍在运行：CI/test，等待结果")
         self.assertFalse(result["gate"]["ready"])
 
     def test_running_round_wins_over_a_later_completion_of_the_old_round(self):

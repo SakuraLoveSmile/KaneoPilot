@@ -7,14 +7,11 @@ pr_auto_merge.eligibility. It never merges, retries, reruns or writes SQLite.
 """
 import re
 
-from . import automation_policy, core, db, gh_client, git_delivery, pr_auto_merge, util
+from . import automation_policy, core, db, gh_client, git_delivery, pr_auto_merge
 
 READY_REASON = "检查与保护规则已满足，等待下一轮交付同步合并"
-_PASSING_CONCLUSIONS = ("SUCCESS", "NEUTRAL", "SKIPPED")
-_PENDING_STATES = ("PENDING", "EXPECTED")
 _STATE_ORDER = {"failed": 0, "running": 1, "unknown": 2, "passed": 3}
-_UNNAMED = "未命名检查"
-_NAME_LIMIT, _WORKFLOW_LIMIT, _TEXT_LIMIT = 120, 80, 200
+_TEXT_LIMIT = 200
 # 只链接本仓库的 Actions 页面；其它形态（含 query）一律 null，与 task_ai_check_failure 同一口径。
 _RUN_URL = re.compile(
     r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/actions/runs/([0-9]+)(?:/job/([0-9]+))?$")
@@ -28,8 +25,8 @@ def _text(value, limit=_TEXT_LIMIT):
     return gh_client.redact(str(value))[:limit] or None
 
 
-def _stamp(value):
-    """A check time; GitHub reports "0001-01-01T00:00:00Z" for a not-yet-finished check."""
+def _stamp_text(value):
+    """A check time for display; a not-yet-finished check reports 0001-01-01."""
     text = _text(value)
     if text is None:
         return None
@@ -92,19 +89,6 @@ def _pr_view(pr, delivery):
             "head_matches_delivery": bool(head) and head == stored}
 
 
-def _check_state(raw):
-    typename = raw.get("__typename")
-    if typename == "CheckRun":
-        if raw.get("status") != "COMPLETED":
-            return "running"
-        return "passed" if raw.get("conclusion") in _PASSING_CONCLUSIONS else "failed"
-    if typename == "StatusContext":
-        if raw.get("state") in _PENDING_STATES:
-            return "running"
-        return "passed" if raw.get("state") == "SUCCESS" else "failed"
-    return "unknown"
-
-
 def _run_url(value, repo):
     if not repo or not isinstance(value, str):
         return None
@@ -113,59 +97,30 @@ def _run_url(value, repo):
     return value if match and match.group(1) == repo else None
 
 
-def _check_item(raw, repo):
-    """Unknown or malformed entries stay visible as an unknown check, never an error."""
-    if not isinstance(raw, dict):
-        return {"name": _UNNAMED, "workflow": None, "state": "unknown", "conclusion": None,
-                "url": None, "started_at": None, "completed_at": None}
-    # StatusContext has no `name`: the required context name is the branch check name.
-    name = raw.get("name") or raw.get("context")
-    return {"name": _text(name, _NAME_LIMIT) or _UNNAMED,
-            "workflow": _text(raw.get("workflowName"), _WORKFLOW_LIMIT),
-            "state": _check_state(raw),
-            "conclusion": (_text(raw.get("conclusion"))
-                           if raw.get("__typename") == "CheckRun" else None),
-            "url": _run_url(raw.get("detailsUrl") or raw.get("targetUrl"), repo),
-            "started_at": _stamp(raw.get("startedAt")),
-            "completed_at": _stamp(raw.get("completedAt"))}
+def _check_item(group, repo):
+    """One grouped row: display fields read from the round that counts now.
 
-
-def _newest(entries):
-    """completedAt first, then startedAt, then the entry GitHub listed first."""
-    chosen, stamp = entries[0], None
-    for item in entries:
-        current = util.parse_ts(item["completed_at"]) or util.parse_ts(item["started_at"])
-        if current is not None and (stamp is None or current > stamp):
-            chosen, stamp = item, current
-    return chosen
-
-
-def _latest(entries):
-    """The round a checks tab shows for one name.
-
-    A round that is still running is the current one: GitHub can list a superseded
-    round whose completion time is later than the current round's start, so raw
-    timestamps alone would hide the run the user is watching. Within one kind,
-    completedAt, then startedAt, then list order decides.
+    The grouping itself lives in `pr_auto_merge.check_rounds` so this page, the
+    merge gate and the rerun/repair entries always name the same round.
     """
-    running = [item for item in entries if item["state"] == "running"]
-    return _newest(running or entries)
+    current = group["current"]
+    return {"name": group["name"],
+            "workflow": group["workflow"] or None,
+            "state": "running" if group["state"] == "pending" else group["state"],
+            "conclusion": (_text(current.get("conclusion"))
+                           if current.get("__typename") == "CheckRun" else None),
+            "url": _run_url(current.get("detailsUrl") or current.get("targetUrl"), repo),
+            "started_at": _stamp_text(current.get("startedAt")),
+            "completed_at": _stamp_text(current.get("completedAt")),
+            "superseded_runs": len(group["items"]) - 1}
 
 
 def _checks(pr, repo):
-    """Group check runs per (workflow, name); the summary counts the grouped view."""
-    rollup = pr.get("statusCheckRollup")
-    if not isinstance(rollup, list):
+    """Grouped rows shared with the merge gate; the summary counts the grouped view."""
+    rounds = pr_auto_merge.check_rounds(pr)
+    if rounds is None:
         return None, None  # 未读到检查结果，不冒充「没有检查」
-    groups = {}
-    for raw in rollup:
-        item = _check_item(raw, repo)
-        groups.setdefault((item["workflow"] or "", item["name"]), []).append(item)
-    checks = []
-    for entries in groups.values():
-        latest = dict(_latest(entries))
-        latest["superseded_runs"] = len(entries) - 1
-        checks.append(latest)
+    checks = [_check_item(group, repo) for group in rounds]
     checks.sort(key=lambda item: (_STATE_ORDER[item["state"]], item["workflow"] or "", item["name"]))
     summary = {"total": len(checks), "passed": 0, "failed": 0, "running": 0, "unknown": 0}
     for item in checks:
