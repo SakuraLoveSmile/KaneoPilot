@@ -50,6 +50,17 @@ class BridgeError(Exception):
     pass
 
 
+def _net_detail(exc: BaseException) -> str:
+    """传输层失败保留底层原因（errno、DNS、TLS、超时），只取一段短描述。
+
+    URLError 把真正的失败包在 reason 里；只写类名会丢掉「连接被拒」「证书校验
+    失败」这类可区分的原因。异常文本不含请求头，不会带出 token。
+    """
+    reason = getattr(exc, "reason", None)
+    text = str(exc if reason is None else reason).strip()
+    return (": " + text[:200]) if text else ""
+
+
 def fail(message: str) -> None:
     print(message, file=sys.stderr)
     raise SystemExit(1)
@@ -114,7 +125,7 @@ class Client:
                 raise BridgeError("Kaneo 登录已失效，请刷新 Kaneo 登录凭据") from exc
             raise BridgeError(f"Kaneo 请求失败: HTTP {exc.code}") from exc
         except (URLError, TimeoutError, OSError) as exc:
-            raise BridgeError(f"Kaneo 请求失败: {type(exc).__name__}") from exc
+            raise BridgeError(f"Kaneo 请求失败: {type(exc).__name__}{_net_detail(exc)}") from exc
         raw = b"".join(chunks)
         if not raw:
             return None
