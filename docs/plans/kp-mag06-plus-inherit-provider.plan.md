@@ -5,7 +5,12 @@
 - worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261123-fix-kp-mag06-plus-inherit-provider`
 - 基点：main `28ba4e0`；创建日期 2026-11-23（台北）
 - 合入目标：main（PR）
-- 状态：实现中（核心与面板已改，等隔离测试与云端 Packages 结果）
+- 状态：待体验（核心与面板已改并通过验证；测试版 `v0.5.10-test.420` 已发布，实机面板待体验）
+- PR：[#26](https://github.com/SakuraLoveSmile/KaneoPilot/pull/26)（base main，未合并）
+- 云端构建：run [45126330928](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/45126330928)
+  （channel=test，base 0.5.10）→ 预发布 `v0.5.10-test.420`（macOS arm64 DMG /
+  Android APK / manifest.json / SHA256SUMS）；identity、checks 5×2、android、
+  macos-fixtures、macos-package、codex-platforms、publish 全部通过。
 - 关联：`docs/plans/kp-mag01-magpie-takeover.plan.md`「未验证/遗留」第 2 条（未做 Pi-Desktop 目录自动回退）
 
 ## 背景（用户 2026-11-23 截图与口径）
@@ -73,10 +78,16 @@ Magpie 接管后 Pi-Desktop 的模型完全由 Magpie 的插件 provider 控制�
   `connection_file`/`model_source`/`permission_mode`；`planner-capabilities` 与
   `review-capabilities` 的 `pi_desktop` 均 `available=true`
   （detail「PI-Desktop 控制面就绪（pi-desktop，2025-06-18）」）。
-- 本地全量 core 套件未跑完（本地跑到 16% 后停止，改由云端 Packages 的 shards 覆盖）。
+- 本地全量 core 套件未跑完（本地跑到 16% 后停止），改由云端 Packages 的 10 个 checks
+  shard 覆盖，全部通过。
+- 本地集成套件 `python3 -m pytest tests -q`：405 passed，6 skipped，4 subtests（1771s）。
+- 同一提交的 push run（45126293173）与 PR run（45126315701）各有一个 job 撞上基础设施
+  抖动：`hdiutil verify` 报 Resource temporarily unavailable、Gradle 依赖下载失败；
+  同一提交的手动 run 同类 job 全绿，已对两个 run 重跑失败 job（attempt 2）。
 
 ## 未验证 / 遗留
 
-- SwiftUI 编译与实机面板：只走云端 Packages 与安装后体验；
+- 实机面板与真实规划轮次：等安装 `v0.5.10-test.420` 后体验（面板红字是否消失、
+  切到 Pi-Desktop-Plus 能否起一轮、临时指定模型是否生效）；
 - 真实规划轮次是否使用临时指定模型：待实机跑一轮后确认；
 - 旧配置只在读取时忽略，不回写清理（用户再次保存 inherit 后才落库为干净块）。
