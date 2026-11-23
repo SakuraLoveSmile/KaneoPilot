@@ -1186,8 +1186,8 @@ struct SettingsView: View {
     private func piDesktopBlock(_ caps: ExecCapabilitiesResponse) -> some View {
         LabeledContent("模型配置方式") {
             Picker("模型配置方式", selection: $pdModelSource) {
-                Text("跟随 Plus 默认配置").tag("inherit")
-                Text("自定义模型").tag("custom")
+                Text("跟随 Plus 当前模型").tag("inherit")
+                Text("临时指定模型").tag("custom")
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -1195,6 +1195,12 @@ struct SettingsView: View {
             .accessibilityLabel("执行环境 Plus 模型配置方式")
         }
         .font(.kpBody)
+        Text(pdModelSource == "inherit"
+             ? "跟随 Plus 当前默认服务商与模型：Magpie 接管时就是 Magpie Agents 页选中的模型，换模型不必改这里。"
+             : "临时指定模型只对任务执行生效：从 Plus 本地目录挑一个模型，不改变 Magpie 的全局选择。")
+            .font(.kpLabel)
+            .foregroundStyle(Color.kpSecondary)
+            .fixedSize(horizontal: false, vertical: true)
 
         if pdModelSource == "inherit" {
             if let resolved = piDesktopCatalog?.resolvedDefault {
@@ -1497,7 +1503,10 @@ struct SettingsView: View {
         }
         do {
             var payload: [String: Any] = ["connection_file": connection]
-            if !provider.isEmpty { payload["provider_id"] = provider }
+            // kp-mag06：inherit 下不发送草稿里的旧 provider_id（同规划/评审）。
+            if pdModelSource != "inherit" && !provider.isEmpty {
+                payload["provider_id"] = provider
+            }
             let catalog = try await model.client.run(
                 "pi-desktop-catalog", payload: payload, as: PiDesktopCatalogResponse.self)
             guard generation == piDesktopCatalogGeneration,
@@ -1542,7 +1551,8 @@ struct SettingsView: View {
     }
 
     private func applyPiDesktopCatalogDefaults(_ catalog: PiDesktopCatalogResponse) {
-        let hasSavedDesktopConfig = execConfig?.piDesktop != nil
+        // kp-mag06：inherit 只跟随 Plus 当前默认，不拿历史钉住字段做校验。
+        let hasSavedDesktopConfig = execConfig?.piDesktop != nil && pdModelSource == "custom"
         let enabledProviders = catalog.providers.filter { $0.enabled != false }
         if hasSavedDesktopConfig {
             let currentProviderId = pdProviderId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1855,13 +1865,15 @@ struct SettingsView: View {
     }
 
     /// 页面上的 Plus 五字段草稿（执行与 Plus 控制端共用同一已保存块）。
+    /// kp-mag06：inherit 模式只保存连接文件与权限，三个模型字段一律留空。
     private var piDesktopDraft: ExecPiDesktopConfig {
-        ExecPiDesktopConfig(
+        let inherit = pdModelSource == "inherit"
+        return ExecPiDesktopConfig(
             modelSource: pdModelSource,
             connectionFile: emptyToNil(pdConnectionFile),
-            providerId: emptyToNil(pdProviderId),
-            modelId: emptyToNil(pdModelId),
-            thinkingLevel: emptyToNil(pdThinkingLevel),
+            providerId: inherit ? nil : emptyToNil(pdProviderId),
+            modelId: inherit ? nil : emptyToNil(pdModelId),
+            thinkingLevel: inherit ? nil : emptyToNil(pdThinkingLevel),
             permissionMode: emptyToNil(pdPermissionMode))
     }
 
@@ -2427,12 +2439,14 @@ struct SettingsView: View {
 
     /// Plus 规划五字段草稿（§5.24.4：plan 角色固定 auto）。
     private var plannerPlusDraft: ExecPiDesktopConfig {
-        ExecPiDesktopConfig(
+        // kp-mag06：inherit 只保存连接文件与固定权限，模型字段留空。
+        let inherit = plModelSource == "inherit"
+        return ExecPiDesktopConfig(
             modelSource: plModelSource,
             connectionFile: emptyToNil(plConnectionFile),
-            providerId: emptyToNil(plProviderId),
-            modelId: emptyToNil(plModelId),
-            thinkingLevel: emptyToNil(plThinkingLevel),
+            providerId: inherit ? nil : emptyToNil(plProviderId),
+            modelId: inherit ? nil : emptyToNil(plModelId),
+            thinkingLevel: inherit ? nil : emptyToNil(plThinkingLevel),
             permissionMode: ExecPiDesktopConfig.fixedPlanPermission)
     }
 
@@ -2905,12 +2919,14 @@ struct SettingsView: View {
 
     /// Review Plus 五字段草稿（§5.24.5：plan 模式 + 固定 auto）。
     private var reviewPlusDraft: ExecPiDesktopConfig {
-        ExecPiDesktopConfig(
+        // kp-mag06：inherit 只保存连接文件与固定权限，模型字段留空。
+        let inherit = rvModelSource == "inherit"
+        return ExecPiDesktopConfig(
             modelSource: rvModelSource,
             connectionFile: emptyToNil(rvConnectionFile),
-            providerId: emptyToNil(rvProviderId),
-            modelId: emptyToNil(rvModelId),
-            thinkingLevel: emptyToNil(rvThinkingLevel),
+            providerId: inherit ? nil : emptyToNil(rvProviderId),
+            modelId: inherit ? nil : emptyToNil(rvModelId),
+            thinkingLevel: inherit ? nil : emptyToNil(rvThinkingLevel),
             permissionMode: ExecPiDesktopConfig.fixedReviewPermission)
     }
 
@@ -4300,8 +4316,8 @@ private struct PlusRoleEditor: View {
         Group {
             LabeledContent("模型配置方式") {
                 Picker("模型配置方式", selection: $modelSource) {
-                    Text("跟随 Plus 默认配置").tag("inherit")
-                    Text("自定义模型").tag("custom")
+                    Text("跟随 Plus 当前模型").tag("inherit")
+                    Text("临时指定模型").tag("custom")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -4309,6 +4325,14 @@ private struct PlusRoleEditor: View {
                 .accessibilityLabel("\(roleName) Plus 模型配置方式")
             }
             .font(.kpBody)
+            // kp-mag06：两种模式的语义写清楚——跟随由 Magpie 决定，临时指定只
+            // 影响本角色。
+            Text(modelSource == "inherit"
+                 ? "跟随 Plus 当前默认服务商与模型：Magpie 接管时就是 Magpie Agents 页选中的模型，换模型不必改这里。"
+                 : "临时指定模型只对本角色生效：从 Plus 本地目录挑一个模型，不改变 Magpie 的全局选择。")
+                .font(.kpLabel)
+                .foregroundStyle(Color.kpSecondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             DisclosureGroup(isExpanded: $advancedExpanded) {
                 TextField("连接文件路径（默认 ~/.pi-desktop-plus/mcp-control.json）",
@@ -4551,8 +4575,12 @@ private struct PlusRoleEditor: View {
         }
         do {
             var payload: [String: Any] = ["connection_file": connection]
-            let provider = trimmed(providerId)
-            if !provider.isEmpty { payload["provider_id"] = provider }
+            // kp-mag06：inherit 只跟随 Plus 当前默认，不再把草稿里可能残留的
+            // 旧 provider_id 发给目录命令（否则会报「不存在或已禁用」）。
+            if modelSource != "inherit" {
+                let provider = trimmed(providerId)
+                if !provider.isEmpty { payload["provider_id"] = provider }
+            }
             let response = try await model.client.run(
                 "pi-desktop-catalog", payload: payload,
                 as: PiDesktopCatalogResponse.self)
@@ -4576,7 +4604,7 @@ private struct PlusRoleEditor: View {
                 providerId: providerId,
                 modelId: modelId,
                 thinkingLevel: thinkingLevel),
-            hasSavedDesktopConfig: hasSavedDesktopConfig)
+            hasSavedDesktopConfig: hasSavedDesktopConfig && modelSource == "custom")
         if outcome.draft.providerId != providerId {
             providerId = outcome.draft.providerId
         }
