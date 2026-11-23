@@ -87,6 +87,7 @@ struct ProjectMappingsView: View {
         static let autoEnabled = "自动接收并处理此项目"
         static let autoConfirm = "自动确认计划"
         static let autoMerge = "自动合并 PR"
+        static let autoFix = "自动修复 PR"
         static let release = "合并后构建并发布"
         static let channel = "发布渠道"
         static let releaseConfig = "构建发布配置"
@@ -101,6 +102,11 @@ struct ProjectMappingsView: View {
         var labels = ""
         var confirm = true
         var autoMerge = false
+        var autoFix = false
+        var autoFixMax = 1
+        var autoFixCheckFailure = true
+        var autoFixReviewComment = true
+        var autoFixAuthors = ""
         var releaseEnabled = false
         var releaseChannel = "prerelease"
         var releaseWorkflowPath = ".github/workflows/pilot-release.yml"
@@ -118,6 +124,12 @@ struct ProjectMappingsView: View {
             labels = (value?.labelFilter ?? []).joined(separator: ", ")
             confirm = value?.autoConfirmPlan ?? true
             autoMerge = value?.autoMergePr ?? false
+            autoFix = value?.autoFixPr ?? false
+            autoFixMax = value?.autoFixMaxAttempts ?? 1
+            let kinds = value?.autoFixKinds ?? ["check_failure", "review_comment"]
+            autoFixCheckFailure = kinds.contains("check_failure")
+            autoFixReviewComment = kinds.contains("review_comment")
+            autoFixAuthors = (value?.autoFixTrustedAuthors ?? []).joined(separator: ", ")
             releaseEnabled = value?.release?.enabled ?? false
             releaseChannel = value?.release?.channel ?? "prerelease"
             releaseWorkflowPath = value?.release?.workflowPath ?? ".github/workflows/pilot-release.yml"
@@ -136,6 +148,8 @@ struct ProjectMappingsView: View {
             return ["enabled": enabled,
              "label_filter": labels.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
              "auto_confirm_plan": confirm, "auto_merge_pr": autoMerge,
+             "auto_fix_pr": autoFix, "auto_fix_max_attempts": autoFixMax,
+             "auto_fix_kinds": autoFixKindList, "auto_fix_trusted_authors": trustedAuthorList,
              "release": ["enabled": releaseEnabled, "channel": releaseChannel,
                          "workflow_path": releaseWorkflowPath.trimmingCharacters(in: .whitespacesAndNewlines),
                          "workflow_ref": releaseWorkflowRef.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -148,7 +162,8 @@ struct ProjectMappingsView: View {
         }
         var valid: Bool {
             let trimmed = cost.trimmingCharacters(in: .whitespacesAndNewlines)
-            return (trimmed.isEmpty || Double(trimmed).map { (0.5...100).contains($0) } == true) && releaseValidation == nil
+            return (trimmed.isEmpty || Double(trimmed).map { (0.5...100).contains($0) } == true)
+                && releaseValidation == nil && autoFixValidation == nil
         }
         /// 无法保存的原因（与行内提示一致）；合法时为 nil。
         var blockReason: String? {
@@ -156,7 +171,7 @@ struct ProjectMappingsView: View {
             if !trimmed.isEmpty, Double(trimmed).map({ (0.5...100).contains($0) }) != true {
                 return "成本需为 0.5–100 美元，或留空。"
             }
-            return releaseValidation
+            return releaseValidation ?? autoFixValidation
         }
         private func lines(_ value: String) -> [String] {
             value.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -170,6 +185,7 @@ struct ProjectMappingsView: View {
             if enabled != saved.enabled { rows.append(RowName.autoEnabled) }
             if confirm != saved.confirm { rows.append(RowName.autoConfirm) }
             if autoMerge != saved.autoMerge { rows.append(RowName.autoMerge) }
+            if autoFixDiffers(from: saved) { rows.append(RowName.autoFix) }
             if releaseEnabled != saved.releaseEnabled { rows.append(RowName.release) }
             if releaseEnabled {
                 if releaseChannel != saved.releaseChannel { rows.append(RowName.channel) }
@@ -178,6 +194,12 @@ struct ProjectMappingsView: View {
             if budgetDiffers(from: saved) { rows.append(RowName.budget) }
             if advancedDiffers(from: saved) { rows.append(RowName.advanced) }
             return rows
+        }
+        /// 自动修复四项比较：开关、次数上限、触发类型与可信作者（按提交时的规范化值比较）。
+        private func autoFixDiffers(from saved: AutomationDraft) -> Bool {
+            if autoFix != saved.autoFix || autoFixMax != saved.autoFixMax { return true }
+            if Set(autoFixKindList) != Set(saved.autoFixKindList) { return true }
+            return trustedAuthorList != saved.trustedAuthorList
         }
         private func releaseConfigDiffers(from saved: AutomationDraft) -> Bool {
             if trimmedValue(releaseWorkflowPath) != trimmedValue(saved.releaseWorkflowPath) { return true }
@@ -196,6 +218,35 @@ struct ProjectMappingsView: View {
         private func advancedDiffers(from saved: AutomationDraft) -> Bool {
             if labelList != saved.labelList { return true }
             return trimmedValue(base) != trimmedValue(saved.base)
+        }
+        /// 触发类型按协议顺序提交；两项都关闭时由 autoFixValidation 阻止保存。
+        private var autoFixKindList: [String] {
+            var kinds: [String] = []
+            if autoFixCheckFailure { kinds.append("check_failure") }
+            if autoFixReviewComment { kinds.append("review_comment") }
+            return kinds
+        }
+        /// 可信作者：逗号或空白分隔的 GitHub 登录名，统一小写去重（核心也按小写保存）。
+        private var trustedAuthorList: [String] {
+            var logins: [String] = []
+            for part in autoFixAuthors.components(separatedBy: CharacterSet(charactersIn: ", \n\t")) {
+                let login = part.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if !login.isEmpty, !logins.contains(login) { logins.append(login) }
+            }
+            return logins
+        }
+        /// 与核心 validate_automation 同口径的前置校验：保存前就写清问题，不让命令失败。
+        var autoFixValidation: String? {
+            if autoFixKindList.isEmpty { return "自动修复至少要开启一种触发类型。" }
+            let logins = trustedAuthorList
+            if logins.count > 20 { return "可信作者最多 20 个 GitHub 登录名。" }
+            for login in logins {
+                if login.hasSuffix("[bot]") { return "机器人账号不能作为自动修复的可信作者。" }
+                if login.range(of: #"^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}$"#, options: .regularExpression) == nil {
+                    return "可信作者需为 GitHub 登录名：" + login
+                }
+            }
+            return nil
         }
         var releaseValidation: String? {
             guard releaseEnabled else { return nil }
@@ -709,6 +760,46 @@ struct ProjectMappingsView: View {
                            detail: "开启后，当前及后续待交付任务在评审、GitHub 检查通过且无冲突时自动合并。使用 merge commit，遵守分支保护，无需额外模型费用；独立于新任务接收开关。",
                            changed: changed.contains(RowName.autoMerge)) {
                 Toggle("自动合并 PR", isOn: draftBinding(id, \.autoMerge)).labelsHidden().toggleStyle(.switch)
+            }
+            ListRule()
+            ProjectFormRow(title: RowName.autoFix,
+                           detail: "开启后会为已托管 PR 的检查失败或可信作者新评论启动一次有上限的修复；不合并、不强推、不放宽检查、不回复/解决 GitHub 线程。",
+                           changed: changed.contains(RowName.autoFix)) {
+                Toggle("自动修复 PR", isOn: draftBinding(id, \.autoFix)).labelsHidden().toggleStyle(.switch)
+            }
+            if draft.autoFix {
+                ListRule()
+                ProjectPlainRow {
+                    VStack(alignment: .leading, spacing: Spacing.m) {
+                        Text("每次修复都会启动一轮付费 Plus 轮次；次数上限按任务累计，达到后只登记原因、不再发起。")
+                            .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Stepper("每次最多修复 \(draft.autoFixMax) 次（0 = 不发起）", value: draftBinding(id, \.autoFixMax), in: 0...3)
+                            .font(.kpBody)
+                        Toggle("检查未通过时发起一次修复", isOn: draftBinding(id, \.autoFixCheckFailure))
+                            .font(.kpBody)
+                        Toggle("可信作者提交新评论时发起一次修复", isOn: draftBinding(id, \.autoFixReviewComment))
+                            .font(.kpBody)
+                        VStack(alignment: .leading, spacing: Spacing.s) {
+                            Text("可信评论作者（逗号分隔的 GitHub 登录名）")
+                                .font(.kpBody).fixedSize(horizontal: false, vertical: true)
+                            TextField("留空表示只信任当前已登录的 GitHub 账号", text: draftBinding(id, \.autoFixAuthors))
+                                .textFieldStyle(.roundedBorder).font(.kpBody)
+                                .accessibilityLabel("自动修复可信评论作者，逗号分隔的 GitHub 登录名")
+                            Text("留空 = 仅当前已登录的 GitHub 账号，不填也能用；机器人账号与不受信任作者的评论只登记，不自动修复。")
+                                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            if let issue = draft.autoFixValidation {
+                ListRule()
+                ProjectPlainRow {
+                    SettingsNotice(text: issue, icon: "exclamationmark.triangle.fill", tone: Color.kpOrange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             ListRule()
             ProjectFormRow(title: RowName.release,
@@ -1322,6 +1413,9 @@ struct ProjectMappingsView: View {
         let automation = draft.automation
         let savedPolicy = item.automation
         let enablingMerge = automation.autoMerge && savedPolicy?.autoMergePr != true
+        // 自动修复：开启开关或提高次数上限都要先确认（会启动付费 Plus 轮次）。
+        let enablingAutoFix = automation.autoFix
+            && (savedPolicy?.autoFixPr != true || automation.autoFixMax > (savedPolicy?.autoFixMaxAttempts ?? 1))
         let enablingRelease = automation.releaseEnabled && savedPolicy?.release?.enabled != true
         let switchingStable = automation.releaseEnabled && automation.releaseChannel == "stable" && savedPolicy?.release?.channel != "stable"
 
@@ -1329,20 +1423,27 @@ struct ProjectMappingsView: View {
         if enablingMerge {
             policyImpacts.append("当前及后续待交付任务在评审、GitHub 检查通过且无冲突时，使用 merge commit 自动合并 PR，遵守分支保护。")
         }
+        if enablingAutoFix {
+            policyImpacts.append("为已托管 PR 的检查失败或可信作者新评论启动一次有上限的修复，每次都会启动一轮付费 Plus 轮次，次数上限 \(automation.autoFixMax) 次；不合并、不强推、不放宽检查、不回复/解决 GitHub 线程。")
+        }
         if enablingRelease || switchingStable {
             let channel = automation.releaseChannel == "stable" ? "正式版" : "预发布"
             policyImpacts.append("新交付将通过 GitHub Actions 构建并发布\(channel)，可能消耗 GitHub Actions 配额。历史已完成任务不会自动补发。保存本身不启动构建。")
         }
         var sections: [String] = []
         if !policyImpacts.isEmpty {
-            sections.append("项目「\(item.displayName)」\n" + policyImpacts.joined(separator: "\n") + "\n不调用模型。")
+            // 「不调用模型」只对合并与发布成立；自动修复本身会调用模型。
+            let tail = enablingAutoFix ? "" : "\n不调用模型。"
+            sections.append("项目「\(item.displayName)」\n" + policyImpacts.joined(separator: "\n") + tail)
         }
         guard !sections.isEmpty else {
             Task { await commitProject(item.projectId) }
             return
         }
         let title: String
-        if enablingRelease || switchingStable {
+        if enablingAutoFix {
+            title = savedPolicy?.autoFixPr == true ? "提高自动修复次数上限？" : "开启自动修复 PR？"
+        } else if enablingRelease || switchingStable {
             title = "开启构建发布策略？"
         } else {
             title = "开启自动合并 PR？"

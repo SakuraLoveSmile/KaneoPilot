@@ -248,10 +248,10 @@ PLAN_META_REQUIRED_REVIEW_FIX = PLAN_META_REQUIRED + (
 STANDARD_PLANNER = {"planner_model": "gpt-6-astra", "reasoning_effort": "medium"}
 REVIEW_FIX_PLANNER = {"planner_model": "gpt-5.6-sol", "reasoning_effort": "xhigh"}
 
-# protocol §5.27：任务内一次性 AI 处理（合并冲突 / 构建失败 / 检查失败）共用同一
+# protocol §5.27：任务内一次性 AI 处理（合并冲突 / 构建失败 / 检查失败 / PR 评论）共用同一
 # direct 修复链。判断「本修复是否由 AI 处理入口授权」时统一引用此集合，避免各处
 # 手写元组漂移。
-AI_ACTION_KINDS = ("merge_conflict", "build_failure", "check_failure")
+AI_ACTION_KINDS = ("merge_conflict", "build_failure", "check_failure", "review_comment")
 
 # protocol §5.27（2026-11-19）：一次性 AI 处理可单独指定模型。只覆盖 Plus 分支的
 # model_id / thinking_level，其余字段仍跟随通用执行配置；空块 = 跟随通用配置。
@@ -458,6 +458,14 @@ INTAKE_INTERVAL_SECONDS = 300
 INTAKE_MAX_ADOPT_PER_PASS = 3
 INTAKE_LABEL_LOOKUPS_PER_PASS = 20
 INTAKE_LABEL_RECHECK_SECONDS = 1800
+# protocol §5.27.20：项目自动修复 PR。次数上限按任务累计，从 extra.ai_action_history
+# 中 authorized_by=policy 的条目推导（不另设计数器）；kinds 默认两项全开；
+# 可信作者为空表示只信任当前已登录的 gh 账号（机器人永不接受）。
+AUTO_FIX_KINDS = ("check_failure", "review_comment")
+AUTO_FIX_MAX_ATTEMPTS = 3
+AUTO_FIX_MAX_TRUSTED_AUTHORS = 20
+# 读侧 delivery.auto_fix.state；started 由当前 policy 动作派生，其余为落库标记。
+AUTO_FIX_STATES = ("waiting_rerun", "started", "suspended", "filed")
 RELEASE_DEFAULTS = {
     "enabled": False, "channel": "prerelease",
     "workflow_path": ".github/workflows/pilot-release.yml", "workflow_ref": "main",
@@ -467,6 +475,8 @@ AUTOMATION_DEFAULTS = {
     "enabled": False, "label_filter": [], "auto_confirm_plan": True, "auto_merge_pr": False,
     "max_fix_rounds": 2, "max_task_minutes": 240, "max_task_cost_usd": 10.0,
     "delivery_base": None, "release": RELEASE_DEFAULTS,
+    "auto_fix_pr": False, "auto_fix_max_attempts": 1,
+    "auto_fix_kinds": AUTO_FIX_KINDS, "auto_fix_trusted_authors": (),
     "policy_revision": 0, "updated_at": None,
 }
 AUTOMATION_GLOBAL_DEFAULTS = {"max_active_tasks": 2}

@@ -1018,14 +1018,16 @@ struct VerticalRule: View {
     }
 }
 
-/// 标签 + 值行（标签 11pt 次要色，值 13pt 可选中复制）。
+/// 标签 + 值行（标签 11pt 次要色，值 13pt 可选中复制）；`tone` 只用于需要提醒的值（如自动修复挂起）。
 struct FieldRow: View {
     let label: String
     let value: String
+    let tone: Color?
 
-    init(_ label: String, _ value: String?) {
+    init(_ label: String, _ value: String?, tone: Color? = nil) {
         self.label = label
         self.value = value?.isEmpty == false ? value! : "—"
+        self.tone = tone
     }
 
     var body: some View {
@@ -1036,6 +1038,7 @@ struct FieldRow: View {
                 .frame(width: 96, alignment: .trailing)
             Text(value)
                 .font(.kpBody)
+                .foregroundStyle(tone ?? Color.primary)
                 .textSelection(.enabled)
             Spacer(minLength: 0)
         }

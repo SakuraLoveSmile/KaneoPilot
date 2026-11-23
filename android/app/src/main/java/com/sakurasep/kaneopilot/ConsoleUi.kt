@@ -419,11 +419,16 @@ private fun autoAdvancePaused(overview: JSONObject?): Boolean? = overview?.optJS
     LabelValue("失败原因", task.text("failure_reason"))
 }
 
-/** 任务信息卡：项目、任务编号、更新于，以及手机只开放回答与确认的边界提示。 */
+/** 任务信息卡：项目、任务编号、更新于、自动修复只读一行，以及手机只开放回答与确认的边界提示。 */
 @Composable private fun TaskInfoCard(task: JSONObject) {
     Section("任务信息") {
         LabelValue("项目", task.text("project_name")); LabelValue("任务编号", task.text("task_id"))
         LabelValue("更新于", localStamp(task.text("updated_at")))
+        // protocol §5.27.20：只读显示核心回执；挂起/待另立任务用 tertiary，手机不提供开关或处理入口。
+        autoFixNotice(task)?.let { fix ->
+            LabelValue("自动修复", autoFixSummary(fix),
+                valueColor = if (autoFixNeedsAttention(fix)) MaterialTheme.colorScheme.tertiary else Color.Unspecified)
+        }
         if (!task.optBoolean("read_only") && (task.optJSONArray("allowed_actions")?.length() ?: 0) > 0) Text("手机仅开放回答问题、确认执行；其他操作请在 Mac 处理。", style = MaterialTheme.typography.bodySmall)
     }
 }
@@ -715,7 +720,8 @@ private fun autoAdvancePaused(overview: JSONObject?): Boolean? = overview?.optJS
             Text(item.text("title").ifBlank { task?.text("title").orEmpty() }.ifBlank { item.text("task_id") }, style = MaterialTheme.typography.titleMedium)
             if (detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodyMedium)
             when (action) {
-                AttentionAction.MacOnly -> Text("该操作需在 Mac 上完成", style = MaterialTheme.typography.bodySmall,
+                // informational 项只是提示（如自动修复挂起），没有动作可做，不写「该操作需在 Mac 上完成」。
+                AttentionAction.MacOnly -> if (item.text("attention_state") != "informational") Text("该操作需在 Mac 上完成", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 AttentionAction.Answer -> OutlinedButton(onClick = onOpen, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("打开回答") }
                 AttentionAction.Plan -> OutlinedButton(onClick = onOpen, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("查看计划") }

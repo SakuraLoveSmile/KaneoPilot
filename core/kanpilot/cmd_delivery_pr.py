@@ -550,8 +550,10 @@ def cmd_delivery_sync(ctx, payload) -> dict:
 
 
 def _sync(ctx, payload, task, delivery, contract):
-    from . import release_delivery
+    from . import auto_fix, release_delivery
     policy = pr_auto_merge.snapshot(ctx.conn, task)
+    # Auto-fix needs the same check observation even when auto-merge is off.
+    watch_checks = auto_fix.watching(ctx.conn, task)
     def boundary():
         fresh = _fresh(ctx, payload, task, delivery)
         _verify_review_report(fresh)
@@ -572,8 +574,8 @@ def _sync(ctx, payload, task, delivery, contract):
             return {"outcome": "kaneo_done"}
         repo = _repository(task, delivery)
         boundary()
-        pr = (gh_client.pr_view(repo, delivery["pr_number"], merge_checks=True) if policy
-              else gh_client.pr_view(repo, delivery["pr_number"]))
+        pr = (gh_client.pr_view(repo, delivery["pr_number"], merge_checks=True)
+              if (policy or watch_checks) else gh_client.pr_view(repo, delivery["pr_number"]))
         boundary()
         if not delivery.get("pushed_sha") or delivery["pushed_sha"] != delivery.get("head_sha"):
             raise git_delivery.GitDeliveryError("branch_diverged", "同步交付的提交与已推送快照不一致")
@@ -602,6 +604,11 @@ def _sync(ctx, payload, task, delivery, contract):
     with db.write_txn(ctx.conn):
         fresh = boundary()
         display = {"auto_merge": auto_merge} if auto_merge else {}
+        if policy:
+            # The merge-gate receipt is authoritative; drop the check-only one.
+            display["auto_check"] = None
+        elif watch_checks:
+            display["auto_check"] = pr_auto_merge.observe(pr, delivery, ctx.now_iso)
         if pr["state"] == "MERGED":
             delivery_contract.verified_result(contract, fresh, payload, delivery, {"outcome": "merged"})
             # The PR merge is confirmed, while release policy may still hold

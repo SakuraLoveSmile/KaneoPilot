@@ -101,6 +101,11 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "rerun-checks": (
         {"task_id": (True, "str")},
         _automation_command("cmd_rerun_checks", "cmd_rerun_checks")),
+    # 引擎确定性步骤调用；不是公共 AI 处理入口（公共入口仍需 confirm）。
+    "auto-fix-pr": (
+        {"task_id": (True, "str"), "expected_head_sha": (True, "str"),
+         "expected_policy_revision": (True, "int")},
+        _automation_command("auto_fix", "cmd_auto_fix_pr")),
     "start-task-release": (
         {"task_id": (True, "str"), "expected_context_sha256": (True, "str")},
         _automation_command("release_delivery", "cmd_start_task_release")),

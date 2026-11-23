@@ -115,13 +115,14 @@ type 与命令同名，但只允许此表参数；其他参数拒绝。读取响
   - **等待你回答**（执行问题）：题目顺序、单选/多选/自定义规则沿用既有约定；「保存草稿」调用 `save-execution-answers`，「提交回答」调用 `submit-execution-answers`，沿用同一 `operation_id`。结果不明时保留操作编号，不自动重发。
   - **待确认执行**：仅当当前页面身份下 `get-plan` 返回且通过 `expected_plan_sha256` 核验后，才显示「确认并安排执行」（`confirm-dispatch`）；否则只显示「查看计划」。
   - **阻塞、失败、执行端失联**：不显示动作，文字「该操作需在 Mac 上完成」。
+  - **自动修复挂起**（protocol §5.27.20，informational）：`reason_code=auto_fix_suspended` 的项不显示动作、不做可回答样式，按普通阻塞卡片展示原因与等待时长；`filed` 一类原因附评论作者与链接说明，并写「可在 Mac 另立二级任务」。手机不提供开启/关闭自动修复或建立后续任务的入口。
 - 卡片徽标与等待时间：可回答按「等待你回答」，待确认执行按「待确认执行」；其余取同一任务在 `list-tasks` 中的行，按「状态词与徽标」条款显示（取 `exception.label`）；找不到该行时写「需人工处理」。卡片含项目名与「等待」时长（手机时钟减 `since`，下限 0，与复盘同一时长写法，如「等待 10 分钟」；无法解析时省略；只是显示提示，不属于复盘时长）。
 - 卡片版式（总览与「需要你」页共用）：第一行为徽标与「项目 · 等待」时长，第二行为任务标题（titleMedium），第三行为原因（bodyMedium，依次取 `question_preview`、`failure_reason`、`blocked_summary` 中第一个非空值），最后一行为动作。
 
 ### 执行复盘
 
 - 顶部只读提示：「只读复盘。需要处理的操作请到 Mac；暂停自动推进不会停止运行中的会话。」
-- 既有字段直接显示：`list-sessions` / `get-session` 中的轮次、`message_count`、`last_message_at`、`last_checked_at`；`get-task.task.automation` 中的 `fix_round` 与 `max_fix_rounds`（修复轮 N/M，上限取返回值，不写死）；交付状态；`session-messages` 增量合并（既有规则）。
+- 既有字段直接显示：`list-sessions` / `get-session` 中的轮次、`message_count`、`last_message_at`、`last_checked_at`；`get-task.task.automation` 中的 `fix_round` 与 `max_fix_rounds`（修复轮 N/M，上限取返回值，不写死）；交付状态；`session-messages` 增量合并（既有规则）。项目开启自动修复时，另显示只读一行 `task.delivery.auto_fix` 的 state/reason 与 attempt/max（protocol §5.27.20）：`started` 写「已排队，执行端领取后才开始」，不写成正在修复；`suspended`/`filed` 用 tertiary 文字。该行只读，不含开启开关或处理按钮。
 - 待核心投影（`get-task.task.retrospective`，protocol §5.32）：执行用时、等你处理统计、时间轴、时间分布、重点、验证 X/Y、验证执行统计。未投影时显示「未汇总」；门控关闭时执行用时与等你处理同样显示「未汇总」（protocol §5.32.5）；不得由 `list-events`（最多 200 条）或消息正文推算。
 - 时长使用核心返回的秒数，在客户端按 ui-spec §4.18 的格式化规则显示，不以手机时钟与 `started_at` 相减。卡片的等待时长是手机时钟与 `since` 之差的显示提示，不属于复盘时长。
 - 关键指标（两列两行）：执行用时（附「不含等你处理」）、验证 X/Y（附「未核验 N 条」）、修复轮 N/M（无 `automation.fix_round` 时省略）、等你处理（「N 次」，附「合计 N 分钟」）；数值 titleLarge 半粗，标签 labelMedium。

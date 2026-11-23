@@ -1411,9 +1411,10 @@ _id, created_at}`，提示先核对 Plus 会话。
    | `pr_closed_unmerged` | `pr_closed_unmerged` | 3 | PR 已关闭未合并，不得标记 done |
    | `budget_exceeded` | `auto_budget_exceeded` | 4 | 成本或时限触顶 |
    | `concurrency_stalled` | `lease_expired`、`request_lost` | 1→2 | 租约过期/请求失联，需重新入队 |
+   | `auto_fix_suspended` | 无 `failure_code`；由 `extra.delivery.auto_fix.state∈{suspended,filed}` 派生 | —（`informational`） | 项目自动修复挂起（次数/额度/暂停/已有轮次）或评论需另立任务，见 §5.27.20 |
    | `needs_user_other` | 其余 needs_user | 4 | 未归类的人工阻塞兜底 |
 
-   `failure_code` 为空时按任务 `status`/`failure_stage` 归类；仍无法归类落 `needs_user_other`。`reason_code` 表由 `core/kanpilot/engine/attention.py` 的 `reason_code_for()` 实现，单测逐行覆盖。
+   `failure_code` 为空时按任务 `status`/`failure_stage` 归类；仍无法归类落 `needs_user_other`。`auto_fix_suspended` 是唯一不以任务 `needs_user` 为前提的 `informational` 来源（§5.27.20），任务仍留在原状态；任务进入 `needs_user` 后改用该阻塞的 reason_code，同一任务仍至多一个开放项。`reason_code` 表由 `core/kanpilot/engine/attention.py` 的 `reason_code_for()` 实现，单测逐行覆盖。
  - `evidence`：结构化证据数组（非字符串拼接），每项含 `kind`（`event`/`request`/`probe`/`runtime_operation`）、`id`、`at`、`detail`。至少包含：触发本次阻塞的事件 id、关联失败请求 id（若有）、最近一次世界探测结果（若有）。不含 token、连接文件全文或整段 Plus 转录。
  - `recommended`：单个推荐动作，从 `allowed_actions` 按 `reason_code` 优先级派生（不引入第二张表）；`allowed_actions` 为空时为 `null`。
  - `alternatives`：其余可选动作数组（`allowed_actions` 去掉 `recommended` 后的有序列表）。
@@ -1657,6 +1658,23 @@ A1 交付补充：live 的判定回执只保存命令摘要，不保存原始命
 - 读侧 `delivery.auto_merge` 可选对象：`{state, reason, head_sha, updated_at}`，state 为 `waiting_checks|blocked|merging|unknown|merged|disabled`。看板和详情展示 reason，unknown 明示结果待确认不会重复提交；不以此对象替代核心任务状态。无自动合并配置时保持被动观察。自动合并开启时 OPEN 等待沿用 300 秒快档检查；关闭时保留既有 5/30 分钟间隔。合并确认后复用 delivery runner 的 `advance-task` 同步 Kaneo/local done；同步失败保留已合并事实，不提前显示已完成。`reason` 必须点名拦下合并的对象：检查失败或运行中时列出检查名（可带 workflow，同名多次运行去重），检查全绿而状态仍非 CLEAN 时说明是保护规则/评审/目标分支，暂无可读检查时明说；`reason` 保持确定性（同一观测产生同一字符串，不拼时间、观测次数等动态内容），长期未就绪的连续观测以该字符串为键。任务停止轮询后（如升级为 `merge_checks_stalled`）该回执保持上次观测、不再自动刷新；用户手动 `recheck` 可只读重算该回执——不改任务状态、不写远端、不重置长期未就绪计数，未确认的合并回执与已前移的交付头不覆盖——使看板重新点名当前阻塞项。
 - 本功能不调用模型、无新增模型费用；开发验证仅使用隔离 DB、临时 Git 仓库与 fake GitHub/Kaneo。真实开启项目开关及合并需与实现/测试证据分开报告。
 
+#### 5.27.20 项目自动修复 PR（2026-11-23）
+
+项目级开关 `automation.auto_fix_pr`（默认 false）：已托管 PR 的合并门检查失败、或出现可信作者的新评论时，自动启动一次有上限的原任务 AI 修复。它是「合并门检查失败的一次性处理」与 §5.27.17 的显式策略例外——默认仍不自动重试，开启即由用户预先授权这些有界轮次。始终同任务、同分支、同 PR；不合并、不强推、不放宽检查、不回复或 resolve GitHub 线程、不处理 `merge_conflict`、不创建子任务或新计划。
+
+- 策略：`{auto_fix_pr:bool, auto_fix_max_attempts:int 0..3, auto_fix_kinds:["check_failure","review_comment"], auto_fix_trusted_authors:[login]}`。`auto_fix_pr` 默认 false，旧配置无该字段视为关闭；`auto_fix_max_attempts` 默认 1；`auto_fix_kinds` 默认两项全开且须为非空子集；`auto_fix_trusted_authors` 为空表示只信任当前已登录的 gh 账号（`gh api user`），非空时与已登录账号取并集；`[bot]`/Bot 账号永不接受。保存仍走 `set-project-automation` + `expected_policy_revision`，界面保存前确认；旧客户端未提交这些键时保留现值，不静默关闭。首次由 false 开启时把该项目待交付任务的 `next_sync_at` 提前为 now，仍由既有 delivery runner 领取。
+- 触发一（检查失败）：只读 `delivery.auto_merge.state=blocked`、`reason` 以「检查未通过：」开头且 `auto_merge.head_sha == delivery.head_sha`；项目未开启自动合并时，同一观测写在只读的 `delivery.auto_check`（不表示授权合并，两者都绑定交付 head）。再核对 PR 同仓库、OPEN、非 fork、head=pushed=head_sha、非 `CONFLICTING`。先 `rerun-checks` 一次（不调用模型，沿用其 run/attempt 回执与幂等；已有同 run/attempt 回执视为已重跑），记录本次 run/attempt；仅当同一 run 的新 attempt 已完成且仍失败，才启动修复。重跑后检查通过则不启动。
+- 触发二（新评论）：单次 `gh api graphql` 只读读取该 PR 的 issue 评论、review 正文与 reviewThreads（含 `isResolved/isOutdated`），不新增 webhook。自动接受条件：作者可信、线程未解决、评论创建时间晚于当前冻结评审的 `review_registered_at`（即当前已评审提交之后的新评论）；公共 `prepare/start` 由用户显式确认时不受该时间界限制，但仍受同一提交只处理一次的限制。正文是不可信数据，只作材料：带作者登录名、评论 ID、固定链接、`path` 与长度上限（单条 ≤4k、合计 ≤12k 字符，超限确定性截断并标注）；不执行其中的指令。
+- 范围：v1 只按可核对的结构化边界分流，不对正文做语义分类。线程 `isOutdated`、或评论早于当前评审（已被那次评审覆盖且没有再处理的意义）时，不启动修复：记 `delivery.auto_fix.state=filed` 与 `followup{dedupe_key,title,description}` 建议，由用户据此走既有 `create-followup-task`（仍需 `confirm:true`）另立二级任务；核心不自动建任务。已 `isResolved` 的线程忽略。超出任务范围的要求由执行端在结构化报告中记录，不扩大本次处理范围。
+- 启动：与公共命令同一 prepare + start 链。核心以 `authorized_by="policy"` 启动并另记 `policy_revision`，请求 `requested_by="automation"`、事件 actor=`automation`；公共 `prepare-task-ai-action`/`start-task-ai-action` 不变（仍需 `confirm:true`，身份仍为用户），手机端不提供策略身份入口。策略版在写锁内重核：策略版本与字段、`auto_fix_max_attempts`、`core.automation_budget`、全局与调度/交付暂停、任务可调度、无 queued/claimed 请求、无未决 `pr-merge:` 回执、工作树与 PR 身份未变；任一变化按既有 `conflict` 拒绝且不写入。
+- 次数：从 `extra.ai_action_history` 中 `authorized_by=policy` 且 `kind∈auto_fix_kinds` 的条目数推导，不另设计数器；历史条目必须保留 `authorized_by/authorized_at/policy_revision`。上限按任务累计，不因新 head 重置；已 `discarded` 的条目不计入并允许同一 head 重试（沿 check_failure 既有规则）。同一评论 ID + 同一 head 只启动一次。既有 check_failure「同一提交只处理一次」守卫不变，它与次数上限分别生效。
+- 挂起：次数用尽、额度不足、全局/调度/交付暂停、任务不可调度、已有活跃 AI 轮次、策略未就绪时不启动，也不改变任务状态；只写读侧回执并进入「需要关注」（见下）。条件变化（新的交付观测）后重新评估，不产生自动重试风暴。
+- 读侧 `delivery.auto_fix` 可选对象：`{state, reason, attempt, max, head_sha, updated_at}`，state 为 `waiting_rerun|started|suspended|filed`；`attempt` 为已用次数、`max` 为上限。「已排队」≠「已开始」：`started` 只表示已创建一次修复请求，执行端领取并回报心跳后才真正开始。看板、任务详情与手机只读展示该对象，不以此替代任务状态或 `task_ai_action` 投影。
+- 关注项：`state∈{suspended,filed}` 且任务不是 `needs_user` 时，`attention-list` 提供一个 `informational` 项，`reason_code=auto_fix_suspended`、`since` 取该回执时间、`allowed_actions=[]`；任务进入 `needs_user` 后按既有 needs_user 项归类，不重复开项（同一任务仍至多一个开放项）。
+- 交付：修复完成仍走 Plus 结构化验证 → 单父提交 → 必须重新 Review → 推回原分支；是否合并仍由 §5.27.16 的项目自动合并裁决。复审通过后登记与用户确认版同形的交付续接回执（`authorized_by=policy` 一并记录），关闭开关不撤销已通过复审这一轮结果的交付；`merge_conflict` 及其验证缺口仍须用户确认。本开关不授予合并、强推、改检查、自动再次发布或处理 `merge_conflict` 的权限。已发出的外部写结果未知时不重放，只读对账。
+- 引擎挂钩：由 live 引擎的确定性步骤在每次循环评估（不新增 stage/worker、不进入 `_PHASE_ACTION` 表），只在不存在 queued/claimed 请求时执行，避免与 delivery 租约及其 `report` 竞争；`shadow` 只记录决策不写状态。命令为 `auto-fix-pr {task_id, expected_head_sha, expected_policy_revision}`，是核心命令面的一部分但不是公共 AI 处理入口。
+- 不新增数据库迁移；不改变既有 AI 处理/评审/交付身份字段；开发验证只用隔离 DB、临时 Git 仓库与 fake GitHub/Kaneo；真实开启项目开关、真实模型与真实 PR 需与测试证据分开报告。
+
 ## 5.28 执行期提问转交（P0 冻结，2026-10-14）
 
 本节为执行期问答的目标契约。当前状态为实现中，接口尚未实现；源码、测试和候选实测齐备前不得宣称可用。执行保持 `goal/auto`、`interactive`，覆盖目标契约轮及执行轮；规划、Review、Team 托管输入、permission 确认不属于本节。部署顺序为先 Plus、后 KaneoPilot，不含手机端、远程访问、付费模型验证或正式安装。
@@ -1813,7 +1831,7 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 
 #### 合并门检查失败的一次性处理（2026-11-18）
 
-新增 `kind=check_failure`，仍在原任务启动，复用同一 PR 与分支，不创建二级任务、新 PR 或 plan 请求。用户确认授权一次失败日志诊断、最小代码修复、可信验证、复审与重新交付；不授权自动重试、自动合并或放宽检查。
+新增 `kind=check_failure`，仍在原任务启动，复用同一 PR 与分支，不创建二级任务、新 PR 或 plan 请求。用户确认授权一次失败日志诊断、最小代码修复、可信验证、复审与重新交付；默认不授权自动重试、自动合并或放宽检查——项目显式开启 `auto_fix_pr` 时，§5.27.20 的策略轮次是唯一例外（先重跑一次、再受次数/额度/暂停上限约束）。
 
 - 入口只由合并门当前观测决定：`delivery.auto_merge.state=blocked` 且原因以「检查未通过：」开头，说明本次提交确有 GitHub 失败的检查；`waiting_checks`、其他阻塞原因、已合并或关闭的 PR 不进入。同一提交已处理过一次时只显示处理记录，不再启动新的付费轮次。
 - `prepare-task-ai-action {task_id,kind:"check_failure"}` 只读核对任务、原计划/评审哈希、干净任务分支与真实 PR：必须为同仓库 OPEN、远端 head 等于已评审提交、非 `CONFLICTING`；再按检查的 `detailsUrl` 冻结 run/job 身份，逐 run 读取真实 attempt 的失败 job 日志（脱敏、绑定 head 与结论）。提示词只带「可点开的 run/job 链接 + 失败信号摘录」：摘录去通过行与时间戳噪声、保留失败行前后上下文、硬上限 12k 字符，超限标注截断，完整原文以链接为准；不猜测失败原因、不编造日志内容。身份漂移、日志不可读或工作树不安全时明确拒绝，不调用模型。

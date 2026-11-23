@@ -122,6 +122,43 @@ def eligibility(pr):
     return None
 
 
+def failed_checks_notice(delivery):
+    """The stored observation naming failed checks of this exact head.
+
+    ``auto_merge`` is the merge-gate receipt; when the project only enables
+    auto-fix, delivery-sync stores the same classification in ``auto_check`` so
+    the check trigger does not require a merge authorization (protocol §5.27.20).
+    """
+    head = delivery.get('head_sha')
+    for key in ('auto_merge', 'auto_check'):
+        notice = delivery.get(key) or {}
+        if (notice.get('state') == 'blocked'
+                and str(notice.get('reason') or '').startswith('检查未通过：')
+                and notice.get('head_sha') == head):
+            return notice
+    return {}
+
+
+def stale_failed_checks(delivery):
+    """A blocked check notice exists but belongs to an older delivery head."""
+    head = delivery.get('head_sha')
+    for key in ('auto_merge', 'auto_check'):
+        notice = delivery.get(key) or {}
+        if (notice.get('state') == 'blocked'
+                and str(notice.get('reason') or '').startswith('检查未通过：')
+                and notice.get('head_sha') != head):
+            return True
+    return False
+
+
+def observe(pr, delivery, now):
+    """Check-only observation for auto-fix; never authorizes a merge."""
+    checks = _classify_checks(pr)
+    if checks is None:
+        return None
+    return _notice(*checks, delivery, now)
+
+
 def refresh_notice(conn, task, now, *, reader=None):
     """Read-only refresh of the merge-gate line for a parked delivery task.
 

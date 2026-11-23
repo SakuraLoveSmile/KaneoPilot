@@ -34,10 +34,14 @@ def _context(fix):
     elif fix.get("source_kind") == "check_failure":
         from . import task_ai_check_failure
         fields += ("source_kind",) + task_ai_check_failure.FIELDS
+    elif fix.get("source_kind") == "review_comment":
+        from . import task_ai_review_comment
+        fields += ("source_kind",) + task_ai_review_comment.FIELDS
     value = {key: fix.get(key) for key in fields}
     if fix.get("source_kind") == "build_failure":
         delivery = dict(fix.get("source_delivery") or {})
-        for key in ("last_sync_at", "next_sync_at", "stage_contracts", "stage_results"):
+        for key in ("last_sync_at", "next_sync_at", "stage_contracts", "stage_results",
+                    "auto_fix", "auto_check"):
             delivery.pop(key, None)
         if isinstance(delivery.get("auto_merge"), dict):
             delivery["auto_merge"] = {key: item for key, item in delivery["auto_merge"].items() if key != "updated_at"}
@@ -221,6 +225,11 @@ def _public_candidate(value):
     elif value.get("source_kind") == "check_failure":
         from . import task_ai_check_failure
         result.update({key: value[key] for key in task_ai_check_failure.PUBLIC})
+    elif value.get("source_kind") == "review_comment":
+        from . import task_ai_review_comment
+        result.update({key: value[key] for key in task_ai_review_comment.PUBLIC
+                       if key != "comments"})
+        result["comments"] = task_ai_review_comment.public_comments(value)
     return result
 
 
@@ -237,6 +246,11 @@ def _prepare_kind(ctx, task, kind):
             return task_ai_build_failure.prepare(ctx, task)
         except gh_client.GhError as exc:
             raise util.KanpilotError("remote_unavailable", exc.message) from exc
+    if kind == "review_comment":
+        from . import task_ai_review_comment
+        # The policy path passes the live observation and keeps the freshness
+        # window; this public entry is user-confirmed and may reach older comments.
+        return task_ai_review_comment.prepare(ctx, task, fresh_only=False)
     return _prepare(ctx, task)
 
 
@@ -256,7 +270,9 @@ def _start_snapshot(task):
     extra = _extra(task)
     delivery = extra.get("delivery")
     if isinstance(delivery, dict):
-        for key in ("last_sync_at", "next_sync_at", "stage_contracts", "stage_results"):
+        # Read-side observations must not invalidate a confirmed candidate.
+        for key in ("last_sync_at", "next_sync_at", "stage_contracts", "stage_results",
+                    "auto_fix", "auto_check"):
             delivery.pop(key, None)
         if isinstance(delivery.get("auto_merge"), dict):
             delivery["auto_merge"].pop("updated_at", None)
@@ -267,6 +283,8 @@ def _start_snapshot(task):
 def cmd_start_task_ai_action(ctx, payload):
     util.require(payload.get("confirm") is True and payload.get("kind") in KINDS,
                  "需要明确确认本次 AI 处理", "bad_request")
+    util.require(payload.get("authorized_by") in (None, "user"),
+                 "公共命令只能以用户身份启动；策略启动请使用自动修复入口", "bad_request")
     task = db.require_task(ctx.conn, payload["task_id"])
     # Replaying an acknowledged confirmation must not start another model turn,
     # even after the global model configuration or task state has changed.
@@ -283,6 +301,43 @@ def cmd_start_task_ai_action(ctx, payload):
     util.require(value["action_context_sha256"] == payload.get("expected_context_sha256")
                  and value["action_config_sha256"] == payload.get("expected_config_sha256"),
                  "任务、PR 或通用 AI 配置已变化，请重新准备并确认", "conflict")
+    return _start(ctx, task, value, snapshot=snapshot)
+
+
+def start_policy(ctx, task, value, *, policy_revision):
+    """Policy-authorized start (protocol §5.27.20).
+
+    The caller prepared `value` read-only from the live delivery observation;
+    the writer lock repeats policy, budget, pause and attempt checks.
+    """
+    util.require(value.get("source_kind") in KINDS and isinstance(policy_revision, int),
+                 "自动修复身份不完整", "conflict")
+    return _start(ctx, task, value, snapshot=_start_snapshot(task), authorized_by="policy",
+                  actor="automation", policy_revision=policy_revision)
+
+
+def _check_kind_gate(conn, fresh, value):
+    """Re-check the kind-specific one-per-head gate inside the writer lock."""
+    if value["source_kind"] == "build_failure":
+        from . import task_ai_build_failure
+        util.require(task_ai_build_failure.gate(conn, fresh) is None,
+                     "准备期间失败构建状态已变化，请重新准备", "conflict")
+    if value["source_kind"] == "check_failure":
+        from . import task_ai_check_failure
+        util.require(task_ai_check_failure.gate(conn, fresh) is None,
+                     "准备期间失败检查状态已变化，请重新准备", "conflict")
+    if value["source_kind"] == "review_comment":
+        from . import task_ai_review_comment
+        util.require(task_ai_review_comment.gate(conn, fresh) is None,
+                     "准备期间 PR 评论状态已变化，请重新准备", "conflict")
+
+
+def _start(ctx, task, value, *, snapshot, authorized_by="user", actor="user", policy_revision=None):
+    """Shared transaction body for the user and policy entries.
+
+    Replaying the same action returns the existing request. The public entry has
+    already compared the prepared context hashes with what the user confirmed.
+    """
     with db.write_txn(ctx.conn):
         fresh = db.require_task(ctx.conn, task["task_id"])
         current = _action(fresh)
@@ -291,25 +346,24 @@ def cmd_start_task_ai_action(ctx, payload):
                     "task_ai_action": projection(ctx.conn, fresh, ctx.now)}
         util.require(_start_snapshot(fresh) == snapshot and _base_gate(ctx.conn, fresh) is None,
                      "准备期间任务状态已变化，请刷新后重试", "conflict")
-        if value["source_kind"] == "build_failure":
-            from . import task_ai_build_failure
-            util.require(task_ai_build_failure.gate(ctx.conn, fresh) is None,
-                         "准备期间失败构建状态已变化，请重新准备", "conflict")
-        if value["source_kind"] == "check_failure":
-            from . import task_ai_check_failure
-            util.require(task_ai_check_failure.gate(ctx.conn, fresh) is None,
-                         "准备期间失败检查状态已变化，请重新准备", "conflict")
+        _check_kind_gate(ctx.conn, fresh, value)
         # snapshot() may resolve Plus defaults over a connection, so only compare
         # the raw persisted global setting while the writer lock is held.
         util.require(_digest(db.get_setting(ctx.conn, "exec_config")) == value["raw_config_sha256"],
                      "准备期间通用 AI 配置已变化，请重新准备", "conflict")
+        if authorized_by == "policy":
+            from . import auto_fix
+            auto_fix.require_policy_start(ctx.conn, fresh, value, policy_revision, ctx.now)
         extra = _extra(fresh)
         automation = core.automation_of(fresh)
         if automation:
             automation.update(segment_started_at=ctx.now_iso, plan_wanted=False)
             extra["automation"] = automation
         value.update(state="queued", created_at=ctx.now_iso, queued_at=ctx.now_iso,
-                     authorized_by="user", authorized_at=ctx.now_iso, prompt_rev=repair_prompt.PROMPT_REV)
+                     authorized_by=authorized_by, authorized_at=ctx.now_iso,
+                     prompt_rev=repair_prompt.PROMPT_REV)
+        if policy_revision is not None:
+            value["policy_revision"] = policy_revision
         for key in ("review_conclusion", "review_registered_at", "registered_review_identity", "verification_override", "plan_execution_hold"):
             extra.pop(key, None)
         extra["fix_request"] = value
@@ -328,18 +382,21 @@ def cmd_start_task_ai_action(ctx, payload):
                                           "reason": "构建修复仅授权新 PR；合并与再次构建发布须另行确认"}
             extra["delivery"] = {"mode": "pr", "build_failure_action_id": value["action_id"], "commits": [],
                                  **{key: value[key] for key in ("branch", "worktree_path", "head_sha", "base_branch", "base_sha")}}
-        core.transition_task(ctx.conn, fresh, "ready", ctx.now_iso, "user", detail={"via": "task_ai_action", "action_id": value["action_id"]},
+        core.transition_task(ctx.conn, fresh, "ready", ctx.now_iso, actor,
+                             detail={"via": "task_ai_action", "action_id": value["action_id"],
+                                     "authorized_by": authorized_by},
                              stage="dispatch", sent=0, send_state=None, sent_at=None, lock_retained=0,
                              review_report_path=None, review_report_sha256=None, review_key=None,
                              extra_json=extra, **core.clear_block_fields())
         request, _ = db.create_request(ctx.conn, ctx.now_iso, "dispatch", "dispatch:" + task["task_id"],
-                                      task_id=task["task_id"], requested_by="user", payload={"review_repair_key": value["review_key"]})
+                                      task_id=task["task_id"], requested_by=actor, payload={"review_repair_key": value["review_key"]})
         fresh = db.require_task(ctx.conn, task["task_id"])
         value["request_id"] = request["request_id"]
         db.set_extra(ctx.conn, fresh, ctx.now_iso, fix_request=value)
         record_progress(ctx.conn, db.require_task(ctx.conn, task["task_id"]), ctx.now_iso, "queued")
         db.add_event(ctx.conn, ctx.now_iso, "task_ai_action_started", task_id=task["task_id"], request_id=request["request_id"],
-                     actor="user", detail={"action_id": value["action_id"], "kind": value["source_kind"]})
+                     actor=actor, detail={"action_id": value["action_id"], "kind": value["source_kind"],
+                                          "authorized_by": authorized_by, "policy_revision": policy_revision})
     return {"ok": True, "request_id": request["request_id"], "task_ai_action": projection(ctx.conn, db.require_task(ctx.conn, task["task_id"]), ctx.now)}
 
 
@@ -435,6 +492,9 @@ def _prompt_body(fix, plan_path):
     if fix.get("source_kind") == "check_failure":
         from . import task_ai_check_failure
         return task_ai_check_failure.prompt_body(fix, plan_path)
+    if fix.get("source_kind") == "review_comment":
+        from . import task_ai_review_comment
+        return task_ai_review_comment.prompt_body(fix, plan_path)
     from . import verify_evidence
     plan = _read_frozen(plan_path, fix.get("plan_sha256"))
     _read_frozen(fix.get("report_path"), fix.get("report_sha256"), report=True)
@@ -470,7 +530,8 @@ def _prompt_body(fix, plan_path):
 def _entry(fix):
     state = fix.get("state", "queued")
     return {**{key: fix.get(key) for key in ("action_id", "created_at", "model_summary", "pr_number", "head_sha", "reason",
-              "action_context_sha256", "action_config_sha256", "source_execution_run_id", "request_id")},
+              "action_context_sha256", "action_config_sha256", "source_execution_run_id", "request_id",
+              "authorized_by", "authorized_at", "policy_revision")},
             **{key: fix.get(key) for key in ("release_batch_id", "release_tag", "source_pr_number", "source_pr_url", "workflow_run_id", "workflow_attempt", "workflow_url")},
             "kind": fix.get("source_kind", KIND), "title": fix.get("title") or TITLE, "state": state, "state_title": STATE_TITLES.get(state, "状态未知"),
             "base_sha": fix.get("target_base_sha") or fix.get("base_sha"),
@@ -504,7 +565,7 @@ def register_delivery_continuation(conn, task, now, fix):
     if fix.get("source_kind") not in KINDS:
         return
     verify_frozen(task, fix)
-    util.require(fix.get("authorized_by") == "user" and fix.get("authorized_at")
+    util.require(fix.get("authorized_by") in ("user", "policy") and fix.get("authorized_at")
                  and fix.get("state") == "awaiting_review"
                  and fix.get("repair_execution_run_id") == task["run_id"],
                  "AI 处理复审与原授权轮次不符", "conflict")
@@ -524,7 +585,12 @@ def register_delivery_continuation(conn, task, now, fix):
 
 
 def delivery_continuation(task, *, allow_paused=False):
-    """Metadata-only authority for exactly the reviewed result of a user action."""
+    """Metadata-only authority for exactly the reviewed result of an action.
+
+    Both the public (authorized_by=user) and the project policy
+    (authorized_by=policy, protocol §5.27.20) entries use the same receipt:
+    the authority is the registered pass for this exact action identity.
+    """
     if task is None:
         return None
     extra = _extra(task)
@@ -532,7 +598,8 @@ def delivery_continuation(task, *, allow_paused=False):
     fix = receipt.get("action") or {}
     delivery = core.delivery_of(task)
     build = fix.get("source_kind") == "build_failure"
-    if (fix.get("source_kind") not in KINDS or fix.get("authorized_by") != "user" or not fix.get("authorized_at")
+    if (fix.get("source_kind") not in KINDS
+            or fix.get("authorized_by") not in ("user", "policy") or not fix.get("authorized_at")
             or not fix.get("action_id") or fix.get("action_context_sha256") != _context(fix)
             or (fix.get("action_config") or {}).get("backend") not in (("pi_desktop", "codex") if build else ("pi_desktop",))
             or fix.get("action_config_sha256") != _digest(fix.get("action_config"))

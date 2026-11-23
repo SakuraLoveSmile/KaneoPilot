@@ -96,6 +96,29 @@ class DeliveryPR(KanpilotTestCase):
     def sync(self):
         return commands.cmd_delivery_sync(self.ctx, self.payload)
 
+    def test_auto_fix_observation_records_failed_checks_without_auto_merge(self):
+        from kanpilot import automation_policy
+        project = self.task()["project_id"]
+        current = automation_policy.policy_for(self.ctx.conn, project) or {}
+        automation_policy.cmd_set_project_automation(self.ctx, {
+            "project_id": project,
+            "automation": {"enabled": True, "auto_fix_pr": True},
+            "expected_policy_revision": current.get("policy_revision", 0)})
+        self.assertEqual(self.publish_delivery()["outcome"], "published")
+        check = {"__typename": "CheckRun", "name": "analyze-test", "workflowName": "app-ci",
+                 "status": "COMPLETED", "conclusion": "FAILURE",
+                 "detailsUrl": "https://github.com/owner/repo/actions/runs/1/job/2"}
+        failing = self.pr(mergeable="MERGEABLE", statusCheckRollup=[check], isDraft=False)
+        with patch.object(gh_client, "pr_view", side_effect=lambda *a, **k: failing):
+            result = self.sync()
+        self.assertEqual(result["outcome"], "waiting")
+        value = core.delivery_of(self.task())
+        self.assertFalse(value.get("auto_merge") and value["auto_merge"].get("state") == "blocked")
+        notice = value.get("auto_check") or {}
+        self.assertEqual(notice.get("state"), "blocked")
+        self.assertTrue(str(notice.get("reason")).startswith("检查未通过："))
+        self.assertEqual(notice.get("head_sha"), self.delivery["head_sha"])
+
     def test_push_real_bare_reuses_open_idempotent_comment(self):
         self.assertEqual(self.publish_delivery()["outcome"], "published")
         self.assertEqual(self.publish_delivery()["outcome"], "published")

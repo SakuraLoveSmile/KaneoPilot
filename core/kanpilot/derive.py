@@ -593,8 +593,8 @@ def task_relations(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
 
 def task_delivery_view(task) -> Optional[dict]:
     """The completed lifecycle supersedes a merge receipt's earlier progress."""
-    from . import core
-    delivery = core.delivery_of(task)
+    from . import auto_fix, core
+    delivery = auto_fix.project_delivery(task, core.delivery_of(task))
     notice = delivery.get("auto_merge") or {}
     if (task["status"] == "done" and delivery.get("pr_state") == "MERGED"
             and delivery.get("merged_at") and notice.get("state") == "merged"
@@ -716,7 +716,12 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
             or core.delivery_of(task).get("pushed_sha")):
         phase, condition = "delivery", "syncing"
     view.update(phase=phase, condition=condition, attention=None)
-    if (task["status"] == "needs_user" or verification_question and verification_question['state'] == 'open') and db.task_is_active(task):
+    auto_fix = (view.get("delivery") or {}).get("auto_fix") or None
+    if auto_fix is not None and auto_fix.get("state") not in ("suspended", "filed"):
+        auto_fix = None
+    if (task["status"] == "needs_user"
+            or verification_question and verification_question['state'] == 'open'
+            or auto_fix is not None) and db.task_is_active(task):
         from .engine.commands import _task_evidence
         source = dict(view, failure_code=task["failure_code"],
                       failure_stage=task["failure_stage"],
@@ -724,6 +729,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
                       blocked_summary=task["blocked_summary"],
                       blocked_at=task["blocked_at"],
                       allowed_actions=allowed_actions(conn, task, now),
+                      delivery_auto_fix=auto_fix,
                       evidence=_task_evidence(conn, task["task_id"],
                                               task["blocked_at"] or task["updated_at"]))
         if manual_delivery:
@@ -851,12 +857,11 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             # Cheap, storage-driven offer: the merge gate already names a failed
             # check, so one explicit rerun of those jobs is available.
             from . import core as core_module
+            from . import pr_auto_merge
             delivery = core_module.delivery_of(task)
-            notice = delivery.get("auto_merge") or {}
             # 通知可能来自更早的交付头；那时重跑会因 PR head 不符被拒（KP-MG03 #1）。
-            if (core_module.is_pr_delivery(task) and notice.get("state") == "blocked"
-                    and str(notice.get("reason") or "").startswith("检查未通过：")
-                    and notice.get("head_sha") == delivery.get("head_sha")):
+            # 自动修复开启而自动合并关闭时，同一失败检查观测在 delivery.auto_check。
+            if core_module.is_pr_delivery(task) and pr_auto_merge.failed_checks_notice(delivery):
                 actions.append("rerun_checks")
         if status in ("in_review", "needs_user", "running"):
             actions.append("mark_done")

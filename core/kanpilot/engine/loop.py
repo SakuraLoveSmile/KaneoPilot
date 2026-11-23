@@ -496,6 +496,9 @@ class Reconciler:
                 actions.append(self.intake_step(conn, now, modes))
 
             if self.enable_tick:
+                # Auto-fix runs on the last completed delivery observation, before
+                # this tick creates the next delivery poll.
+                actions.append(self.auto_fix_step(conn, modes))
                 actions.append(self.business_tick_step(conn, modes))
                 actions.append(self.retention_step(conn, now_iso))
 
@@ -520,6 +523,52 @@ class Reconciler:
         except Exception as exc:
             code = exc.code if isinstance(exc, util.KanpilotError) else "internal_error"
             self.log("保留期回收失败 [%s]: %s" % (code, util.redact(str(exc))))
+            return dict(action, error=code, detail=util.redact(str(exc)))
+
+    def auto_fix_step(self, conn, modes) -> dict:
+        """Deterministic project auto-fix evaluation (protocol §5.27.20).
+
+        Runs as its own step (not a new stage/worker) so it never holds a
+        delivery lease: the command refuses to start while any queued/claimed
+        request exists. No model is called here; a fix is started through the
+        existing prepare + start AI-action chain.
+        """
+        action = {"action": "auto_fix", "executed": False}
+        try:
+            from .. import auto_fix, automation_policy
+            candidates = []
+            for task in conn.execute(
+                    "SELECT * FROM tasks WHERE save_state='active' AND status='in_review' "
+                    "ORDER BY updated_at").fetchall():
+                if (modes.get(task["project_id"], self.mode) != "live"
+                        or not core.is_automation_managed(task)):
+                    continue
+                policy = automation_policy.policy_for(conn, task["project_id"]) or {}
+                if not (policy.get("enabled") and policy.get("auto_fix_pr")):
+                    continue
+                if auto_fix.candidate(conn, task):
+                    candidates.append((task, policy))
+            if self.mode == "shadow":
+                return dict(action, reason="shadow_diagnostic", candidates=len(candidates))
+            results = []
+            for task, policy in candidates:
+                payload = {"task_id": task["task_id"],
+                           "expected_head_sha": core.delivery_of(task).get("head_sha"),
+                           "expected_policy_revision": policy.get("policy_revision")}
+                try:
+                    from .. import engine_claim_scope
+                    with engine_claim_scope.command_mode(self.mode, self.force_mode):
+                        result = self.run_command("auto-fix-pr", payload)
+                    results.append({"task_id": task["task_id"], "outcome": result.get("outcome"),
+                                    "reason": result.get("reason"), "state": result.get("state")})
+                except util.KanpilotError as exc:
+                    results.append({"task_id": task["task_id"], "error": exc.code,
+                                    "detail": util.redact(exc.message)})
+            return dict(action, executed=bool(candidates), candidates=len(candidates),
+                        results=results)
+        except Exception as exc:  # a broken auto-fix probe must not stop the engine
+            code = exc.code if isinstance(exc, util.KanpilotError) else "internal_error"
+            self.log("自动修复评估失败 [%s]: %s" % (code, util.redact(str(exc))))
             return dict(action, error=code, detail=util.redact(str(exc)))
 
     def business_tick_step(self, conn, modes) -> dict:

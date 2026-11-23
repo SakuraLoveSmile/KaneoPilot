@@ -179,6 +179,37 @@ fun currentReviewArgs(task: JSONObject): JSONObject? {
         "expected_execution_run_id" to report.text("execution_run_id"), "expected_report_sha256" to report.text("report_sha256"))
 }
 
+/** task.delivery.auto_fix 的只读观测：只认与当前交付 head 一致的记录（protocol §5.27.20）。 */
+fun autoFixNotice(task: JSONObject): JSONObject? {
+    val delivery = task.optJSONObject("delivery") ?: return null
+    val notice = delivery.optJSONObject("auto_fix") ?: return null
+    val head = delivery.text("head_sha")
+    if (head.isBlank() || notice.text("head_sha") != head) return null
+    return notice
+}
+
+/** 只读一行：状态标题、挂起/待另立任务的原因与「修复次数 attempt/max」；started 不写成正在修复。 */
+fun autoFixSummary(notice: JSONObject): String {
+    val title = notice.text("state_title").ifBlank {
+        when (notice.text("state")) {
+            "waiting_rerun" -> "已重跑失败检查，等待新的检查结果"
+            "started" -> "已排队，执行端领取后才开始"
+            "suspended" -> "自动修复挂起"
+            "filed" -> "评论已登记，待另立二级任务"
+            else -> "自动修复状态未知"
+        }
+    }
+    // 挂起与「评论待另立任务」要写原因；等待重跑与已排队只写状态标题，避免同句重复。
+    val reason = notice.text("reason")
+    val head = if (autoFixNeedsAttention(notice) && reason.isNotBlank() && reason != title) "$title：$reason" else title
+    val max = notice.optInt("max", -1)
+    if (max < 0) return head
+    val attempt = notice.optInt("attempt")
+    return "$head · 修复次数 $attempt/$max"
+}
+
+/** 挂起与「评论待另立任务」需要处理；等待重跑与已排队只是等待观测。 */
+fun autoFixNeedsAttention(notice: JSONObject): Boolean = notice.text("state") in setOf("suspended", "filed")
 
 fun pendingLookupFailure(error: Exception): String = when {
     error is ApiException && error.status == 404 -> "Mac 尚无此操作回执；请在 Mac 核实是否执行，不会自动重发"

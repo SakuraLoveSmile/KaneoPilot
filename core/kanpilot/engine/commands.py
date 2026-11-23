@@ -47,8 +47,12 @@ def _needs_user_views(conn, now, *, include_historical):
     """
     states = ("active", "archived", "trashed") if include_historical else ("active",)
     placeholders = ",".join("?" * len(states))
+    # Auto-fix suspensions are informational attention sources while the task
+    # keeps running (protocol §5.27.20): they never change task.status.
     query = (
-        "SELECT * FROM tasks WHERE (status='needs_user' OR json_extract(extra_json,'$.release_verification_ref.verification_id') IS NOT NULL) "
+        "SELECT * FROM tasks WHERE (status='needs_user' "
+        "OR json_extract(extra_json,'$.release_verification_ref.verification_id') IS NOT NULL "
+        "OR json_extract(extra_json,'$.delivery.auto_fix.state') IN ('suspended','filed')) "
         f"AND save_state IN ({placeholders}) ORDER BY updated_at DESC"
     )
     views = []
@@ -57,7 +61,10 @@ def _needs_user_views(conn, now, *, include_historical):
     from .. import release_verification_questions
     for row in conn.execute(query, states).fetchall():
         verification_fields = release_verification_questions.attention_fields(conn, row, now)
-        if row['status'] != 'needs_user' and not verification_fields:
+        auto_fix = (db.task_extra(row).get("delivery") or {}).get("auto_fix")
+        if not isinstance(auto_fix, dict) or auto_fix.get("state") not in ("suspended", "filed"):
+            auto_fix = None
+        if row['status'] != 'needs_user' and not verification_fields and auto_fix is None:
             continue
         views.append({
             "task_id": row["task_id"],
@@ -75,6 +82,7 @@ def _needs_user_views(conn, now, *, include_historical):
             # recomputes it).
             "allowed_actions": derive.allowed_actions(conn, row, now),
             "question_preview":question_preview(question_view(row,now)),
+            "delivery_auto_fix": auto_fix,
             "evidence": _task_evidence(conn, row["task_id"],
                                        row["blocked_at"] or row["updated_at"]),
         })

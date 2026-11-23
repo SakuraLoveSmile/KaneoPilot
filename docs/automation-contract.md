@@ -117,6 +117,8 @@ SSH Host 别名通过当前仓库环境下的本机 `ssh -G` 展开，不连接�
 
 交付中的 PR 合并冲突可由用户显式调用 `prepare-task-ai-action`／`start-task-ai-action` 发起一次处理（完整契约见 protocol“任务内 AI 一次性处理”）。沿用全局执行配置快照与原验证要求、不创建规划或子任务、不消费 Review 修复次数；失败不自动增加 AI 轮次。核心准备冻结 base 的合并，AI 只解决文件冲突并验证，核心登记严格双父提交后重新评审，再更新同一 PR。已开启自动合并不构成自动调用一次性 AI 的授权。
 
+项目另可显式开启 `auto_fix_pr`（默认关，唯一契约见 protocol §5.27.20）：已托管 PR 的检查失败或可信作者的新评论会启动一次受次数、额度与暂停限制的原任务修复。它仍是「默认不自动重试」的显式例外：检查失败先 `rerun-checks` 一次；同一评论 ID + head 只启动一次；次数从 `ai_action_history` 中 `authorized_by=policy` 的条目推导。`merge_conflict` 与验证缺口仍须用户确认，自动合并开关本身仍不是授权。
+
 以下 publish-plan/计划元数据段落仅为已持久化的历史 same_task 规划恢复契约，新直接修复不走这些入口。
 
 **publish-plan 的 same_task 分支（主控，cmd_exec 614–812）：**
@@ -246,7 +248,7 @@ exit_code 缺失或不是整数时记为 None。
 
 **delivery-sync（包 F）：**
 
-项目自动合并扩展以 protocol §5.27.16 为唯一契约：默认关闭，显式开启后 OPEN 分支先核对 GitHub 检查、正常合并资格与当前评审身份，经 runtime_operations 回执发送一次绑定 head 的 merge 请求；确认 MERGED 后进入下述既有同步流程。未开启保持被动观察。
+项目自动合并扩展以 protocol §5.27.16 为唯一契约：默认关闭，显式开启后 OPEN 分支先核对 GitHub 检查、正常合并资格与当前评审身份，经 runtime_operations 回执发送一次绑定 head 的 merge 请求；确认 MERGED 后进入下述既有同步流程。未开启保持被动观察。项目自动修复以 protocol §5.27.20 为唯一契约：它只消费合并门与评论观测，不改变本节的门禁、重试与完成判定；挂起时交付仍按既有间隔继续观察。
 
 1. 先读 Kaneo 任务（只读，无事务）：
    - 远端已 done → 返回 `{outcome:"kaneo_done"}`；
@@ -459,7 +461,7 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 | planner_failed（自动重试一次后）、needs_input | plan | replan、dismiss；也可以在规划面板补充材料后手动提交 |
 | dispatch_failed | dispatch | 沿用 retry/restore/accept_duplicate/mark_sent；另有 replan、dismiss |
 
-一次性 `merge_conflict` 的验证缺证为上述 retry_verification 的受限补报路径：必须用户明确确认当前 run 与费用，复用原计划/固化配置及已解决暂存现场；不创建规划、不重做合并、不自动重试、不消耗 Review fix_round。身份、合并标记、源码/索引和远端漂移拒绝，普通 resume/retry/replan 不放行。具体守卫见 protocol「任务内 AI 一次性处理」。新 command_verification 在首次模型调用前要求 Plus 支持 requiredVerificationCommands；冻结命令经 runtime 可信核对并绑定批准事务，报告漏项在当前轮提交时返回工具错误，不能靠提示词替代该门。
+一次性 `merge_conflict` 的验证缺证为上述 retry_verification 的受限补报路径：必须用户明确确认当前 run 与费用，复用原计划/固化配置及已解决暂存现场；不创建规划、不重做合并、不自动重试、不消耗 Review fix_round。项目开启 `auto_fix_pr` 也不改变这条：`merge_conflict` 与验证缺证始终不自动处理。身份、合并标记、源码/索引和远端漂移拒绝，普通 resume/retry/replan 不放行。具体守卫见 protocol「任务内 AI 一次性处理」。新 command_verification 在首次模型调用前要求 Plus 支持 requiredVerificationCommands；冻结命令经 runtime 可信核对并绑定批准事务，报告漏项在当前轮提交时返回工具错误，不能靠提示词替代该门。
 
 **处置规则：**
 
@@ -476,7 +478,7 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 - **tick 自动释放：** 自动化任务的 monitor/delivery 丢失请求，由 tick 按 release_lost 的语义自动释放（actor=scheduler，事件 `lost_request_released`）；live 项目由引擎周期 tick 执行。dispatch、plan、review 的丢失请求仍留给用户处理。
 - **plan 失败：** 自动化任务第一次普通失败时置 plan_wanted，让 intake 按原冻结输入自动重试一次；第二次失败转 needs_user，保留 failure_code=planner_failed。已完成稿仅发布被拒的止损与材料保全遵循上文第9项，不自动重跑模型。
 
-**新事件：** branch_worktree_adopted、engine_fix_reverted、automation_adopted、auto_confirm_skipped、fix_round_started、delivery_committed、delivery_pushed、pr_opened、kaneo_comment_posted、pr_merged、pr_closed、cost_recorded、requirements_accepted、automation_stopped、lost_request_released。
+**新事件：** branch_worktree_adopted、engine_fix_reverted、automation_adopted、auto_confirm_skipped、fix_round_started、delivery_committed、delivery_pushed、pr_opened、kaneo_comment_posted、pr_merged、pr_closed、cost_recorded、requirements_accepted、automation_stopped、lost_request_released、checks_rerun、auto_fix_state_changed（项目自动修复挂起/登记，protocol §5.27.20）。
 
 `BOARD_FAILURE_CODES` 不增加，新原因通过 failure_stage 归类。归类如下：
 

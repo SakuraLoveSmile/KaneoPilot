@@ -1135,6 +1135,10 @@ struct TaskAutomationFieldRows: View {
     var body: some View {
         if let delivery = detail.delivery {
             FieldRow("交付状态", delivery.mode == "manual" ? "人工交付" : deliveryState(delivery.prState))
+            // protocol §5.27.20：未开启或旧响应没有回执时这一行不出现。
+            if let autoFix = delivery.autoFixNotice {
+                FieldRow("自动修复", autoFix.summary, tone: autoFix.needsAttention ? Color.kpOrange : nil)
+            }
         } else {
             FieldRow("交付状态", "未开启")
         }
@@ -1181,6 +1185,30 @@ struct TaskAutomationSections: View {
                     }
                     .font(.kpSmall)
                     .fixedSize(horizontal: false, vertical: true)
+                }
+                // protocol §5.27.20：挂起与「评论待另立任务」需要处理，用橙色写原因；已排队与等待重跑由字段行说明。
+                if let autoFix = delivery.autoFixNotice, autoFix.needsAttention {
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        Label {
+                            Text(autoFix.reason ?? autoFix.titleText)
+                                .foregroundStyle(Color.kpOrange)
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle")
+                                .foregroundStyle(Color.kpOrange)
+                        }
+                        .font(.kpSmall)
+                        .fixedSize(horizontal: false, vertical: true)
+                        if autoFix.state == "filed", let comment = autoFix.comment {
+                            Text("评论作者 \(comment.author ?? "未知") · 可另立二级任务（需你在 Mac 确认，不自动创建）")
+                                .font(.kpSmall)
+                                .foregroundStyle(Color.kpSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let url = comment.url, !url.isEmpty {
+                                Button("打开原评论") { Workspace.open(url) }
+                                    .font(.kpSmall)
+                            }
+                        }
+                    }
                 }
                 if let action = detail.taskAiAction, !action.isBuildFailure || detail.release == nil {
                     TaskAIActionSection(detail: detail, action: action,

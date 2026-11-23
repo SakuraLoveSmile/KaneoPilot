@@ -181,4 +181,21 @@ class ProtocolTest {
         assertEquals(1, verify.getInt("passed"))
         assertEquals(2, verify.getInt("total"))
     }
+    /** protocol §5.27.20：自动修复回执只读，且必须绑定当前交付 head。 */
+    @Test fun autoFixNoticeStaysBoundToTheCurrentDeliveryHead() {
+        val delivery = JSONObject("""{"head_sha":"current","auto_fix":{"state":"waiting_rerun","state_title":"已重跑失败检查，等待新的检查结果","reason":"已重跑失败检查，等待新的检查结果","attempt":1,"max":2,"head_sha":"current"}}""")
+        assertEquals("已重跑失败检查，等待新的检查结果 · 修复次数 1/2", autoFixSummary(autoFixNotice(json("delivery" to delivery))!!))
+        assertFalse(autoFixNeedsAttention(autoFixNotice(json("delivery" to delivery))!!))
+        val stale = JSONObject("""{"head_sha":"new","auto_fix":{"state":"suspended","reason":"旧提交挂起","head_sha":"old"}}""")
+        assertNull(autoFixNotice(json("delivery" to stale)))
+        assertNull(autoFixNotice(json("task_id" to "t")))
+    }
+    @Test fun autoFixStatesReadInChineseWithoutClaimingARepairStarted() {
+        fun summary(state: String) = autoFixSummary(JSONObject("""{"state":"$state","reason":"原因"}"""))
+        assertEquals("已排队，执行端领取后才开始", summary("started"))
+        assertEquals("自动修复挂起：原因", summary("suspended"))
+        assertEquals("评论已登记，待另立二级任务：原因", summary("filed"))
+        assertTrue(autoFixNeedsAttention(JSONObject("""{"state":"filed"}""")))
+        assertFalse(autoFixNeedsAttention(JSONObject("""{"state":"started"}""")))
+    }
 }

@@ -964,6 +964,16 @@ struct TaskOverviewTabView: View {
             return "\(queuedKindTitle)已排队，尚未开始；执行端领取后才会推进。"
         }
         if reviewPassedAwaitingDelivery {
+            // protocol §5.27.20：started 只表示已创建一次修复请求，排队不等于开始。
+            if let autoFix = detail.delivery?.autoFixNotice {
+                switch autoFix.state {
+                case "started":
+                    return "已按策略创建一次修复请求并排队，执行端领取后才会开始修复；本轮不合并、不强推。"
+                case "waiting_rerun":
+                    return "已重跑失败检查，等待新的检查结果。"
+                default: break
+                }
+            }
             if let notice = detail.delivery?.autoMergeNotice { return notice.reason }
             if detail.delivery?.mode == "pr" {
                 return detail.delivery?.prState?.uppercased() == "MERGED"

@@ -684,6 +684,37 @@ if let delivery = decode(TaskDeliveryView.self, #"{"head_sha":"new","auto_merge"
     expect(delivery.autoMergeNotice == nil, "新提交不显示旧 head 的合并结果")
 }
 
+// protocol §5.27.20：自动修复默认关闭，回执只认当前交付 head。
+if let policy = decode(ProjectAutomationDTO.self, #"{"auto_fix_pr":true,"auto_fix_max_attempts":2,"auto_fix_kinds":["check_failure"],"auto_fix_trusted_authors":["alice"]}"#) {
+    expect(policy.autoFixPr == true, "项目自动修复开关解码")
+    expect(policy.autoFixMaxAttempts == 2, "自动修复次数上限解码")
+    expect(policy.autoFixKinds == ["check_failure"], "自动修复触发类型解码")
+    expect(policy.autoFixTrustedAuthors == ["alice"], "自动修复可信作者解码")
+}
+if let policy = decode(ProjectAutomationDTO.self, #"{}"#) {
+    expect(policy.autoFixPr != true && policy.autoFixMaxAttempts == nil, "旧策略缺自动修复字段保持关闭")
+}
+for state in ["waiting_rerun", "started", "suspended", "filed"] {
+    let json = """
+    {"mode":"pr","pr_state":"OPEN","head_sha":"current","auto_fix":{"state":"\(state)","state_title":"自动修复状态","reason":"原因","attempt":1,"max":2,"head_sha":"current","updated_at":"2026-11-23T10:00:00Z","followup":{"dedupe_key":"pr-comment:436146","title":"处理 PR 评论","description":"说明"},"comment":{"id":436146,"author":"alice","url":"https://github.com/example/music/pull/2#issuecomment-436146","kind":"review_comment"}}}
+    """
+    if let delivery = decode(TaskDeliveryView.self, json) {
+        expect(delivery.autoFixNotice?.state == state, "自动修复 \(state) 可见性")
+        expect(delivery.autoFixNotice?.needsAttention == ["suspended", "filed"].contains(state), "自动修复 \(state) 提示语义")
+        expect(delivery.autoFixNotice?.summary == "自动修复状态 · 修复次数 1/2", "自动修复 \(state) 行文案")
+        expect(delivery.autoFixNotice?.comment?.author == "alice", "自动修复 \(state) 评论作者解码")
+    }
+}
+if let delivery = decode(TaskDeliveryView.self, #"{"head_sha":"current","auto_fix":{"state":"started","reason":"已创建一次修复请求，执行端领取后才会开始","head_sha":"current","attempt":0,"max":1}}"#) {
+    expect(delivery.autoFixNotice?.titleText == "已排队，执行端领取后才开始", "缺 state_title 时 started 不写成正在修复")
+}
+if let delivery = decode(TaskDeliveryView.self, #"{"head_sha":"new","auto_fix":{"state":"suspended","reason":"旧提交挂起","head_sha":"old"}}"#) {
+    expect(delivery.autoFixNotice == nil, "新提交不显示旧 head 的自动修复")
+}
+if let delivery = decode(TaskDeliveryView.self, #"{"head_sha":"current"}"#) {
+    expect(delivery.autoFixNotice == nil, "旧响应不推断自动修复")
+}
+
 // Direct repair startup carries the exact reviewed material identity.
 let repairJSON = """
 {"state":"held","title":"有界读取","reason":"可直接修复","round":0,"max_rounds":2,"review_key":"review-a","report_path":"/fixture/review.md","report_sha256":"report-a","plan_sha256":"plan-a","source_execution_run_id":"exec-a","repair_execution_run_id":null,"session_id":null,"can_start":true}

@@ -431,7 +431,8 @@ def _history_task_snapshot(task):
         snapshot.pop(key, None)
     extra = db.task_extra(task)
     delivery = dict(extra.get('delivery') or {})
-    for key in ('last_sync_at', 'next_sync_at', 'auto_merge', 'stage_contracts', 'stage_results', 'publish_failures'):
+    for key in ('last_sync_at', 'next_sync_at', 'auto_merge', 'auto_fix', 'auto_check',
+                'stage_contracts', 'stage_results', 'publish_failures'):
         delivery.pop(key, None)
     extra['delivery'] = delivery
     snapshot['extra_json'] = extra

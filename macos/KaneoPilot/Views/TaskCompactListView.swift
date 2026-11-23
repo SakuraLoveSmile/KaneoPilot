@@ -405,6 +405,10 @@ private struct TaskCompactRow: View {
         if let release = task.release {
             return statusRelease == nil ? "\(release.title) · \(release.reason)" : release.reason
         }
+        // 自动修复是最新的交付观测：挂起/待另立任务显示原因，等待重跑与已排队显示状态标题。
+        if let autoFix = task.delivery?.autoFixNotice {
+            return "自动修复：" + (autoFix.needsAttention ? (autoFix.reason ?? autoFix.titleText) : autoFix.titleText)
+        }
         if let notice = task.delivery?.autoMergeNotice { return notice.reason }
         return nil
     }

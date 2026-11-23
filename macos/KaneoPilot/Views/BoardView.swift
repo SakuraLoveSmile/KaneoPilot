@@ -1012,6 +1012,7 @@ struct TaskCardView: View {
             label += "，\(TaskBoardPresentation.isFailed(task) ? "失败" : "阻塞")：\(blockedText)"
         }
         if let release = task.release { label += "，\(release.title)，\(release.reason)" }
+        else if let autoFix = task.delivery?.autoFixNotice { label += "，自动修复：\(autoFix.titleText)" }
         else if let notice = task.delivery?.autoMergeNotice { label += "，\(notice.reason)" }
         return label
     }
@@ -1021,6 +1022,11 @@ struct TaskCardView: View {
         if let release = task.release {
             Text("\(release.title) · \(release.reason)")
                 .font(.kpSmall).foregroundStyle(Color.primary)
+        } else if let autoFix = task.delivery?.autoFixNotice {
+            // 自动修复是更新的观测：挂起/待另立任务用橙色并写原因，其余写状态标题。
+            Text("自动修复：" + (autoFix.needsAttention ? (autoFix.reason ?? autoFix.titleText) : autoFix.titleText))
+                .font(.kpSmall)
+                .foregroundStyle(autoFix.needsAttention ? Color.kpOrange : Color.kpSecondary)
         } else if let notice = task.delivery?.autoMergeNotice {
             Text(notice.reason)
                 .font(.kpSmall)

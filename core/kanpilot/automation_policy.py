@@ -34,6 +34,9 @@ def policy_for(conn, project_id):
     result = dict(constants.AUTOMATION_DEFAULTS, **raw)
     if isinstance(result.get("release"), dict):
         result["release"] = dict(constants.RELEASE_DEFAULTS, **result["release"])
+    # 缺省来自常量元组，避免共享可变对象；读侧统一给列表。
+    result["auto_fix_kinds"] = list(result.get("auto_fix_kinds") or ())
+    result["auto_fix_trusted_authors"] = list(result.get("auto_fix_trusted_authors") or ())
     return result
 
 
@@ -42,11 +45,32 @@ def global_settings(conn):
 
 
 
+# 旧客户端不提交这些键；保存其它字段时保留现值，不静默关闭自动修复（protocol §5.27.20）。
+AUTO_FIX_FIELDS = ("auto_fix_pr", "auto_fix_max_attempts", "auto_fix_kinds",
+                   "auto_fix_trusted_authors")
+_AUTHOR_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
+
+
+def _preserve_auto_fix(value, current, raw):
+    """Only overwrite fields the payload actually carries."""
+    if not isinstance(raw, dict):
+        raw = {}
+    for key in AUTO_FIX_FIELDS:
+        if key not in raw and key in current:
+            preserved = current[key]
+            if key in ("auto_fix_kinds", "auto_fix_trusted_authors"):
+                preserved = list(preserved or ())
+            value[key] = preserved
+    return value
+
+
 def validate_automation(raw):
     if not isinstance(raw, dict):
         raise util.bad_request("automation 必须为对象")
     result = dict(constants.AUTOMATION_DEFAULTS)
-    for key in ("enabled", "auto_confirm_plan", "auto_merge_pr"):
+    result["auto_fix_kinds"] = list(constants.AUTO_FIX_KINDS)
+    result["auto_fix_trusted_authors"] = []
+    for key in ("enabled", "auto_confirm_plan", "auto_merge_pr", "auto_fix_pr"):
         value = raw.get(key, result[key])
         if not isinstance(value, bool):
             raise util.bad_request(f"{key} 必须为布尔值")
@@ -77,6 +101,36 @@ def validate_automation(raw):
                              or not re.fullmatch(r"[A-Za-z0-9._/-]{1,100}", base)):
         raise util.bad_request("delivery_base 非法")
     result["delivery_base"] = base
+    attempts = raw.get("auto_fix_max_attempts", result["auto_fix_max_attempts"])
+    if (isinstance(attempts, bool) or not isinstance(attempts, int)
+            or not 0 <= attempts <= constants.AUTO_FIX_MAX_ATTEMPTS):
+        raise util.bad_request(
+            "auto_fix_max_attempts 须为 0..%d 的整数" % constants.AUTO_FIX_MAX_ATTEMPTS)
+    result["auto_fix_max_attempts"] = attempts
+    kinds = raw.get("auto_fix_kinds", result["auto_fix_kinds"])
+    if not isinstance(kinds, list) or not kinds or len(kinds) > 8:
+        raise util.bad_request("auto_fix_kinds 须为 check_failure/review_comment 的非空子集")
+    normalized_kinds = []
+    for kind in kinds:
+        if kind not in constants.AUTO_FIX_KINDS:
+            raise util.bad_request("auto_fix_kinds 含未知类型：" + str(kind)[:40])
+        if kind not in normalized_kinds:
+            normalized_kinds.append(kind)
+    result["auto_fix_kinds"] = normalized_kinds
+    authors = raw.get("auto_fix_trusted_authors", result["auto_fix_trusted_authors"])
+    if not isinstance(authors, list) or len(authors) > constants.AUTO_FIX_MAX_TRUSTED_AUTHORS:
+        raise util.bad_request(
+            "auto_fix_trusted_authors 最多 %d 个登录名" % constants.AUTO_FIX_MAX_TRUSTED_AUTHORS)
+    normalized_authors = []
+    for login in authors:
+        if not isinstance(login, str) or not _AUTHOR_LOGIN.fullmatch(login.strip()):
+            raise util.bad_request("auto_fix_trusted_authors 须为 GitHub 登录名")
+        login = login.strip().lower()
+        if login.endswith("[bot]"):
+            raise util.bad_request("机器人账号不能作为自动修复的可信作者")
+        if login not in normalized_authors:
+            normalized_authors.append(login)
+    result["auto_fix_trusted_authors"] = normalized_authors
     from . import release_delivery
     result["release"] = release_delivery.validate_policy(raw.get("release", {}))
     return result
@@ -219,17 +273,20 @@ def cmd_set_project_automation(ctx, payload):
         if expected is not None and expected != current["policy_revision"]:
             raise util.KanpilotError("conflict", "automation policy_revision 不符")
         # A pre-release client saving unrelated automation fields must not
-        # silently turn off an already authorized release policy.
+        # silently turn off an already authorized release policy or auto-fix group.
         if "release" not in payload["automation"]:
             from . import release_delivery
             value["release"] = release_delivery.validate_policy(current.get("release", {}))
+        value = _preserve_auto_fix(value, current, payload["automation"])
         value.update(policy_revision=current["policy_revision"] + 1, updated_at=ctx.now_iso)
         items[project_id] = dict(items[project_id], automation=value)
         db.set_setting(ctx.conn, project_config.SETTINGS_KEY,
                        {"version": project_config.CURRENT_VERSION, "revision": revision,
                         "workspace_id": workspace, "items": items})
-        if value["auto_merge_pr"] and not current.get("auto_merge_pr", False):
-            # Save only local scheduling intent; the leased delivery runner owns I/O.
+        # Save only local scheduling intent; the leased delivery runner owns I/O.
+        # 开启自动合并或自动修复都让既有待交付任务尽快产生一次真实观测。
+        if ((value["auto_merge_pr"] and not current.get("auto_merge_pr", False))
+                or (value["auto_fix_pr"] and not current.get("auto_fix_pr", False))):
             for task in ctx.conn.execute("SELECT * FROM tasks WHERE project_id=? "
                                          "AND save_state='active' AND status='in_review'",
                                          (project_id,)).fetchall():

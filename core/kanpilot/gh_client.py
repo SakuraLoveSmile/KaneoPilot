@@ -13,6 +13,18 @@ from . import constants, util
 
 PR_FIELDS = "number,url,state,headRefOid,mergedAt,baseRefName,headRefName,isCrossRepository"
 PR_MERGE_FIELDS = PR_FIELDS + ",baseRefOid,isDraft,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup"
+# protocol §5.27.20：PR 评论只经一次 GraphQL 读取（issue 评论 + review 正文 + reviewThreads）。
+# `gh pr view --json` 不带线程正文与 isResolved/isOutdated，不能替代这次读取。
+THREAD_QUERY = (
+    "query KaneoPilotReviewComments($owner: String!, $name: String!, $number: Int!) {"
+    " repository(owner: $owner, name: $name) { pullRequest(number: $number) {"
+    " number state isDraft headRefOid reviewDecision"
+    " comments(last: 30) { nodes { databaseId author { login } body createdAt url } }"
+    " reviews(last: 20) { nodes { databaseId author { login } state body createdAt url } }"
+    " reviewThreads(last: 30) { nodes { id isResolved isOutdated"
+    " comments(last: 10) { nodes { databaseId author { login } body createdAt url path originalCommit { oid } } } } }"
+    " } } }"
+)
 
 
 def redact(message):
@@ -35,10 +47,30 @@ def gh_env() -> dict:
 
 
 def _read_command(args):
-    """Only our structured PR view and REST GET forms may opt into retries."""
+    """Only our structured PR view, REST GET and the one GraphQL read may retry."""
     if (len(args) == 7 and args[:2] == ["pr", "view"] and args[3] == "--repo"
             and args[5] == "--json" and not args[2].startswith("-")):
         return True
+    if args == ["api", "user"]:
+        return True
+    if args[:2] == ["api", "graphql"]:
+        # A GraphQL query has no side effect, but only our exact constant query is
+        # allowed to retry — never an arbitrary caller-supplied mutation.
+        fields = {}
+        index = 2
+        while index < len(args):
+            if args[index] not in ("-f", "-F") or index + 1 >= len(args):
+                return False
+            key, sep, value = args[index + 1].partition("=")
+            if not sep or not key or key in fields:
+                return False
+            fields[key] = value
+            index += 2
+        return (fields.get("query") == THREAD_QUERY
+                and set(fields) == {"query", "owner", "name", "number"}
+                and re.fullmatch(r"[A-Za-z0-9_.-]+", fields["owner"]) is not None
+                and re.fullmatch(r"[A-Za-z0-9_.-]+", fields["name"]) is not None
+                and fields["number"].isdigit())
     if len(args) < 2 or args[0] != "api" or not args[1].startswith("repos/"):
         return False
     # No fields/input: gh otherwise silently switches a REST request to POST.
@@ -188,3 +220,104 @@ def pr_create(repo_slug, *, base, head, title, body) -> dict:
         # whether the PR exists; callers must reconcile rather than resend.
         exc.operation_dispatched = True
         raise
+
+
+_LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
+_COMMENT_URL = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*#[A-Za-z0-9_-]+")
+_OID = re.compile(r"[0-9a-f]{40,64}")
+
+
+def _comment_author(node):
+    author = node.get("author")
+    if author is None:
+        return None  # 已删除账号：保留评论但永不视为可信作者
+    if not isinstance(author, dict) or not isinstance(author.get("login"), str) \
+            or not _LOGIN.fullmatch(author["login"]):
+        raise GhError("transient", "GitHub 评论作者不可确认")
+    return author["login"]
+
+
+def _comment(node, *, path=False):
+    if not isinstance(node, dict) or not isinstance(node.get("body"), str):
+        raise GhError("transient", "GitHub 评论内容不可确认")
+    identifier, created, url = node.get("databaseId"), node.get("createdAt"), node.get("url")
+    if identifier is not None and type(identifier) is not int:
+        raise GhError("transient", "GitHub 评论编号不可确认")
+    if not util.parse_ts(created) or not isinstance(url, str) or not _COMMENT_URL.fullmatch(url):
+        raise GhError("transient", "GitHub 评论时间或地址不可确认")
+    value = {"id": identifier, "author": _comment_author(node), "body": node["body"],
+             "created_at": created, "url": url}
+    if path:
+        value["path"] = str(node.get("path") or "")[:400]
+        commit = node.get("originalCommit")
+        oid = commit.get("oid") if isinstance(commit, dict) else None
+        value["commit_oid"] = oid if isinstance(oid, str) and _OID.fullmatch(oid) else None
+    return value
+
+
+def _nodes(container, label):
+    if not isinstance(container, dict) or not isinstance(container.get("nodes"), list):
+        raise GhError("transient", "GitHub " + label + " 不可确认")
+    return container["nodes"]
+
+
+def _reviews(pr):
+    result = []
+    for node in _nodes(pr.get("reviews"), "评审"):
+        if not isinstance(node, dict) or not isinstance(node.get("state"), str):
+            raise GhError("transient", "GitHub 评审状态不可确认")
+        result.append(dict(_comment(node), state=node["state"][:40]))
+    return result
+
+
+def _pull_comments(value, repo_slug, number):
+    """Strictly normalize one GraphQL read; unknown shapes never become evidence."""
+    data = value.get("data") if isinstance(value, dict) else None
+    repository = data.get("repository") if isinstance(data, dict) else None
+    pr = repository.get("pullRequest") if isinstance(repository, dict) else None
+    if (not isinstance(pr, dict) or pr.get("number") != number
+            or pr.get("state") not in ("OPEN", "CLOSED", "MERGED")):
+        raise GhError("transient", "GitHub PR 评论不可确认")
+    head = pr.get("headRefOid")
+    if not isinstance(head, str) or not _OID.fullmatch(head) or not isinstance(pr.get("isDraft"), bool):
+        raise GhError("transient", "GitHub PR 身份不可确认")
+    decision = pr.get("reviewDecision")
+    if decision is not None and not isinstance(decision, str):
+        raise GhError("transient", "GitHub 评审结论不可确认")
+    threads = []
+    for thread in _nodes(pr.get("reviewThreads"), "评论线程"):
+        if (not isinstance(thread, dict) or not isinstance(thread.get("id"), str)
+                or not isinstance(thread.get("isResolved"), bool)
+                or not isinstance(thread.get("isOutdated"), bool)):
+            raise GhError("transient", "GitHub 评论线程不可确认")
+        threads.append({"id": thread["id"], "resolved": thread["isResolved"],
+                        "outdated": thread["isOutdated"],
+                        "comments": [_comment(node, path=True)
+                                     for node in _nodes(thread.get("comments"), "线程评论")]})
+    return {
+        "repo": _repo(repo_slug), "number": number, "state": pr["state"],
+        "is_draft": pr["isDraft"], "head_sha": head, "review_decision": decision or "",
+        "issue_comments": [_comment(node) for node in _nodes(pr.get("comments"), "评论")],
+        "reviews": _reviews(pr),
+        "review_threads": threads,
+    }
+
+
+def pr_comments(repo_slug, number) -> dict:
+    """One bounded GraphQL read of the PR conversation (protocol §5.27.20)."""
+    repo = _repo(repo_slug)
+    if type(number) is not int or number < 1:
+        raise GhError("rejected", "PR 编号无效")
+    owner, name = repo.split("/")
+    value = _run(["api", "graphql", "-f", "query=" + THREAD_QUERY, "-f", "owner=" + owner,
+                  "-f", "name=" + name, "-F", "number=" + str(number)], read_only=True)
+    return _pull_comments(value, repo, number)
+
+
+def viewer_login() -> str:
+    """The logged-in gh account — the default trusted comment author."""
+    value = _run(["api", "user"], read_only=True)
+    login = value.get("login") if isinstance(value, dict) else None
+    if not isinstance(login, str) or not _LOGIN.fullmatch(login):
+        raise GhError("transient", "GitHub 登录账号不可确认")
+    return login

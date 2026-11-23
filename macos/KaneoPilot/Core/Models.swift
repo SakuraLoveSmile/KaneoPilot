@@ -3226,6 +3226,9 @@ struct ProjectAutomationDTO: Decodable {
     let release: ProjectReleasePolicy?
     let enabled: Bool?; let labelFilter: [String]?; let autoConfirmPlan: Bool?
     let autoMergePr: Bool?
+    /// protocol §5.27.20：项目自动修复 PR（默认关闭，随 set-project-automation 一起保存）。
+    let autoFixPr: Bool?; let autoFixMaxAttempts: Int?
+    let autoFixKinds: [String]?; let autoFixTrustedAuthors: [String]?
     let maxFixRounds: Int?; let maxTaskMinutes: Int?; let maxTaskCostUsd: Double?
     let deliveryBase: String?; let policyRevision: Int?; let updatedAt: String?
 }
@@ -3255,10 +3258,17 @@ struct TaskDeliveryView: Decodable {
     let prUrl: String?; let prState: String?; let publishFailures: Int?
     let kaneoCommentAt: String?; let mergedAt: String?; let lastSyncAt: String?; let nextSyncAt: String?
     let autoMerge: PRAutoMergeDTO?
+    let autoFix: PRAutoFixDTO?
 
     var autoMergeNotice: PRAutoMergeDTO? {
         guard let autoMerge, autoMerge.headSha == headSha, autoMerge.state != "disabled" else { return nil }
         return autoMerge
+    }
+
+    /// 与自动合并同一口径：只展示绑定当前交付 head 的自动修复回执。
+    var autoFixNotice: PRAutoFixDTO? {
+        guard let autoFix, let fixHead = autoFix.headSha, fixHead == headSha else { return nil }
+        return autoFix
     }
 }
 struct PRAutoMergeDTO: Decodable {
@@ -3267,6 +3277,52 @@ struct PRAutoMergeDTO: Decodable {
     let headSha: String
     let updatedAt: String?
     var needsAttention: Bool { ["blocked", "unknown"].contains(state) }
+}
+/// protocol §5.27.20：项目自动修复 PR 的只读回执；`started` 只表示已创建一次修复请求。
+struct PRAutoFixDTO: Decodable {
+    let state: String
+    let stateTitle: String?
+    let reason: String?
+    let attempt: Int?
+    let max: Int?
+    let headSha: String?
+    let updatedAt: String?
+    let followup: PRAutoFixFollowupDTO?
+    let comment: PRAutoFixCommentDTO?
+
+    /// 挂起与「评论待另立任务」需要处理；waiting_rerun 与 started 只是等待观测。
+    var needsAttention: Bool { ["suspended", "filed"].contains(state) }
+
+    /// 文案来自核心 state_title；缺失时按状态兜底，`started` 不许写成「正在修复」。
+    var titleText: String {
+        if let stateTitle, !stateTitle.isEmpty { return stateTitle }
+        switch state {
+        case "waiting_rerun": return "已重跑失败检查，等待新的检查结果"
+        case "started": return "已排队，执行端领取后才开始"
+        case "suspended": return "自动修复挂起"
+        case "filed": return "评论已登记，待另立二级任务"
+        default: return "自动修复状态未知"
+        }
+    }
+
+    /// 任务详情一行：「<state_title> · 修复次数 attempt/max」；核心缺计数时只写标题。
+    var summary: String {
+        guard let attempt, let max else { return titleText }
+        return "\(titleText) · 修复次数 \(attempt)/\(max)"
+    }
+}
+/// 需另立二级任务时的材料；只读展示，建任务仍由用户确认。
+struct PRAutoFixFollowupDTO: Decodable {
+    let dedupeKey: String?
+    let title: String?
+    let description: String?
+}
+/// 触发自动修复登记的那条 PR 评论身份。
+struct PRAutoFixCommentDTO: Decodable {
+    let id: Int?
+    let author: String?
+    let url: String?
+    let kind: String?
 }
 /// KP-MG03 #4：用户接受本轮评审遗留风险的只读回执。
 struct ReviewRisk: Decodable, Equatable {

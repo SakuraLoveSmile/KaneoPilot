@@ -49,6 +49,8 @@ CONCURRENCY_STALLED = "concurrency_stalled"
 NEEDS_USER_OTHER = "needs_user_other"
 EXECUTION_QUESTION = "execution_question"
 RELEASE_VERIFICATION_QUESTION = "release_verification_question"
+# protocol §5.27.20：不以 needs_user 为前提的 informational 来源。
+AUTO_FIX_SUSPENDED = "auto_fix_suspended"
 
 # failure_code → reason_code (protocol §5.27.3 table + the codebase's actual
 # codes grouped into the same categories). Unknown codes → NEEDS_USER_OTHER.
@@ -132,9 +134,15 @@ def attention_id(task_id: Optional[str], code: str) -> str:
     return f"attn_{task_id}_{code}"
 
 
+def _auto_fix(task: dict):
+    value = task.get("delivery_auto_fix")
+    return value if isinstance(value, dict) and value.get("state") in ("suspended", "filed") else None
+
+
 def needs_attention(task: dict, *, include_historical: bool = False) -> bool:
     """Whether a task view is an attention source right now."""
-    if task.get("status") != "needs_user" and not _verification_question(task):
+    if (task.get("status") != "needs_user" and not _verification_question(task)
+            and not _auto_fix(task)):
         return False
     if _save_state(task) == "purged":
         return include_historical
@@ -175,8 +183,30 @@ def build_item(task: dict, now=None) -> Optional[dict]:
     :func:`collect`, not here.
     """
     verification_question = _verification_question(task)
-    if task.get("status") != "needs_user" and not verification_question:
+    auto_fix = _auto_fix(task)
+    if task.get("status") != "needs_user" and not verification_question and not auto_fix:
         return None
+    if auto_fix and task.get("status") != "needs_user" and not verification_question:
+        reason = auto_fix.get("reason") or "自动修复已挂起"
+        since = auto_fix.get("updated_at") or task.get("updated_at")
+        return {
+            "attention_id": attention_id(task.get("task_id"), AUTO_FIX_SUSPENDED),
+            "task_id": task.get("task_id"),
+            "project_name": task.get("project_name"),
+            "title": task.get("title"),
+            "reason_code": AUTO_FIX_SUSPENDED,
+            "failure_code": None,
+            "failure_stage": None,
+            "failure_reason": None,
+            "evidence": _evidence(dict(task, blocked_summary=reason), since),
+            "blocked_summary": reason,
+            "recommended": None,
+            "alternatives": [],
+            "allowed_actions": [],
+            "attention_state": INFORMATIONAL if _save_state(task) == "active" else HISTORICAL,
+            "since": since,
+            "question_preview": None,
+        }
     code = RELEASE_VERIFICATION_QUESTION if verification_question else reason_code_for(
         task.get("failure_code"), status=task.get("status"), failure_stage=task.get("failure_stage"))
     actions = list(task.get("allowed_actions") or [])
@@ -268,7 +298,9 @@ def _save_state(task: dict) -> str:
 
 
 def _rank(task: dict) -> int:
-    """Attention sort rank = failure ladder (4 highest)."""
+    """Attention sort rank = failure ladder (4 highest); auto-fix info ranks last."""
+    if _auto_fix(task) and task.get("status") != "needs_user":
+        return 0
     return ladder.classify(task.get("failure_code"))
 
 

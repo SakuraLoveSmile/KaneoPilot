@@ -1,5 +1,6 @@
 """Explicit rerun of the failed GitHub jobs that block a PR merge."""
-from . import core, db, gh_client, git_delivery, release_github, runtime_operations, util
+from . import (core, db, gh_client, git_delivery, pr_auto_merge, release_github,
+               runtime_operations, util)
 
 TOOL = "github_run_rerun"
 HARNESS = "github"
@@ -9,14 +10,13 @@ def _failing_runs(task):
     """Read-only: the open PR of this task and the runs behind its failed checks."""
     from . import task_ai_check_failure
     delivery = core.delivery_of(task)
-    notice = delivery.get("auto_merge") or {}
     if (delivery.get("mode") != "pr" or delivery.get("pr_state") != "OPEN"
             or not isinstance(delivery.get("pr_number"), int)):
         raise util.KanpilotError("conflict", "仅已交付到开放 PR 的任务可重跑失败的检查")
-    if notice.get("state") != "blocked" or not str(notice.get("reason") or "").startswith("检查未通过："):
+    if not pr_auto_merge.failed_checks_notice(delivery):
+        if pr_auto_merge.stale_failed_checks(delivery):
+            raise util.KanpilotError("conflict", "合并门检查来自旧提交，请先重新校验")
         raise util.KanpilotError("conflict", "当前没有可确认的失败检查，请先重新校验")
-    if notice.get("head_sha") != delivery.get("head_sha"):
-        raise util.KanpilotError("conflict", "合并门检查来自旧提交，请先重新校验")
     repo = git_delivery.require_github_origin(task["repository"])
     pr = gh_client.pr_view(repo, delivery["pr_number"], merge_checks=True)
     util.require(pr.get("state") == "OPEN" and pr.get("headRefOid") == delivery.get("head_sha")
@@ -29,8 +29,12 @@ def _failing_runs(task):
     return repo, delivery, runs
 
 
-def cmd_rerun_checks(ctx, payload):
-    """Rerun only the failed jobs of the exact run the failed checks belong to."""
+def cmd_rerun_checks(ctx, payload, *, actor="user"):
+    """Rerun only the failed jobs of the exact run the failed checks belong to.
+
+    ``actor`` is internal: the public command is user-initiated, the policy
+    auto-fix path records the same receipt with actor=automation.
+    """
     task = db.require_task(ctx.conn, payload["task_id"])
     repo, delivery, runs = _failing_runs(task)
     scope = "rerun-checks:" + task["task_id"]
@@ -70,7 +74,7 @@ def cmd_rerun_checks(ctx, payload):
                                                   status="accepted",
                                                   result={"run_id": run_id}, now=ctx.now_iso)
             db.add_event(ctx.conn, ctx.now_iso, "checks_rerun", task_id=task["task_id"],
-                         actor="user", detail={"repo": repo, "run_id": run_id,
-                                                "attempt": run.get("run_attempt")})
+                         actor=actor, detail={"repo": repo, "run_id": run_id,
+                                              "attempt": run.get("run_attempt")})
         results.append({"run_id": run_id, "status": "accepted"})
     return {"ok": True, "runs": results}

@@ -304,6 +304,8 @@ T6 不新增表、不改 schema 版本：只在现有 `settings` JSON 键上扩�
 
 以 protocol §5.27 为权威契约，schema 不升版。in_review → needs_plan 为同任务修复轮；needs_user 可经 resume 回到 running/in_review/needs_plan；accept_verification 已退役，不能绕过当前轮次结构化验证；PR 任务 in_review → done 只在 PR 已合并或 Kaneo 已 done 的被动同步时成立。新增事件和 failure_stage 映射见 §5.27.13；嵌套 automation/delivery 对象在同事务整体读改写，不能覆盖其他 extra。
 
+项目自动修复（protocol §5.27.20）只增加 `extra.delivery.auto_fix` 读侧回执（以及未开启自动合并时的只读检查观测 `extra.delivery.auto_check`）与 `extra.ai_action_history` 的既有字段，不改状态机：`auto_fix={state,reason,attempt,max,head_sha,updated_at}`，state 为 `waiting_rerun|started|suspended|filed`；`started` 由当前动作派生，不单独落库。挂起/待另立任务不改变任务 `status`，只让 attention 增加一个 `informational` 项。该回执属于易变观测：冻结上下文与历史快照比较时必须剔除（与 `auto_merge` 同口径）。
+
 ## Desktop 正式队列补充（2026-10-08）
 
 Desktop不另建任务状态机：plan/review正式requests仍使用queued→claimed→succeeded/failed/lost，只有领到且回报心跳才算开始。Desktop队列暂停只停止新的claim，不代表原生自动任务已暂停。领取收据、后端配置、执行轮次和计划哈希固化于请求；设置变更不重写旧请求。Desktop Review独立run索引不替换task的执行run_id。
@@ -417,7 +419,7 @@ Review 固定基线与已登记提交，工作区未提交、身份不符或 SHA
  - verdict：所有普通项目统一由 monitor 核对执行端的结构化报告、退出码、当前轮次与源码指纹，排除 `.pi/**` 与构建产物；Pilot 不代跑 verify，旧模式与人工 override 不绕过证据门禁（protocol §5.27.7/11）。
  - commit：受 PR 交付管理的任务先 delivery-commit，再进入 review。
  - review：评审通过只登记，PR 交付继续等待合并；评审未通过 → changes_requested → fix_request 同任务修复（≤2 轮，与引擎质量补救分别记账）。
- - delivery：PR 已开 → delivery-sync 按 protocol §5.27.16 的项目开关检查并自动合并，或被动轮询合并状态；合并确认后 advance-task done。
+ - delivery：PR 已开 → delivery-sync 按 protocol §5.27.16 的项目开关检查并自动合并，或被动轮询合并状态；合并确认后 advance-task done。项目开启 `auto_fix_pr` 时，引擎在同一阶段另跑确定性 `auto-fix-pr` 步骤（§5.27.20）：只在无 queued/claimed 请求时启动一次有界修复，挂起不改变本阶段推进。
  - done：任务归档，保留全部历史与文件。
  
  ## 10. 用户动作清单

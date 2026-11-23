@@ -1,7 +1,8 @@
 """One explicitly authorized repair of the checks that block a PR merge."""
 import re
 
-from . import core, db, exec_config, gh_client, git_delivery, release_github, util
+from . import (core, db, exec_config, gh_client, git_delivery, pr_auto_merge, release_github,
+               util)
 
 KIND = "check_failure"
 TITLE = "修复失败的检查"
@@ -31,11 +32,10 @@ def _digest(value):
 def gate(conn, task):
     """Cheap gate: the stored merge-gate line already names a failing check."""
     delivery = core.delivery_of(task)
-    notice = delivery.get("auto_merge") or {}
     if (delivery.get("mode") != "pr" or delivery.get("pr_state") != "OPEN"
             or not isinstance(delivery.get("pr_number"), int)):
         return "仅已交付到开放 PR 的任务可修复失败的检查"
-    if notice.get("state") != "blocked" or not str(notice.get("reason") or "").startswith("检查未通过："):
+    if not pr_auto_merge.failed_checks_notice(delivery):
         return "当前没有可确认的失败检查，请先重新校验"
     for item in db.task_extra(task).get("ai_action_history") or []:
         # 已放弃的处理不再占用同一提交的唯一一次机会（KP-MG03 #8）。
