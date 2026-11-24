@@ -1683,6 +1683,11 @@ private struct TaskReleaseSection: View {
                     ForEach(release.assets) { asset in FieldRow("\(asset.name) SHA256", asset.sha256) }
                 }.font(.kpSmall)
             }
+            if release.frozenBatchNeedsAbandon {
+                Text("这批发布已经无法发送：冻结时的发布证据、版本或工作流 ref/head 已经变化。先「放弃未发送批次…」，再重新准备并确认新批次。")
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            }
             if detail.readOnly != true {
                 verificationActions
                 HStack(spacing: Spacing.s) {

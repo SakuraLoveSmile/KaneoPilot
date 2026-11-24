@@ -3679,6 +3679,9 @@ struct TaskRelease: Decodable {
     var showsTaskStatus: Bool { required && isHistorical != true }
     var showsAbandonAction: Bool { canAbandon == true && state != "unknown" }
     var showsStartAction: Bool { canStart && state != "unknown" }
+    /// KP-REL14：未发送批次被拒于发布证据/版本/工作流变化后，只能弃用再重新准备；
+    /// 这时不能把「继续构建发布…」当成可用的下一步。
+    var frozenBatchNeedsAbandon: Bool { !canStart && state == "blocked" && canAbandon == true }
 
     var channelLabel: String { channel == "stable" ? "正式版" : "预发布" }
     var syncLabel: String { state == "unknown" ? "核对发布结果" : "同步发布结果" }

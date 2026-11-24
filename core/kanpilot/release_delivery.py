@@ -26,6 +26,11 @@ CONTEXT_HASH_KEYS=('project_id','repository','root_task_id','members','proof','p
                    'stable_versions','frozen_stable_versions','version','superseded_build_batch_id')
 _IDENTITY_KEYS=('task_id','project_id','repository','run_id','plan_sha256','requirements_sha256',
                 'review_key','review_report_path','review_report_sha256','save_state')
+# A frozen unsent batch refused for one of these has moved past its own evidence,
+# version inventory, members or workflow ref head. Retrying can never succeed:
+# the batch has to be explicitly abandoned and prepared again.
+TERMINAL_DISPATCH_REFUSALS=frozenset(('release_context_changed','release_version_changed','release_tag_collision',
+    'release_members_changed','release_ref_changed','release_not_unsent','release_batch_abandoned','release_policy_changed'))
 
 
 class ReleaseBlocked(util.KanpilotError):
@@ -192,6 +197,12 @@ def _unsent(conn,batch):
         and db.get_runtime_operation(conn,_scope(batch['project_id']),'dispatch:'+batch['batch_id']) is None)
 
 
+def _frozen_refused(batch):
+    """Refused before ever sending because the facts it was frozen against moved."""
+    return batch.get('state')=='blocked' and any(isinstance(row,dict) and row.get('code') in TERMINAL_DISPATCH_REFUSALS
+        for row in batch.get('blockers') or [])
+
+
 def _pending(conn,project_id):
     rows=conn.execute("SELECT * FROM runtime_operations WHERE scope_id=? AND tool=? AND status IN ('prepared','unknown')",
                       (_scope(project_id),DISPATCH_TOOL)).fetchall()
@@ -223,7 +234,7 @@ def _dto(batch,required=False,*,conn=None):
         can_reconcile=state!='published' and batch.get('dispatch_status')!='not_sent',
         can_abandon=_unsent(conn,batch) if conn is not None else False)
     if batch.get('dispatch_status')=='not_sent' and not batch.get('abandoned'):
-        value['can_start']=_unsent(conn,batch) if conn is not None else False
+        value['can_start']=(conn is not None and _unsent(conn,batch) and not _frozen_refused(batch))
     for key in ('workflow_run_id','workflow_url','release_url','checked_at'):
         if batch.get(key) is not None:
             value[key]=batch[key]

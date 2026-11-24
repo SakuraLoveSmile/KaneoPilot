@@ -730,6 +730,14 @@ for (state, allowed) in [("blocked", true), ("dispatching", true), ("unknown", f
         expect(release.showsStartAction == allowed, "未发送批次按核心can_start恢复首次发送，unknown不可发送")
     }
 }
+for (state, canStart, needsAbandon) in [("blocked", false, true), ("blocked", true, false), ("dispatching", false, false)] {
+    let startLiteral = canStart ? "true" : "false"
+    let json = releaseJSON.replacingOccurrences(of: #""state":"unknown""#, with: "\"state\":\"\(state)\"")
+        .replacingOccurrences(of: #""can_start":false"#, with: "\"can_abandon\":true,\"can_start\":\(startLiteral)")
+    if let release = decode(TaskRelease.self, json) {
+        expect(release.frozenBatchNeedsAbandon == needsAbandon, "仅受阻且不可启动的未发送批次提示先弃用再重准备")
+    }
+}
 if let response = decode(PrepareTaskReleaseResponse.self, "{\"task_id\":\"root-a\",\"context_sha256\":\"context-a\",\"release\":\(releaseJSON)}") {
     expect(response.contextSha256 == "context-a", "准备候选固化指纹原样解码")
 }

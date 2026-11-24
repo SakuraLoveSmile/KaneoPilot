@@ -200,6 +200,19 @@ class ReleaseLifecycleTest(TestCase):
         with patch.object(self.api,'workflow_snapshot',side_effect=snapshot):
             result=delivery.cmd_start_task_release(self.ctx,dict(task_id='parent',expected_context_sha256=prepared['context_sha256']))
         self.assertEqual(result['release']['state'],'blocked');self.assertEqual(self.api.sent,[])
+        # 冻结事实（工作流 ref head）已经前进：这个未发送批次再也不可能发出去，
+        # 只能显式弃用后重新准备，界面不能再把「继续构建发布…」当成可用的下一步。
+        self.assertEqual(result['release']['blockers'][0]['code'],'release_context_changed')
+        self.assertFalse(result['release']['can_start']);self.assertTrue(result['release']['can_abandon'])
+        self.assertFalse(self.prepare()['release']['can_start'])
+
+    def test_transient_dispatch_failure_keeps_the_frozen_batch_startable(self):
+        prepared=self.prepare()
+        with patch.object(self.api,'tag_commit',side_effect=RuntimeError('network down')):
+            result=delivery.cmd_start_task_release(self.ctx,dict(task_id='parent',expected_context_sha256=prepared['context_sha256']))
+        self.assertEqual(result['release']['state'],'blocked')
+        self.assertEqual(result['release']['blockers'][0]['code'],'release_evidence_unconfirmed')
+        self.assertTrue(result['release']['can_start']);self.assertTrue(result['release']['can_abandon'])
 
     def test_run_identity_and_asset_contract_fail_closed(self):
         result=self.start();batch=result['release']['batch_id'];self.api.published=True
