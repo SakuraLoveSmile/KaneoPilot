@@ -820,9 +820,11 @@ struct TaskOverviewTabView: View {
             && (detail.failureCode != "execution_input_required" || detail.executionQuestion == nil)
     }
 
-    /// KP-REL12：发布受阻/构建失败时的发布投影；本页阻塞位与底栏主操作都要改用它。
+    /// KP-REL12：核心把发布受阻/构建失败挂成 release_blocked / release_failed 异常，
+    /// 这时本页阻塞位与底栏主操作要改用发布入口；其它失败仍走原有恢复路径。
     private var blockingRelease: TaskRelease? {
-        guard detail.status != "done", detail.parentCloseout == nil,
+        guard detail.parentCloseout == nil,
+              ["release_blocked", "release_failed"].contains(detail.exception?.kind ?? ""),
               let release = detail.release, release.blocksTaskOverview else { return nil }
         return release
     }

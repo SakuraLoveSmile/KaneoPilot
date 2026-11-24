@@ -22,6 +22,7 @@
 
 - 只读核对运行库（2026-11-24 11:05）确认该任务投影：`release.state=blocked`、`title=发布受阻`、`reason=Kaneo 请求失败: URLError`、`required=true`、`can_start=true`、`can_reconcile=false`、`batch_id=04bbeaba-…`、`checked_at=2026-11-23T08:56:13Z`；`allowed_actions=['recheck']`。即：这条回执是 2026-11-23 16:56（台北）发布核对时访问 Kaneo 失败留下的观测，批次 `dispatch_status=not_sent`，仍可「继续构建发布…」重试。
 - 核心语义按既有规格：`recheck` 重读计划/来源摘要与远端状态，不重算发布门；`check-execution-status`（KP-SV02）只核当前执行轮次，与发布阻塞无关。因此这两个按钮在本状态都不能解除阻塞，界面不能把它们放在解决位。
+- 判定只用核心异常（`exception.kind` 为 `release_blocked`/`release_failed`）+ 发布投影仍是该任务状态来源；不用「有 release 且状态 blocked」泛化判断——needs_user 的评审/执行失败任务也可能带着旧的 blocked 批次，那样会顶掉真正的恢复主操作与「核验执行状态」。发布调度待确认（`unknown`）不在此列，仍用核心给的 `sync_release`。
 - 不新增核心动作：底栏复用同一 `prepare-task-release` → 确认 → `start-task-release` 流程（与「构建与发布」卡片相同的命令与确认文案），不新增核心动作，也不在界面另造发布规则；卡片与底栏的按钮叫法共用 `TaskRelease.startActionTitle`，避免同一动作两套措辞。
 - 文案把 Kaneo 失败写成外部连接/登录问题，并明确本机执行、评审、验证记录不受影响；同时给出回执时间，避免用户以为是当前正在跑的动作。
 
@@ -38,12 +39,13 @@
 | 日期 | 代码版本 / 候选差异 | 环境与运行对象 | 命令或实际操作 | 结果 / 证据位置 |
 | --- | --- | --- | --- | --- |
 | 2026-11-24 | `main@28ba4e0`（未改核心） | 运行库只读副本（`mode=ro`） | `release_delivery.projection` / `derive.allowed_actions` 只读计算 | 见「已确认决定」第 1 条；确认 `can_start=true`、`allowed_actions=['recheck']` |
+| 2026-11-24 | `b9203d4`（分支提交，已签名） | 云端 GitHub Actions | `gh workflow run packages.yml --ref fix/20261124-kp-rel12-release-blocked-actions -f channel=test` → run [45318107252](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/45318107252) | 运行中；推送顺带触发的重复 preview run 45318095270 已取消（不发布） |
 
 ## 提交与集成
 
 | 提交 | 行为变化与原因 | 验证 | 合并 / 发布情况 |
 | --- | --- | --- | --- |
-| 待提交 | 发布受阻横幅与底栏改用发布入口 | 云端 Packages（夹具 + macOS 打包） | 待推送 |
+| `b9203d4` | 发布受阻横幅与底栏改用发布入口（详见提交说明） | 云端 Packages run 45318107252（夹具 + macOS 打包） | 已推送任务分支；待构建结果 |
 
 ## 交付与恢复
 
