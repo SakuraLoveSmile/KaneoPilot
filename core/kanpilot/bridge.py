@@ -645,7 +645,7 @@ def download_attachment(
             raise BridgeError(f"附件下载失败：HTTP {exc.code}") from exc
         except (URLError, TimeoutError, OSError) as exc:
             raise BridgeError(
-                f"附件下载失败：{type(exc).__name__}"
+                f"附件下载失败：{type(exc).__name__}{_net_detail(exc)}"
             ) from exc
         with response:
             dest = Path(dest)
