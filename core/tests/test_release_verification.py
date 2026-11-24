@@ -246,6 +246,19 @@ class ReleaseVerificationTest(TestCase):
         self.assertEqual(self.sync(verification_id)['verification']['state'], 'verified')
         self.assertEqual((self.plus.created, self.plus.prompts, self.plus.approvals), (1, 1, 1))
 
+    def test_verified_proof_rechecks_after_plus_restart_clears_current_turn(self):
+        """Plus 重启后空闲会话的 currentTurnId 为 null，已验证证据仍可复核；换轮次仍拒绝。"""
+        verification_id = self.complete()
+        baseline = verification.verified_proof(self.conn, self.task())
+        self.plus.current = None
+        self.assertEqual(verification.verified_proof(self.conn, self.task())['report_sha256'],
+                         baseline['report_sha256'])
+        self.assertEqual(verification._load(self.conn, 'parent', verification_id)['state'], 'verified')
+        self.plus.current = 'another-turn'
+        with self.assertRaises(util.KanpilotError) as raised:
+            verification.verified_proof(self.conn, self.task())
+        self.assertEqual(raised.exception.code, 'release_verification_turn')
+
     def test_verified_proof_rejects_report_body_or_raw_hash_drift_without_mutating_accepted_audit(self):
         verification_id = self.complete()
         accepted = verification._load(self.conn, 'parent', verification_id)

@@ -1081,7 +1081,12 @@ def _completed_report(conn, client, value, *, for_restart=False):
     sid = value['session_id']; turn = value['execution_turn_id']
     approved_execution = _approved(conn, client, value)
     status = client.agent_status(sid); inner = status.get('status') or status
-    _require(inner.get('isRunning') is False and inner.get('currentTurnId') == turn,
+    # Plus 重启后空闲会话的 currentTurnId 会变成 null（见 release-contract「重启恢复」）。
+    # 空指针只允许用来重读已接受且 verified 的这份证据：报告身份、哈希与工作树源码指纹
+    # 仍逐项比对，重启资格仍只由 _restart_report_after_runtime_reset 给出，不能凭空造出证据。
+    pointer = inner.get('currentTurnId')
+    _require(inner.get('isRunning') is False
+             and (pointer == turn or pointer is None and value.get('state') == 'verified'),
              'release_verification_turn', '独立验证会话仍运行或当前执行轮次已变化')
     record = client.turn_get(sid, turn, require_identity=True)
     _require(worker._turn_identity_matches(record, sid, turn) and worker._turn_status(record) == 'completed',

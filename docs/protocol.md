@@ -1910,6 +1910,8 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 
 Plus 重启丢失内存 `currentTurnId` 时，只有 `blocked/release_verification_report` 且保存完整报告的当前尝试可走显式重启恢复核对。prepare 与最终 restart 共用同一守卫：会话空闲且当前轮次缺省/null，完整持久转录只有原冻结 prompt、唯一原 SubmitGoal 和原 planning/execution 归属，末条属于原 execution；双键持久 turn 为 completed 且 endedAt 有效；原精确审批回执或已保存历史观察、报告身份与 SHA/正文 SHA/raw 均不变。任何追加输入、其他/无归属消息、分页不完整、非空其他当前轮次或错误类型均拒绝。待批/待答、未知写入、暂停、源码和事务内预约复核保持原样。此路径只用于重启资格，不授予验证通过、不自动启动新尝试，也不声称能枚举无消息的孤立 turn。
 
+已接受且 `verified` 的证据不依赖该内存指针（2026-11-24）：会话空闲且当前轮次为本记录轮次或缺省/null 时可重读（普通发布准备与发送前复核共用），轮次归属仍由 `pi_turn_get` 的同 session+turn 身份与 completed 终态、报告 ID/执行 ID/SHA/正文 SHA 和独立工作树源码指纹证明。其它尝试状态仍要求当前轮次为本记录轮次；当前轮次为其它非空值、运行中或身份变化一律拒绝。空指针只在证据已被接受并 verified 时用于重读，不能产生新证据，也不放宽报告内容、逐字检查与证据。
+
 #### 独立补验证中的提问（2026-10-22）
 
 Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。当前尝试的同步在批准 Goal 或读取完成报告前核对待答请求，绑定当前 `release_verification_ref`、冻结 context、原 session、对应 planning/execution turn、request、tool call 和规范化问题指纹。等待时不自动选择答案、跳过、重发 prompt 或新建验证；回答后继续原尝试。原任务保持原状态及 Review 归属，不将 verification_id 伪装为 run_id，也不复用原执行问题的阻塞/恢复、观察或停止命令。
