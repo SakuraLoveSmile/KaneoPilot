@@ -1,6 +1,6 @@
 # KP-REL13：补验证复核接受 Plus 重启后清空的 currentTurnId
 
-状态：实现中
+状态：待体验
 
 - 项目 / 任务编号：personal-kaneopilot / kp-rel13
 - 创建日期（Asia/Taipei）：2026-11-24
@@ -32,9 +32,9 @@
 
 | 步骤 | 用户效果 / 实现范围 | 验收情形与预期 | 当前结果及证据 | 状态 |
 | --- | --- | --- | --- | --- |
-| T1 | `release_verification.py`：已接受且 `verified` 的证据在会话空闲、`currentTurnId` 为 `null` 时可重读；注释写明空指针只用于重读 | 该任务那份 verified 证据的 `verified_proof` 通过；verified 尝试换到其它轮次仍抛 `release_verification_turn`；blocked/failed 尝试遇空指针仍拒绝 | `_completed_report` 判据按状态收窄；`docs/release-contract.md`、`docs/protocol.md` 同步口径 | 实现中 |
-| T2 | 新增隔离测试 `test_verified_proof_rechecks_after_plus_restart_clears_current_turn` | 修复前按原报错失败；修复后通过；换轮次仍拒绝 | 见「执行与验证记录」 | 实现中 |
-| T3 | 云端 Packages 发测试版 | macos/Fixtures/Python 分片全通过；预发布资产与说明核对一致 | 未运行 | 未开始 |
+| T1 | `release_verification.py`：已接受且 `verified` 的证据在会话空闲、`currentTurnId` 为 `null` 时可重读；注释写明空指针只用于重读 | 该任务那份 verified 证据的 `verified_proof` 通过；verified 尝试换到其它轮次仍抛 `release_verification_turn`；blocked/failed 尝试遇空指针仍拒绝 | `_completed_report` 判据按状态收窄；`docs/release-contract.md`、`docs/protocol.md` 同步口径 | 已完成（提交 `024c7dc`） |
+| T2 | 新增隔离测试 `test_verified_proof_rechecks_after_plus_restart_clears_current_turn` | 修复前按原报错失败；修复后通过；换轮次仍拒绝 | 去掉修复时 `release_verification_turn` 失败；含修复时通过 | 已通过 |
+| T3 | 云端 Packages 发测试版 | macos/Fixtures/Python 分片全通过；预发布资产与说明核对一致 | run 45338107402 全绿；发布 `v0.5.10-test.442` | 已发布 |
 
 ## 执行与验证记录
 
@@ -42,19 +42,21 @@
 | --- | --- | --- | --- | --- |
 | 2026-11-24 | `main@28ba4e0`（未改核心） | 运行库 `mode=ro` + 本机 Plus 只读连接 | `get-task`、`agent_status`、`turn_get`、`_report` 只读重放 | 见「已确认决定」第 1–3 条 |
 | 2026-11-24 | 首版（整体放宽为 `in (None, turn)`） | 隔离测试 | `python3 -m pytest tests/test_release_verification.py tests/test_release_verification_history.py tests/test_release_verification_automation.py tests/test_release_verification_questions.py tests/test_release_delivery.py tests/test_release_verification_projection.py -q` | 141 passed / 1 failed：`test_restart_preview_after_plus_reset…` 断言非重启路径遇空指针必须拒绝 → 判定口径过宽，已收窄 |
-| 2026-11-24 | 收窄版 | 隔离测试 | 同上 6 个模块 + 新增 `test_verified_proof_rechecks_after_plus_restart_clears_current_turn` | 待填（全量 core 套件运行中） |
+| 2026-11-24 | 收窄版 `024c7dc` | 隔离测试 | 同上 6 个模块，含新增用例 | **142 passed, 168 subtests passed**（415.87s） |
+| 2026-11-24 | 收窄版 `024c7dc` | 运行库（`mode=ro`）+ 本机 Plus 只读连接 | 用修复后的核心对真实任务 `verified_proof` 只读复核 | 通过：`verification_id=cd6735…`、`target_sha=4f9d9ac`、4 条冻结命令 exit 0；`conn.total_changes` 前后差 0 |
+| 2026-11-24 | `024c7dc` | 本地全量 core 套件 | `python3 -m pytest tests -q` | 跑到 23% 后主动中止（本地全量约需 1 小时以上）；全量由云端 `checks` 10 个分片覆盖 |
 
 ## 提交与集成
 
 | 提交 | 行为变化与原因 | 验证 | 合并 / 发布情况 |
 | --- | --- | --- | --- |
-| 待填 | 补验证复核不再把 Plus 重启后清空的 `currentTurnId` 当成轮次变化 | 待填 | 待填 |
+| `024c7dc` | 补验证复核不再把 Plus 重启后清空的 `currentTurnId` 当成轮次变化（仅限已接受且 verified 的证据） | 6 个相关模块 142 项通过；真实任务只读复核通过；云端 run 45338107402 全绿（16 success、1 预期 skipped） | 已发布测试版 `v0.5.10-test.442`；**尚未合入 main** |
 
 ## 交付与恢复
 
-- 体验入口：安装包含本改动的测试版后，打开该 MediaPlayer 任务「构建与发布」，点「继续构建发布…」。预期：不再出现 `release_verification_turn` 阻塞，批次 `v0.4.11-pilot.1795424173` 正常派发。
-- 尚未完成 / 尚未验证：仅核心判据改动，未在真实窗口做原生点击核验；是否重跑该任务的真实发布由用户决定。
+- 体验入口：设置 → 高级 → 软件更新 获取 `v0.5.10-test.442`（需开启「接收测试版」）后，打开该 MediaPlayer 任务「构建与发布」并点「继续构建发布…」。预期：不再出现 `release_verification_turn` 阻塞，批次 `v0.4.11-pilot.1795424173` 正常派发；常驻引擎要换到包含本改动的版本后才会自动停掉这条重复核对。
+- 尚未完成 / 尚未验证：未在真实窗口做原生点击核验，未安装该测试版；该任务的真实发送（会创建 tag 与 GitHub Actions 运行）由用户在界面确认。分支尚未合入 `main`。
 - 用户确认（明确确认后才改为已验收）：未确认。
-- 下一步和恢复任务时首先核对的内容：分支 HEAD 与本文件差异；该任务 `release.can_start` 与批次 `dispatch_status`；测试版标签与 run。
+- 下一步和恢复任务时首先核对的内容：分支 HEAD（`024c7dc`）与本文件差异；该任务 `release.can_start` 与批次 `dispatch_status`；测试版标签 `v0.5.10-test.442`（run 45338107402）。
 - 需要时的回退 / 数据保留方式：还原本任务提交即恢复原判据；不改数据库、不改批次与发布回执。
 - 本任务 worktree 收尾：合入 `main` 且验证通过后在同一任务内删除工作树与已合并本地分支。
