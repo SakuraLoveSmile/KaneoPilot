@@ -1688,7 +1688,7 @@ private struct TaskReleaseSection: View {
                 HStack(spacing: Spacing.s) {
                     if preparing || working { ProgressView().controlSize(.small) }
                     if release.showsStartAction {
-                        Button(preparing ? "正在准备发布…" : release.externalRepair != nil ? "准备新批次…" : release.batchId != nil ? "继续构建发布…" : detail.status == "done" ? "补发版本…" : "构建并发布…") {
+                        Button(preparing ? "正在准备发布…" : release.startActionTitle(completedTask: detail.status == "done")) {
                             let token = UUID(), taskID = detail.taskId
                             preparationID = token
                             preparing = true

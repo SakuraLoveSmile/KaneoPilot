@@ -3680,6 +3680,32 @@ struct TaskRelease: Decodable {
     var showsAbandonAction: Bool { canAbandon == true && state != "unknown" }
     var showsStartAction: Bool { canStart && state != "unknown" }
 
+    /// KP-REL12：发布受阻/构建失败是任务概览阻塞横幅的来源；此时执行轮次核验与
+    /// 重新校验都推不动发布，横幅要给出「构建与发布」这个真实入口。
+    var blocksTaskOverview: Bool { showsTaskStatus && (state == "blocked" || state == "failed") }
+    /// 横幅说明：这条阻塞来自哪一步，真正能推进的入口在哪。
+    var blockRecoveryNote: String {
+        if mentionsKaneo {
+            return "这条阻塞来自发布核对访问 Kaneo 失败（连接或登录），不是本机执行或代码问题，执行、评审和验证记录不受影响。先在 Kaneo 侧恢复连接或登录，再用底栏的构建发布按钮重试。"
+        }
+        if state == "failed" {
+            return "构建失败不会自动重试；先到「构建与发布」查看失败证据，决定修复后再重建。"
+        }
+        return "这是发布核对的阻塞，不是执行轮次问题；请用底栏的构建发布按钮重试，或在「构建与发布」查看阻塞细节。"
+    }
+    /// 横幅补充：这两个入口不会解除发布阻塞，别让它们看起来像解决办法。
+    var blockRecoveryCaveat: String { "「重新校验」只重读状态，不会重跑发布核对或重新构建；「核验执行状态」只核当前执行轮次。" }
+    /// 原因或阻塞项里出现 Kaneo，说明是外部连接/登录问题，不是本机执行结果。
+    var mentionsKaneo: Bool {
+        ([reason] + blockers.map(\.message)).contains { $0.contains("Kaneo") }
+    }
+    /// 「构建并发布」的按钮叫法；发布卡片与概览底栏共用，避免同一动作两套措辞。
+    func startActionTitle(completedTask: Bool) -> String {
+        if externalRepair != nil { return "准备新批次…" }
+        if batchId != nil { return "继续构建发布…" }
+        return completedTask ? "补发版本…" : "构建并发布…"
+    }
+
     var channelLabel: String { channel == "stable" ? "正式版" : "预发布" }
     var syncLabel: String { state == "unknown" ? "核对发布结果" : "同步发布结果" }
     var isBlocked: Bool { ["blocked", "unknown"].contains(state) }

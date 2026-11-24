@@ -747,6 +747,12 @@ struct TaskOverviewTabView: View {
     @State private var executionStopOperation: (runID: String, operationID: String)?
     @State private var deliveryConfirmation: (taskID: String, executionRunID: String, reviewKey: String)?
     @State private var executionStatusTarget: ExecutionStatusCheckTarget?
+    @State private var releaseFocusRequest = 0
+    // KP-REL12：底栏的发布重试与发布卡片走同一套准备 → 确认 → 启动流程。
+    @State private var releaseCandidate: PrepareTaskReleaseResponse?
+    @State private var releasePreparationID: UUID?
+    @State private var releasePreparing = false
+    @State private var releaseWorking = false
 
     private var reviewStore: ReviewResolutionStore? {
         guard detail.parentCloseout == nil else { return nil }
@@ -812,6 +818,28 @@ struct TaskOverviewTabView: View {
         answerStore == nil && reviewStore == nil && detail.parentCloseout == nil && isBlocked
             && detail.currentInputQuestion?.state != "open"
             && (detail.failureCode != "execution_input_required" || detail.executionQuestion == nil)
+    }
+
+    /// KP-REL12：发布受阻/构建失败时的发布投影；本页阻塞位与底栏主操作都要改用它。
+    private var blockingRelease: TaskRelease? {
+        guard detail.status != "done", detail.parentCloseout == nil,
+              let release = detail.release, release.blocksTaskOverview else { return nil }
+        return release
+    }
+
+    /// 发布阻塞横幅的如实说明：这条阻塞来自发布核对，入口在「构建与发布」。
+    private func releaseBlockedNotes(_ release: TaskRelease) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            Text(release.blockRecoveryNote)
+            Text(release.blockRecoveryCaveat)
+            if let checkedAt = release.checkedAt {
+                Text("该结论记录于 \(TimeFormat.fullString(checkedAt))，不是当前正在进行的动作。")
+            }
+        }
+        .font(.kpSmall)
+        .foregroundStyle(Color.kpSecondary)
+        .fixedSize(horizontal: false, vertical: true)
+        .textSelection(.enabled)
     }
 
     @ViewBuilder
@@ -891,6 +919,8 @@ struct TaskOverviewTabView: View {
     }
 
     private var primaryAction: String? {
+        // KP-REL12：发布阻塞时核心只给 recheck，它不是发布入口；主操作换成定位到「构建与发布」。
+        if blockingRelease != nil { return nil }
         let available = visibleActions
         // 核心已核验的模型前失败可显式重试；一般发送不明仍仅推荐校验。
         if detail.sendState == "unknown" {
@@ -1017,7 +1047,7 @@ struct TaskOverviewTabView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            recordDialogs(executionDialogs(resolutionDialogs(verificationDialogs(overviewScrollView(proxy)))))
+            releaseDialogs(recordDialogs(executionDialogs(resolutionDialogs(verificationDialogs(overviewScrollView(proxy))))))
         }
     }
 
@@ -1122,6 +1152,9 @@ struct TaskOverviewTabView: View {
         .onChange(of: reviewFocusRequest) {
             withAnimation { proxy.scrollTo("review-resolution", anchor: .top) }
         }
+        .onChange(of: releaseFocusRequest) {
+            withAnimation { proxy.scrollTo("build-and-release", anchor: .top) }
+        }
         .safeAreaInset(edge: .bottom) { actionBar }
         .confirmationDialog("继续交付？", isPresented: Binding(
             get: { deliveryConfirmation != nil },
@@ -1143,6 +1176,46 @@ struct TaskOverviewTabView: View {
             Text("复用已有评审和验证，推送当前任务分支并创建 PR，按项目已保存的策略继续合并和构建发布。")
         }
         .onChange(of: detail.taskId) { deliveryConfirmation = nil }
+    }
+
+    /// KP-REL12：发布受阻时按「构建与发布」同一流程重试——先只读准备，确认后再启动。
+    private func releaseDialogs<Content: View>(_ content: Content) -> some View {
+        content
+        .alert("确认构建并发布？", isPresented: Binding(
+            get: { releaseCandidate != nil }, set: { if !$0 { releaseCandidate = nil } }
+        ), presenting: releaseCandidate) { confirmed in
+            Button("构建并发布") {
+                releaseCandidate = nil
+                releaseWorking = true
+                Task {
+                    await model.startTaskRelease(candidate: confirmed, onError: { model.alertMessage = $0 })
+                    releaseWorking = false
+                    onRefreshDetail?()
+                }
+            }
+            .disabled(model.busy)
+            Button("取消", role: .cancel) { releaseCandidate = nil }
+        } message: { confirmed in Text(confirmed.confirmationMessage) }
+        .onChange(of: detail.taskId) { releaseCandidate = nil; releasePreparationID = nil }
+    }
+
+    /// 先在核心只读核对发布目标与批次；失败只提示原因，不改任务状态。
+    private func prepareBlockedRelease() {
+        guard releasePreparationID == nil, !model.busy else { return }
+        let token = UUID(), taskID = detail.taskId
+        releasePreparationID = token
+        releasePreparing = true
+        Task {
+            defer { if releasePreparationID == token { releasePreparationID = nil; releasePreparing = false } }
+            do {
+                let prepared = try await model.prepareTaskRelease(taskID: taskID)
+                guard releasePreparationID == token else { return }
+                releaseCandidate = prepared
+            } catch {
+                guard releasePreparationID == token else { return }
+                model.alertMessage = error.coreMessage
+            }
+        }
     }
 
     private func verificationDialogs<Content: View>(_ content: Content) -> some View {
@@ -1333,7 +1406,12 @@ struct TaskOverviewTabView: View {
                     .foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            executionStatusCheckButton
+            // KP-REL12：发布类阻塞与执行轮次无关，不给「核验执行状态」，改说明真实入口。
+            if let release = blockingRelease {
+                releaseBlockedNotes(release)
+            } else {
+                executionStatusCheckButton
+            }
         }
         .padding(Spacing.m)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1432,6 +1510,7 @@ struct TaskOverviewTabView: View {
             TaskAutomationSections(detail: detail,
                 onOpenSession: onSwitchTab.map { callback in { callback(.execution) } },
                 onRefreshDetail: onRefreshDetail)
+                .id("build-and-release")
         }
     }
 
@@ -1506,6 +1585,31 @@ struct TaskOverviewTabView: View {
                           goalBlockerStore.blocker?.state != "accepted" || goalBlockerStore.blocker?.needsReconciliation == true {
                     Text(goalBlockerStore.blocker?.needsReconciliation == true ? "请在上方核对并接续目标决定" : "请在上方选择目标处理方式")
                         .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                } else if let release = blockingRelease {
+                    // KP-REL12：发布阻塞的真实入口是发布核对与构建重试，不是执行核验或重新校验。
+                    if release.showsStartAction {
+                        Button(releasePreparing ? "正在准备发布…" : release.startActionTitle(completedTask: false)) {
+                            prepareBlockedRelease()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(releasePreparing || releaseWorking || model.busy)
+                        .help("先在核心只读核对发布目标与批次，确认后再启动构建与发布。")
+                    } else if release.canReconcile, let batchID = release.batchId {
+                        Button(release.syncLabel) {
+                            releaseWorking = true
+                            Task {
+                                await model.syncReleaseBatch(batchID: batchID)
+                                releaseWorking = false
+                                onRefreshDetail?()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(releaseWorking || model.busy)
+                    } else {
+                        Button("处理发布阻塞") { releaseFocusRequest += 1 }
+                            .buttonStyle(.borderedProminent)
+                            .help("定位到「构建与发布」；发布受阻要在那里按提示处理，核验执行状态与重新校验都不会解除这条阻塞。")
+                    }
                 } else if let primaryAction {
                     actionButton(primaryAction)
                         .buttonStyle(.borderedProminent)
