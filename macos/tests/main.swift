@@ -730,6 +730,7 @@ for (state, allowed) in [("blocked", true), ("dispatching", true), ("unknown", f
         expect(release.showsStartAction == allowed, "未发送批次按核心can_start恢复首次发送，unknown不可发送")
     }
 }
+expect(TaskRelease.abandonCompleteNotice.contains("构建并发布"), "弃用批次成功提示写明下一步仍可构建发布")
 if let response = decode(PrepareTaskReleaseResponse.self, "{\"task_id\":\"root-a\",\"context_sha256\":\"context-a\",\"release\":\(releaseJSON)}") {
     expect(response.contextSha256 == "context-a", "准备候选固化指纹原样解码")
 }

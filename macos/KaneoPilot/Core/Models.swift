@@ -3679,6 +3679,9 @@ struct TaskRelease: Decodable {
     var showsTaskStatus: Bool { required && isHistorical != true }
     var showsAbandonAction: Bool { canAbandon == true && state != "unknown" }
     var showsStartAction: Bool { canStart && state != "unknown" }
+    /// KP-REL15：弃用未发送批次成功后，入口并没有消失——只是批次没了、按钮叫「构建并发布…」。
+    /// 提示要直接说出下一步，别让用户以为发布从这里断掉。
+    static let abandonCompleteNotice = "已放弃未发送批次，原有审计保留；现在可按当前配置重新「构建并发布…」。"
 
     var channelLabel: String { channel == "stable" ? "正式版" : "预发布" }
     var syncLabel: String { state == "unknown" ? "核对发布结果" : "同步发布结果" }

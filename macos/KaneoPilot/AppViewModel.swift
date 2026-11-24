@@ -697,7 +697,9 @@ final class AppViewModel: ObservableObject {
             let response = try await self.client.run("abandon-unsent-release", payload: [
                 "batch_id": batchID, "expected_context_sha256": contextSHA256
             ], timeout: 300, as: TaskReleaseMutationResponse.self)
-            return response.release.reason
+            // 核心回执只说明审计事实；提示里要点明下一步仍是发布入口（KP-REL15）。
+            _ = response
+            return TaskRelease.abandonCompleteNotice
         }
     }
 
