@@ -103,7 +103,7 @@ struct SessionsListView: View {
                     StatusFilterBar(selection: $categoryFilter, options: statusOptions)
                 }
                 Group {
-                if model.isLoading && model.sessions.isEmpty {
+                if model.isLoading(.sessions) && model.sessions.isEmpty {
                     LoadingView()
                 } else if ordered.isEmpty {
                     ContentUnavailableView {
@@ -111,7 +111,7 @@ struct SessionsListView: View {
                     } description: {
                         Text("还没有按 task_id + run_id 关联上的执行会话。")
                     } actions: {
-                        Button("刷新") { Task { await model.loadSaved() } }
+                        Button("刷新") { Task { await model.refreshCurrentPage() } }
                     }
                 } else if visibleSessions.isEmpty {
                     ContentUnavailableView {
@@ -148,7 +148,7 @@ struct SessionsListView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
-                        Task { await model.loadSaved() }
+                        Task { await model.refreshCurrentPage() }
                     } label: {
                         Label("刷新", systemImage: "arrow.clockwise")
                     }
@@ -158,7 +158,6 @@ struct SessionsListView: View {
                 }
             }
         }
-        .task { await model.loadSaved() }
     }
 }
 
@@ -359,7 +358,6 @@ struct SavedTasksView: View {
     let mode: SavedListMode
 
     @EnvironmentObject private var model: AppViewModel
-    @State private var trashTab: TrashTab = .tasks
     @State private var confirmingPurgeTask: TaskSummary?
     @State private var confirmingPurgeSession: SessionInfo?
     @State private var confirmingEmptyTrash = false
@@ -371,7 +369,12 @@ struct SavedTasksView: View {
     }
 
     private var showingSessionTab: Bool {
-        mode == .trash && trashTab == .sessions
+        mode == .trash && model.showsTrashedSessions
+    }
+
+    private var readDomain: AppViewModel.ReadDomain {
+        if mode == .archive { return .archive }
+        return showingSessionTab ? .trashedSessions : .trashedTasks
     }
 
     private var isEmpty: Bool {
@@ -417,7 +420,7 @@ struct SavedTasksView: View {
                     }
                 }
                 Group {
-                    if model.isLoading && isEmpty {
+                    if model.isLoading(readDomain) && isEmpty {
                         LoadingView()
                     } else if isEmpty {
                         emptyState
@@ -438,7 +441,7 @@ struct SavedTasksView: View {
                 ToolbarItem(placement: .primaryAction) {
                     HStack(spacing: Spacing.s) {
                         Button {
-                            Task { await model.loadSaved() }
+                            Task { await model.refreshCurrentPage() }
                         } label: {
                             Label("刷新", systemImage: "arrow.clockwise")
                         }
@@ -452,7 +455,6 @@ struct SavedTasksView: View {
                 SessionReaderView(taskID: route.taskID, preferredRunID: route.runID)
             }
         }
-        .task { await model.loadSaved() }
         .confirmationDialog(
             PurgeText.confirmMessage,
             isPresented: Binding(
@@ -551,7 +553,10 @@ struct SavedTasksView: View {
     }
 
     private var trashPicker: some View {
-        Picker("回收站分类", selection: $trashTab) {
+        Picker("回收站分类", selection: Binding(
+            get: { model.showsTrashedSessions ? TrashTab.sessions : .tasks },
+            set: { model.showTrashedSessions($0 == .sessions) }
+        )) {
             ForEach(TrashTab.allCases, id: \.self) { tab in
                 Text(tab.rawValue).tag(tab)
             }
@@ -570,7 +575,7 @@ struct SavedTasksView: View {
                  ? "移入回收站的执行会话保留记录，可随时恢复或永久从列表移除。"
                  : mode.emptyDescription)
         } actions: {
-            Button("刷新") { Task { await model.loadSaved() } }
+            Button("刷新") { Task { await model.refreshCurrentPage() } }
         }
     }
 

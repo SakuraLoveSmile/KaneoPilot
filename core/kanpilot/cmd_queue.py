@@ -341,7 +341,7 @@ def _retry_target(conn, task) -> tuple[str, str]:
     """Decide (task_status, request kind) for resolve retry."""
     last = conn.execute(
         "SELECT kind FROM requests WHERE task_id=? AND status IN "
-        "('failed','cancelled') ORDER BY updated_at DESC LIMIT 1",
+        "('failed','cancelled') ORDER BY updated_at DESC, rowid ASC LIMIT 1",
         (task["task_id"],),
     ).fetchone()
     kind = last["kind"] if last else None

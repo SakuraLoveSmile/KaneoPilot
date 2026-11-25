@@ -319,6 +319,15 @@ class BuildWiringTests(unittest.TestCase):
         # Next to the core it would lose its bytecode to the __pycache__ clean-up.
         self.assertNotIn("$RES/python", self.build)
 
+    def test_the_core_is_precompiled_after_cleanup_and_before_import_checks(self):
+        steps = ('find "$RES" -name "__pycache__"',
+                 '[ "$BUNDLED_PYTHON" = "$EXPECTED_PYTHON" ]',
+                 '"$RUNTIME_DST/bin/python3" -I -m compileall -q -f --invalidation-mode unchecked-hash -s "$RES" "$RES"',
+                 '"$RUNTIME_DST/bin/python3" -I -B - "$ROOT/core" "$RES"')
+        positions = [self.build.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn('importlib.util.source_hash(source.read_bytes())', self.smoke)
+
     def test_the_core_is_judged_by_the_bundled_interpreter_not_the_runners(self):
         self.assertNotIn("PYTHONDONTWRITEBYTECODE=1 python3 -", self.build)
         self.assertIn('"python_version"', self.build)

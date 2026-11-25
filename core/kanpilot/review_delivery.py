@@ -163,10 +163,9 @@ def _execution_active(conn, task):
 def candidate(conn, task):
     """Cheap current pass gate, never reads files or external services."""
     from . import release_delivery
-    if (not db.task_is_active(task) or core.is_automation_managed(task)
-            or core.automation_of(task).get('manual_takeover') or db.task_auto_paused(task)
-            or db.paused(conn, 'delivery') or task['sent'] != 1 or task['send_state'] != 'sent'
-            or task['status'] not in ('in_review', 'needs_user')
+    if (not db.task_is_active(task) or task['status'] not in ('in_review', 'needs_user')
+            or task['sent'] != 1 or task['send_state'] != 'sent' or db.task_auto_paused(task)
+            or dict(db.task_extra_view(task).get('automation') or {}) or db.paused(conn, 'delivery')
             or core.review_repair_of(task) or _mapping(conn, task) is None or not _execution_active(conn, task)):
         return None
     if _failed_delivery(conn, task) is not None:

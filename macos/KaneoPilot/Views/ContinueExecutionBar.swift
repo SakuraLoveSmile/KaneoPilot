@@ -146,6 +146,5 @@ struct ContinueExecutionBar: View {
             taskID: taskID, runID: runID, onError: { failure = $0 })
         if let failure { error = failure }
         else if response == nil { error = "继续执行未返回结果，请刷新后核验。" }
-        else { await model.refreshAll() }
     }
 }

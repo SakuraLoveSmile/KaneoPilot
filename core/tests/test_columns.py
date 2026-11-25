@@ -15,7 +15,7 @@ from collections import Counter
 from datetime import timedelta
 
 from helpers import KanpilotTestCase  # noqa: E402
-from kanpilot import util  # noqa: E402
+from kanpilot import cmd_queue, db, util  # noqa: E402
 
 PROJECT_ID = "fixture-project-feedback"
 
@@ -296,6 +296,24 @@ class TestMutualExclusionAndCounts(ColumnCase):
 
 
 class TestHistoryFailureNotPolluteRecovery(ColumnCase):
+    def test_retry_uses_original_insertion_order_for_equal_update_times(self):
+        task_id = "taskcl-retry-tie"
+        self.add_task(task_id)
+        at = util.now_iso()
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                conn.executemany(
+                    "INSERT INTO requests(request_id,idempotency_key,task_id,stage,kind,status,created_at,updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    [(kind, kind, task_id, kind, kind, status, at, at)
+                     for kind, status in (("review", "failed"), ("monitor", "cancelled"))],
+                )
+            self.assertEqual(cmd_queue._retry_target(conn, db.require_task(conn, task_id)),
+                             ("in_review", "review"))
+        finally:
+            conn.close()
+
     def test_resolve_retry_clears_exception(self):
         # 历史失败不污染恢复后任务：resolve 清阻塞字段后归列回 lifecycle，
         # exception 归 null（本地分类不修改 Kaneo 状态）。

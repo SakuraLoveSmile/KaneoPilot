@@ -24,6 +24,27 @@ class TestBoardAttention(KanpilotTestCase):
             blocked_at="2026-10-10T00:00:00+00:00")
         return remote["id"]
 
+    def test_dashboard_reads_during_writer_transaction(self):
+        from contextlib import closing
+        from unittest.mock import patch
+
+        clock = patch.object(util, "now_dt", return_value=util.now_dt())
+        clock.start()
+        self.addCleanup(clock.stop)
+        self._make_needs_user("taskbrdpoll000000000001")
+        expected = {name: self.call(command, {}) for name, command in (
+            ("engine", "engine-status"), ("attention", "attention-list"), ("executor", "executor-status")
+        )}
+        with closing(db.connect(self.db_path)) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            db.set_setting(writer, "paused_global", True)
+            self.assertEqual(self.call("desktop-status", {}), expected)
+            self.assertFalse(self.call("overview", {})["paused"]["global"])
+            self.assertEqual(self.call("list-tasks", {})["attention"], expected["attention"])
+            self.assertTrue(self.call("list-events", {})["events"])
+            writer.commit()
+        self.assertTrue(self.call("desktop-status", {})["executor"]["paused"]["global"])
+
     def test_overview_attention_equals_attention_list(self):
         self._make_needs_user("taskbrdovw00000000001")
         overview = self.call("overview", {})

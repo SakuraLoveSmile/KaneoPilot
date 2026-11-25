@@ -200,6 +200,37 @@ class ParentCloseoutTest(KanpilotTestCase):
         db.update_task(self.conn,'parent','2099-01-01T00:00:00Z')
         self.assertEqual(parent_closeout.projection(self.conn,self.row('parent'))['context_sha256'],initial)
 
+    def test_list_reuses_projection_and_rechecks_related_rows_between_reads(self):
+        expected = parent_closeout.projection(self.conn, self.row('parent'))
+        with patch.object(parent_closeout, '_local', wraps=parent_closeout._local) as compute:
+            listing = self.call('list-tasks', {'board_column': 'in_review'})
+        self.assertEqual(compute.call_count, 1)
+        view = next(item for item in listing['tasks'] if item['task_id'] == 'parent')
+        self.assertEqual(view['parent_closeout'], expected)
+
+        db.update_task(self.conn, 'fix1', self.now, status='in_review')
+        listing = self.call('list-tasks')
+        view = next(item for item in listing['tasks'] if item['task_id'] == 'parent')
+        self.assertEqual(view['parent_closeout']['state'], 'waiting_children')
+        self.assertNotEqual(view['parent_closeout']['context_sha256'], expected['context_sha256'])
+        self.assertEqual(self.run_closeout(expected['context_sha256'])['outcome'], 'blocked')
+
+    def test_cached_extra_keeps_writes_and_snapshot_top_level_separate(self):
+        original = self.row('parent')
+        db.set_extra(self.conn, original, self.now, parent_closeout={'state': 'blocked'})
+        current = self.row('parent')
+        with patch.object(db, 'task_extra', wraps=db.task_extra) as decode, db.task_extra_read_scope():
+            cached = db.task_extra_view(current)
+            self.assertIs(db.task_extra_view(self.row('parent')), cached)
+            snapshot = parent_closeout._task_snapshot(current, read_projection=True)
+            self.assertNotIn('parent_closeout', snapshot['extra_json'])
+            self.assertIn('parent_closeout', cached)
+            self.assertNotIn('parent_closeout', db.task_extra_view(original))
+            mutable = db.task_extra(current)
+            mutable['parent_closeout'].clear()
+            self.assertEqual(cached['parent_closeout'], {'state': 'blocked'})
+            self.assertEqual(decode.call_count, 3)
+
     def test_unknown_after_applied_write_reconciles_without_a_second_send(self):
         from kanpilot import remote, bridge
         original=remote.update_status

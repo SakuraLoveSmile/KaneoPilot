@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS tasks(
   saved_at TEXT,
   auto_advance_paused INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS tasks_review_source ON tasks(review_source_task_id);
 
 CREATE TABLE IF NOT EXISTS requests(
   request_id TEXT PRIMARY KEY,
@@ -76,6 +78,8 @@ CREATE TABLE IF NOT EXISTS requests(
 CREATE UNIQUE INDEX IF NOT EXISTS requests_active_key ON requests(idempotency_key)
   WHERE status IN ('queued','claimed');
 CREATE INDEX IF NOT EXISTS requests_poll ON requests(stage, status, priority, created_at);
+CREATE INDEX IF NOT EXISTS requests_task_status ON requests(task_id, status);
+CREATE INDEX IF NOT EXISTS requests_run ON requests(run_id);
 
 CREATE TABLE IF NOT EXISTS attempts(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -209,7 +213,15 @@ def connect(db_path: Path, allow_upgrade: bool = False) -> sqlite3.Connection:
 
 
 def _init_settings(conn: sqlite3.Connection) -> None:
+    # Existing WAL readers can proceed while the scheduler holds a write transaction.
+    # Even INSERT OR IGNORE would acquire the writer lock for an existing key.
+    placeholders = ",".join("?" for _ in DEFAULT_SETTINGS)
+    present = {row[0] for row in conn.execute(
+        f"SELECT key FROM settings WHERE key IN ({placeholders})", tuple(DEFAULT_SETTINGS)
+    )}
     for key, value in DEFAULT_SETTINGS.items():
+        if key in present:
+            continue
         conn.execute(
             "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
             (key, util.jdump(value)),
@@ -524,6 +536,29 @@ def task_fields(row: sqlite3.Row) -> dict:
 def task_extra(row: sqlite3.Row) -> dict:
     extra = util.jload(row["extra_json"])
     return extra if isinstance(extra, dict) else {}
+
+
+_task_extra_views = ContextVar("task_extra_views", default=None)
+
+
+@contextmanager
+def task_extra_read_scope():
+    token = _task_extra_views.set({})
+    try:
+        yield
+    finally:
+        _task_extra_views.reset(token)
+
+
+def task_extra_view(row: sqlite3.Row) -> dict:
+    """Read-only view, reused only during the current list operation."""
+    cache = _task_extra_views.get()
+    if cache is None:
+        return task_extra(row)
+    key = (row["task_id"], row["extra_json"])
+    if key not in cache:
+        cache[key] = task_extra(row)
+    return cache[key]
 
 
 # ------------------------------------------------------------ save_state

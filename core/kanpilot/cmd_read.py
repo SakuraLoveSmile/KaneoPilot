@@ -230,6 +230,22 @@ def _board_attention(ctx) -> dict:
     return cmd_attention_list(ctx, {})
 
 
+def cmd_desktop_status(ctx, payload: dict) -> dict:
+    """One desktop heartbeat, with a single snapshot for all three projections."""
+    from .cmd_config import cmd_executor_status
+    from .engine.commands import cmd_engine_status
+
+    ctx.conn.execute("BEGIN")
+    try:
+        return {
+            "engine": cmd_engine_status(ctx, {}),
+            "attention": _board_attention(ctx),
+            "executor": cmd_executor_status(ctx, {}),
+        }
+    finally:
+        ctx.conn.rollback()
+
+
 def cmd_overview(ctx, payload: dict) -> dict:
     conn = ctx.conn
     task_counts = {}
@@ -329,6 +345,19 @@ def cmd_overview(ctx, payload: dict) -> dict:
 
 
 def cmd_list_tasks(ctx, payload: dict) -> dict:
+    from . import parent_closeout
+
+    if ctx.conn.in_transaction:
+        return _list_tasks(ctx, payload)
+    ctx.conn.execute("BEGIN")
+    try:
+        with db.task_extra_read_scope(), parent_closeout.projection_read_scope(ctx.conn, ctx.now):
+            return _list_tasks(ctx, payload)
+    finally:
+        ctx.conn.rollback()
+
+
+def _list_tasks(ctx, payload: dict) -> dict:
     board_filter = payload.get("board_column")
     if board_filter is not None and board_filter not in constants.BOARD_COLUMNS:
         raise util.KanpilotError(
@@ -532,41 +561,43 @@ def cmd_list_events(ctx, payload: dict) -> dict:
         clauses.append("id < ?")
         params.append(before_id)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    rows = ctx.conn.execute(
-        f"SELECT * FROM events{where} ORDER BY id DESC", params
-    ).fetchall()
-
+    sql = f"SELECT * FROM events{where} ORDER BY id DESC"
     task_cache: dict = {}
     request_cache: dict = {}
-    filtered = []
-    for row in rows:
-        view = derive.event_view(
-            ctx.conn, row, task_cache=task_cache, request_cache=request_cache
-        )
-        if stage is not None and view["stage"] != stage:
-            continue
-        if result_f is not None and view["result"] != result_f:
-            continue
-        if query_l:
-            haystack = "\n".join(
-                str(part)
-                for part in (
-                    view["task_title"], view["project_name"],
-                    view["task_id"], view["request_id"], view["kind"],
-                    view["summary"],
-                    util.jdump(view["detail"]) if view["detail"] else "",
-                )
-                if part
-            ).lower()
-            if query_l not in haystack:
-                continue
-        filtered.append(view)
+    snapshot_cache: dict = {}
 
-    page = filtered[:limit]
-    next_before_id = (
-        page[-1]["id"] if len(filtered) > limit and page else None
-    )
-    return {"events": page, "next_before_id": next_before_id}
+    def event_view(row):
+        return derive.event_view(
+            ctx.conn, row, task_cache=task_cache, request_cache=request_cache,
+            snapshot_cache=snapshot_cache,
+        )
+
+    if stage is None and result_f is None and not query_l:
+        rows = ctx.conn.execute(sql + " LIMIT ?", (*params, limit + 1)).fetchall()
+        return {
+            "events": [event_view(row) for row in rows[:limit]],
+            "next_before_id": rows[limit - 1]["id"] if len(rows) > limit else None,
+        }
+
+    matches = derive.event_search_matcher(ctx.conn, query_l, task_cache, snapshot_cache) if query_l else None
+    page = []
+    cursor = ctx.conn.execute(sql, params)
+    try:
+        for batch in iter(lambda: cursor.fetchmany(256), []):
+            for row in batch:
+                if matches is not None and not matches(row):
+                    continue
+                view = event_view(row)
+                if stage is not None and view["stage"] != stage:
+                    continue
+                if result_f is not None and view["result"] != result_f:
+                    continue
+                if len(page) == limit:
+                    return {"events": page, "next_before_id": page[-1]["id"]}
+                page.append(view)
+    finally:
+        cursor.close()
+    return {"events": page, "next_before_id": None}
 
 
 # ---------------------------------------------------------------- doctor 探针
