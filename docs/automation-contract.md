@@ -339,7 +339,7 @@ claude -p --output-format stream-json --verbose --restricted --tools Read,Grep,G
 - 两者共用新 prompt `review_cli.md`。
 - Codex 成本记为 null（source=codex），token 数只写日志。
 - **瞬时错误与成功终态（2026-11-13）**：Codex 事件流先报 `error`/`turn.failed`、之后自行重连并发出 `turn.completed` 时，按最终结果处理——退出码 0 且 `last-message.txt` 是合法结构化结果即接受，`recovered_error_events` 记数量留证；成功终态之后才出现的错误、或从未出现成功终态，仍 fail-closed 判失败。理由：真实 Review 出现 `Reconnecting... waiting for network` 后仍产出完整 JSON 且退出码 0，却被丢弃成「Codex Review 失败（退出码 0）」。
-- **输出帧与兼容解析（2026-11-23，KP-REV01）**：`review_cli.md` 的 JSON 结果是契约；`review_instruction` 对 CLI 后端传 `output_format="json"`，只给 JSON 段要求，不追加 Plus 的 review_text_v1 帧。Codex `last-message.txt` 解析 JSON 失败时，用同一 `pi_desktop_review._text_result` 严格解析合法分段帧并记 `job.result_format=review_text_v1`（`result_normalizations` 同 Plus）；其余仍报「Codex Review 缺少有效最终 JSON」。理由：经 Magpie 网关接入的第三方模型不执行 `--output-schema`，按旧提示输出分段文本，把结论为 pass 的评审判成格式失败（2026-11-23 MediaPlayer 实例）。
+- **输出帧与兼容解析（2026-11-23，KP-REV01）**：`review_cli.md` 的 JSON 结果是契约；`review_instruction` 对 CLI 后端传 `output_format="json"`，只给 JSON 段要求，不追加 Plus 的 review_text_v1 帧。Codex `last-message.txt` 解析 JSON 失败时，用同一 `pi_desktop_review._text_result` 严格解析合法分段帧并记 `job.result_format=review_text_v1`（`result_normalizations` 同 Plus）；其余仍报「Codex Review 缺少有效最终 JSON」。失败原因同时区分「未写出最终消息」「最终消息为空」与格式不符（附脱敏、截断到 240 字符的消息开头），三种都是 review_blocked，不再只显示 `char 0`。理由：经 Magpie 网关接入的第三方模型不执行 `--output-schema`，按旧提示输出分段文本，把结论为 pass 的评审判成格式失败（2026-11-23 MediaPlayer 实例）。
 
 **交付任务的 Review 材料：**
 

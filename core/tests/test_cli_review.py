@@ -400,6 +400,69 @@ def test_codex_unframed_prose_still_blocks(tmp_path):
     assert '缺少有效最终 JSON' in result['error']
 
 
+def _run_codex_without_final(tmp_path, name='nofinal.py'):
+    script = tmp_path / name
+    script.write_text('import json\n'
+                      'print(json.dumps({"type": "turn.completed"}), flush=True)\n')
+    return cli_review.run_codex([sys.executable, str(script)], prompt='', cwd=tmp_path, env={},
+                                timeout=5, log_path=tmp_path / 'raw.jsonl',
+                                out_path=tmp_path / 'missing.txt')
+
+
+def test_codex_missing_final_message_has_distinct_reason(tmp_path):
+    """退出码 0 且没写出最终消息：报「未写出最终消息」，不再只丢 json char 0。"""
+    result = _run_codex_without_final(tmp_path)
+    assert result['is_error'] is True
+    assert '未写出最终消息' in result['error']
+    assert 'char 0' not in result['error']
+
+
+def test_codex_empty_final_message_has_distinct_reason(tmp_path):
+    """最终消息为空文件：明确「最终消息为空」，与格式不符分开诊断。"""
+    result = _run_codex_with_final(tmp_path, '  \n', name='empty.py')
+    assert result['is_error'] is True
+    assert '最终消息为空' in result['error']
+
+
+def test_codex_unframed_prose_reports_message_head(tmp_path):
+    """非 JSON 也非合法分段：保留阻塞文案，并附最终消息开头便于定位。"""
+    result = _run_codex_with_final(tmp_path, '结论：通过。未发现代码缺陷。', name='prose.py')
+    assert result['is_error'] is True
+    assert '缺少有效最终 JSON' in result['error']
+    assert '最终消息开头：结论：通过' in result['error']
+
+
+def test_codex_misspelled_text_frame_still_blocks_with_head(tmp_path):
+    """首尾标记错拼（KANEPILOT）不得猜改接收，但摘要要让错拼一眼可见。
+
+    真实案例：job 934cf0ec 的分段结果把 KANPILOT 写成 KANEPILOT，结论虽为 pass
+    仍必须拒收；旧文案只有 char 0，看不出是标记错拼。
+    """
+    typo = TEXT_FRAME.replace('KANPILOT', 'KANEPILOT')
+    result = _run_codex_with_final(tmp_path, typo, name='typo.py')
+    assert result['is_error'] is True
+    assert '缺少有效最终 JSON' in result['error']
+    assert '最终消息开头：<<<KANEPILOT_REVIEW_V1>>>' in result['error']
+
+
+def test_codex_prose_head_is_redacted_and_bounded(tmp_path):
+    """摘要不得泄露凭据或把整段答复写进失败原因。"""
+    script = tmp_path / 'secret.py'
+    output = tmp_path / 'secret.txt'
+    secret = 'sk-live-0123456789abcdef'
+    prose = '结论：通过 Authorization: Bearer ' + secret + ' ' + ('细节 ' * 200)
+    script.write_text('import json\nfrom pathlib import Path\n'
+                      f'Path({str(output)!r}).write_text({prose!r})\n'
+                      'print(json.dumps({"type": "turn.completed"}), flush=True)\n')
+    result = cli_review.run_codex([sys.executable, str(script)], prompt='', cwd=tmp_path,
+                                  env={'KANPILOT_TEST_TOKEN': secret}, timeout=5,
+                                  log_path=tmp_path / 'raw.jsonl', out_path=output)
+    assert result['is_error'] is True
+    assert secret not in result['error']
+    assert '最终消息开头' in result['error']
+    assert len(result['error']) < 700
+
+
 def test_cli_instruction_sends_json_frame_only():
     facts = {'task': {'project_name': 'fixture'}}
     job = {'task_id': 't1', 'request_id': 'r1', 'run_id': 'rv1', 'execution_run_id': 'e1'}
