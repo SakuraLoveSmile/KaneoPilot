@@ -140,6 +140,37 @@ class ReleaseLifecycleTest(TestCase):
                 self.assertEqual(result['release']['state'],'blocked',result)
                 self.assertIsNotNone(delivery.completion_gate(self.conn,self.row()))
         self.api.bad={};self.assertEqual(self.sync(batch)['release']['state'],'published')
+
+    def test_lagging_job_verdict_is_polled_instead_of_blocking(self):
+        result=self.start();batch_id=result['release']['batch_id'];self.api.published=True
+        self.api.bad={'jobs':[dict(name='Build',status='in_progress',conclusion=None)]}
+        observed=self.sync(batch_id)['release']
+        self.assertEqual(observed['state'],'publishing',observed)
+        self.assertTrue(observed['can_reconcile'])
+        self.assertIn('1/3',observed['reason'])
+        self.assertIsNotNone(delivery.completion_gate(self.conn,self.row()))
+        self.api.bad={}
+        later=SimpleNamespace(conn=self.conn,now_iso=util.plus_seconds(61,self.ctx.now),now=self.ctx.now)
+        polled=delivery.sync_existing(later,project_ids=['project'])['results']
+        self.assertEqual([row['batch_id'] for row in polled],[batch_id])
+        self.assertEqual(polled[0]['release']['state'],'published')
+        self.assertIsNone(delivery.completion_gate(self.conn,self.row()))
+
+    def test_three_lagging_polls_end_in_a_named_job_blocker(self):
+        result=self.start();batch_id=result['release']['batch_id'];self.api.published=True
+        self.api.bad={'jobs':[]}
+        states=[self.sync(batch_id)['release'] for _ in range(3)]
+        self.assertEqual([row['state'] for row in states],['publishing','publishing','blocked'])
+        self.assertEqual(states[-1]['blockers'][0]['code'],'release_job_incomplete')
+        self.assertIn('Build',states[-1]['blockers'][0]['message'])
+
+    def test_failed_job_verdict_blocks_on_the_first_read(self):
+        result=self.start();batch_id=result['release']['batch_id'];self.api.published=True
+        self.api.bad={'jobs':[dict(name='Build',status='completed',conclusion='failure')]}
+        observed=self.sync(batch_id)['release']
+        self.assertEqual(observed['state'],'blocked')
+        self.assertEqual(observed['blockers'],[dict(code='release_job_incomplete',message='必需构建 job 未成功：Build')])
+
     def test_failed_build_is_not_automatically_retried(self):
         result=self.start();self.api.failed=True
         self.assertEqual(self.sync(result['release']['batch_id'])['release']['state'],'failed')

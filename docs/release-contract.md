@@ -193,3 +193,7 @@ UI 沿用项目「自动处理」表单与任务详情「交付」区。配置�
 ### 已发送批次的短暂读取失败
 
 已发送的构建批次同步遇到 GitHub 只读传输超时或瞬时错误时，保留同一批次、workflow run、目标提交和派发回执。已有 queued/building/publishing 状态的前两次失败保留最后一次确认的阶段，说明结果尚待自动核对，并沿 next_check_at 的既有 60 秒间隔复查；连续第三次才转 blocked。成功核对清零连续读取失败次数。认证、权限、身份不匹配和真实构建失败立即保留阻塞或失败，不混入网络重试。未知派发继续只读按 marker 对账，任何读取重试都不能重新 dispatch、创建批次或触发模型。
+
+### 必需构建 job 结论滞后（2026-11-25，KP-REL16）
+
+Actions 的 jobs 列表会短暂落后于 run 自身。run 已 completed/success、而必需 job 尚未出现或仍无 `completed` 结论时，按可重试观测处理：批次保持 `publishing`，reason 说明「发布核对等待必需构建 job 结论（n/3）」，并沿既有 60 秒间隔由后台 tick 自动复查；前两次只累计次数，连续第三次仍拿不到结论才转 `blocked`，消息点名该 job 并注明「运行已完成，三次核对仍无成功结论」。job 已 `completed` 但结论不是 success（failure/timed_out/cancelled/skipped 等），或同名必需 job 出现多个，仍是确定失败，第一次核对即阻塞。成功核对清零计数。此规则只吸收观测滞后，不放宽安装包、tag、manifest 与资产核对，也不能让任何 job 事实被跳过。

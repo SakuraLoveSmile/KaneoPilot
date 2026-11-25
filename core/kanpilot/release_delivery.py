@@ -34,6 +34,19 @@ class ReleaseBlocked(util.KanpilotError):
         super().__init__(code,message)
 
 
+class ReleasePending(ReleaseBlocked):
+    """运行已完成但必需 job 的结论尚未可见：可重试的观测，不是发布失败。
+
+    Actions 的 jobs 列表会短暂落后于 run 自身——run 已成功，最后一批 job 仍显示
+    运行中。按旧的「不成功即 blocked」判定，一次亚秒级滞后就把批次钉死在发布受阻，
+    而 blocked 批次不再进入调度轮询，只能靠人工「同步发布结果」解套。
+    """
+
+    def __init__(self,code,message,job=''):
+        self.job=job
+        super().__init__(code,message)
+
+
 def _require(ok,code,message):
     if not ok:
         raise ReleaseBlocked(code,message)
@@ -1014,8 +1027,12 @@ def _verify_publication(batch,run):
     rows=github.jobs(repo,run['id'],attempt)
     for required in batch['policy']['required_jobs']:
         matches=[row for row in rows if isinstance(row,dict) and row.get('name')==required]
-        _require(len(matches)==1 and matches[0].get('status')=='completed' and matches[0].get('conclusion')=='success',
-                 'release_job_incomplete','必需构建 job 未成功：'+required)
+        _require(len(matches)<=1,'release_job_ambiguous','必需构建 job 出现多次：'+required)
+        # A finished run can still be listed with a job that has no verdict yet; that
+        # is API lag, not a failure, so it stays retryable instead of blocking.
+        if not matches or matches[0].get('status')!='completed':
+            raise ReleasePending('release_job_pending','Actions 运行已完成，必需构建 job 尚无结论：'+required,job=required)
+        _require(matches[0].get('conclusion')=='success','release_job_incomplete','必需构建 job 未成功：'+required)
     release=github.release(repo,batch['tag'])
     _require(isinstance(release,dict) and release.get('draft') is False and release.get('tag_name')==batch['tag']
              and release.get('prerelease') is (batch['policy']['channel']=='prerelease')
@@ -1125,7 +1142,21 @@ def cmd_sync_release_batch(ctx,payload):
         return dict(outcome='published' if batch['state']=='published' else 'waiting',release=_dto(batch,True,conn=ctx.conn))
     except (ReleaseBlocked,util.KanpilotError,gh_client.GhError,git_delivery.GitDeliveryError,OSError,ValueError) as exc:
         state=('unknown' if not batch.get('workflow_run_id') and batch.get('dispatch_status')!='not_sent' else 'blocked')
-        if isinstance(exc,gh_client.GhError) and exc.kind in ('timeout','transient'):
+        if isinstance(exc,ReleasePending):
+            # The run already reported success, so only the job verdicts are behind.
+            # A blocked batch is never revisited by the scheduler: keep it in the
+            # polled publishing state, re-read on the next tick, and give up only
+            # after three lagging polls leave the verdict still missing.
+            batch['read_failures']=int(batch.get('read_failures') or 0)+1
+            if batch['read_failures']<3:
+                state='publishing'
+                exc=ReleasePending(exc.code,'发布核对等待必需构建 job 结论，将自动核对（'
+                    +str(batch['read_failures'])+'/3）：'+exc.job,job=exc.job)
+            else:
+                state='blocked'
+                exc=ReleaseBlocked('release_job_incomplete','必需构建 job 未成功：'+exc.job
+                    +'（运行已完成，三次核对仍无成功结论）')
+        elif isinstance(exc,gh_client.GhError) and exc.kind in ('timeout','transient'):
             # A failed GET says nothing about a running build or accepted dispatch.
             # Keep its last observed stage so the existing scheduler can reconcile
             # it; never resend the workflow, and stop after three failed polls.

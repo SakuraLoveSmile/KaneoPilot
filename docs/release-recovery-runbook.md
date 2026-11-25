@@ -14,6 +14,8 @@
 | `检查已通过，GitHub 合并状态仍未就绪（…）` | 同上，再看保护规则与评审 | 检查全绿，剩下的是保护规则、评审或目标分支；到 GitHub 处理 |
 | `PR 已变化，或当前不是同仓库、可确认的合并冲突` | 看任务详情「AI 处理…」 | 该入口只处理 `CONFLICTING`；`MERGEABLE` 时被拒是预期 |
 | `GitHub 暂未查到本批次运行` | `gh api repos/<repo>/actions/workflows/<id>/runs?event=workflow_dispatch` | 零个运行 = 调度没有落地，先查工作流是否满足发布契约 |
+| `发布核对等待必需构建 job 结论（n/3）` | `gh run view <run-id> --json jobs` | 运行已完成但 job 结论滞后；后台 60 秒复查，三次仍无结论才转发布受阻 |
+| `必需构建 job 未成功：<job>` | 同上 | job 结论是明确的非成功，或三次滞后后仍无成功结论；在 Actions 重跑后「同步发布结果」 |
 | `发布目标不是本轮已验证的完整源码` | 只读投影 `release_target_unverified` | 目标分支在验证后又前进过，需要补验证 |
 | `上次跳过原因 budget` | 看是否有 `auto_confirm_skipped` 事件 | 多为历史残留，不代表当前阻塞 |
 
