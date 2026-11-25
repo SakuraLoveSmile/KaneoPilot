@@ -4,7 +4,9 @@ docs/protocol.md §2/§5.2."""
 
 from __future__ import annotations
 
+import re
 import sqlite3
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -1366,33 +1368,10 @@ def _event_summary(kind: str, detail) -> str:
     return f"{label}：{reason}" if reason else label
 
 
-def event_view(
-    conn: sqlite3.Connection,
-    row: sqlite3.Row,
-    *,
-    task_cache: Optional[dict] = None,
-    request_cache: Optional[dict] = None,
-    snapshot_cache: Optional[dict] = None,
-) -> dict:
-    """list-events 扩展视图（§5.21.2）：原字段 + task_title/project_name/
-    stage/result/summary。标题回填：任务实体优先 → 来源快照 → 占位。"""
-    task_cache = task_cache if task_cache is not None else {}
-    request_cache = request_cache if request_cache is not None else {}
-    snapshot_cache = snapshot_cache if snapshot_cache is not None else {}
-    task_id = row["task_id"]
-    request_id = row["request_id"]
-
-    task = None
-    if task_id is not None:
-        if task_id not in task_cache:
-            task_cache[task_id] = db.get_task(conn, task_id)
-        task = task_cache[task_id]
-    request = None
-    if request_id is not None:
-        if request_id not in request_cache:
-            request_cache[request_id] = db.get_request(conn, request_id)
-        request = request_cache[request_id]
-
+def _event_task_fields(conn, task_id, task_cache, snapshot_cache):
+    if task_id in task_cache:
+        return task_cache[task_id]
+    task = db.get_task(conn, task_id) if task_id is not None else None
     # 标题回填（§5.21.2）：仍保留的任务实体（非 purged）→ source_path 快照
     # → 占位短 id；purged 任务实体视为已退出保留集合。
     task_title = None
@@ -1419,12 +1398,80 @@ def event_view(
     if not project_name and task_id:
         project_name = "未保留项目"
 
+    fields = (task_title, project_name, task["stage"] if task is not None else None)
+    task_cache[task_id] = fields
+    return fields
+
+
+def _search_fields(*parts) -> str:
+    return "\n".join(str(part) for part in parts if part).lower()
+
+
+def event_search_matcher(conn, query, task_cache, snapshot_cache):
+    """Match the displayed fields before reading request state for a result row."""
+    multiline = "\n" in query
+    # Without escapes, JSON normalization preserves the contents of string tokens.
+    # Outside strings it can only spell a literal or a number (including its exponent).
+    json_words = ("true", "false", "null", "nan", "infinity", "e")
+    word = next((w for w in re.findall(r"[^\W\d_]+", query)
+                 if not any(w in literal for literal in json_words)), None)
+
+    @lru_cache(maxsize=256)
+    def task_text(task_id):
+        title, project, _ = _event_task_fields(conn, task_id, task_cache, snapshot_cache)
+        return _search_fields(title, project, task_id)
+
+    def body_text(kind, raw):
+        detail = util.jload(raw)
+        summary = _event_summary(kind, detail)
+        if not multiline and word and isinstance(raw, str) and "\\" not in raw and word not in raw.lower():
+            return _search_fields(kind, summary)
+        return _search_fields(kind, summary, util.jdump(detail) if detail else "")
+
+    # Repeated heartbeat payloads are common. Large evidence blobs are scanned once
+    # per row and never held by the cache.
+    cached_body = lru_cache(maxsize=256)(body_text)
+
+    def matches(row):
+        task = task_text(row["task_id"])
+        request = str(row["request_id"] or "").lower()
+        if not multiline and (query in task or query in request):
+            return True
+        raw = row["detail_json"]
+        render = cached_body if raw is None or len(raw) <= 4096 else body_text
+        body = render(row["kind"], raw)
+        if multiline:
+            return query in "\n".join(part for part in (task, request, body) if part)
+        return query in body
+
+    return matches
+
+
+def event_view(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    task_cache: Optional[dict] = None,
+    request_cache: Optional[dict] = None,
+    snapshot_cache: Optional[dict] = None,
+) -> dict:
+    """list-events 扩展视图（§5.21.2）：原字段 + task_title/project_name/
+    stage/result/summary。标题回填：任务实体优先 → 来源快照 → 占位。"""
+    task_cache = task_cache if task_cache is not None else {}
+    request_cache = request_cache if request_cache is not None else {}
+    snapshot_cache = snapshot_cache if snapshot_cache is not None else {}
+    task_id = row["task_id"]
+    request_id = row["request_id"]
+
+    task_title, project_name, task_stage = _event_task_fields(conn, task_id, task_cache, snapshot_cache)
+    request = None
+    if request_id is not None:
+        if request_id not in request_cache:
+            request_cache[request_id] = db.get_request(conn, request_id)
+        request = request_cache[request_id]
+
     # stage：请求 stage 优先，回退任务 stage。
-    stage = None
-    if request is not None and request["stage"]:
-        stage = request["stage"]
-    elif task is not None:
-        stage = task["stage"]
+    stage = request["stage"] if request is not None and request["stage"] else task_stage
 
     # result：关联请求终态 > 事件语义 > None。
     result = None

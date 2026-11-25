@@ -579,17 +579,18 @@ def cmd_list_events(ctx, payload: dict) -> dict:
             "next_before_id": rows[limit - 1]["id"] if len(rows) > limit else None,
         }
 
+    matches = derive.event_search_matcher(ctx.conn, query_l, task_cache, snapshot_cache) if query_l else None
     page = []
     cursor = ctx.conn.execute(sql, params)
     try:
         for batch in iter(lambda: cursor.fetchmany(256), []):
             for row in batch:
+                if matches is not None and not matches(row):
+                    continue
                 view = event_view(row)
                 if stage is not None and view["stage"] != stage:
                     continue
                 if result_f is not None and view["result"] != result_f:
-                    continue
-                if query_l and query_l not in _event_search_text(view):
                     continue
                 if len(page) == limit:
                     return {"events": page, "next_before_id": page[-1]["id"]}
@@ -597,19 +598,6 @@ def cmd_list_events(ctx, payload: dict) -> dict:
     finally:
         cursor.close()
     return {"events": page, "next_before_id": None}
-
-
-def _event_search_text(view: dict) -> str:
-    return "\n".join(
-        str(part)
-        for part in (
-            view["task_title"], view["project_name"],
-            view["task_id"], view["request_id"], view["kind"],
-            view["summary"],
-            util.jdump(view["detail"]) if view["detail"] else "",
-        )
-        if part
-    ).lower()
 
 
 # ---------------------------------------------------------------- doctor 探针

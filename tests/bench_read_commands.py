@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import closing
 from pathlib import Path
 
 READ_INDEXES = ("requests_task_status", "requests_run", "tasks_review_source")
@@ -123,6 +124,13 @@ def main():
             with db.write_txn(conn):
                 seed_history(conn, root / "task-source.json")
                 seed_task_and_session_views(conn)
+            varied = root / "distinct-event-details.db"
+            with closing(sqlite3.connect(varied)) as copy:
+                conn.backup(copy)
+                with copy:
+                    copy.execute("""UPDATE events SET detail_json=printf(
+                        '{"note":"事件 %d 处理完成","request":"%s","evidence":{"step":%d,"project":"客户端"}}',
+                        id, request_id, id)""")
         finally:
             conn.close()
         environment = {"HOME": scratch, "TMPDIR": scratch, "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}
@@ -130,6 +138,8 @@ def main():
             ("overview_empty", empty, "overview", {}),
             ("overview_history", history, "overview", {}),
             ("events_first_page", history, "list-events", {}),
+            ("events_no_match", history, "list-events", {"query": "missing-kp-perf01-event"}),
+            ("events_distinct_no_match", varied, "list-events", {"query": "没有这种地瓜"}),
             ("events_task_page", history, "list-events", {"task_id": "fixture-task-00", "before_id": 40000}),
             ("events_sparse", history, "list-events", {"stage": "monitor", "result": "succeeded",
                                                        "query": "sparse-match", "limit": 2}),
@@ -150,6 +160,8 @@ def main():
             candidate_ms, candidate = measure(args.candidate_python, args.candidate_core, database, environment, command, payload)
             if baseline != candidate:
                 raise SystemExit(f"Output mismatch for {name}")
+            if name.endswith("_no_match") and candidate != {"events": [], "next_before_id": None}:
+                raise SystemExit(f"Expected an empty page for {name}")
             metrics[name] = {"baseline_median_ms": baseline_ms, "candidate_median_ms": candidate_ms, "equal": True}
         print(json.dumps({"samples": 7, "tasks": 33, "requests": 16069, "events": 53308, "metrics": metrics}, indent=2))
 

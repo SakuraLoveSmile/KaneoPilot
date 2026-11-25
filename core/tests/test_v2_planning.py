@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -178,6 +179,43 @@ class TestEventPagination(KanpilotTestCase):
         self.assertEqual(self.call("list-events", dict(filters, stage="review")),
                          {"events": [], "next_before_id": None})
 
+    def test_no_match_skips_request_and_result_projection(self):
+        self.seed_events(["routine"] * 300)
+        with closing(db.connect(self.db_path)) as conn:
+            conn.execute("UPDATE events SET request_id='historical-request'")
+        with patch.object(db, "get_request", wraps=db.get_request) as get_request, \
+                patch.object(derive, "event_view", wraps=derive.event_view) as event_view:
+            result = self.call("list-events", {"query": "没有这个词", "stage": "plan"})
+        self.assertEqual(result, {"events": [], "next_before_id": None})
+        get_request.assert_not_called()
+        event_view.assert_not_called()
+
+    def test_search_preserves_display_text_and_field_boundaries(self):
+        with closing(db.connect(self.db_path)) as conn:
+            conn.execute("INSERT INTO events(at, task_id, request_id, kind, detail_json) "
+                         "VALUES ('now', 'orphan', 'Ticket-X', 'reported', ?)",
+                         (r'{"z":3, "note":"\u5730\u74dc Kelvin \u212a", "a":1}',))
+        event, = self.call("list-events", {})["events"]
+        for term in ("未保留项目", "ORPHAN\nticket-x\nREPORTED", "ported\n执行端汇报：地瓜",
+                     'kelvin k\n{"a":1,"note":"地瓜', '"z":3'):
+            with self.subTest(term=term):
+                self.assertEqual(self.call("list-events", {"query": term}),
+                                 {"events": [event], "next_before_id": None})
+        for term in ('3, "note"', r'\u5730', 'ticket-xreported', "不存在"):
+            with self.subTest(term=term):
+                self.assertEqual(self.call("list-events", {"query": term}),
+                                 {"events": [], "next_before_id": None})
+
+    def test_search_normalized_numeric_detail_and_generated_summary(self):
+        with closing(db.connect(self.db_path)) as conn:
+            conn.execute("INSERT INTO events(at, kind, detail_json) VALUES ('now', 'reported', ?)",
+                         ('{"sample":1e999, "latency":0.0000001}',))
+        for term in ('infinity', '1e-07', '端汇报', '"latency":1e-07,"sample"'):
+            with self.subTest(term=term):
+                result = self.call("list-events", {"query": term})
+                self.assertEqual([e["id"] for e in result["events"]], [1])
+        self.assertEqual(self.call("list-events", {"query": "1e999"})["events"], [])
+
     def test_purged_task_reads_snapshot_once_per_page(self):
         fixture = self.make_ready_task()
         task_id = fixture["remote"]["id"]
@@ -205,6 +243,11 @@ class TestEventPagination(KanpilotTestCase):
         self.assertEqual(snapshot_reads, [snapshot])
         self.assertEqual([(event["task_title"], event["project_name"]) for event in page["events"]],
                          [("Old title", "Old project")] * 2)
+        self.assertEqual(self.call("list-events", {"task_id": task_id, "query": "old title", "limit": 2}), page)
+        snapshot.write_text(util.jdump({"task": {"title": "Changed title", "projectName": "New project"}}))
+        self.assertEqual(self.call("list-events", {"task_id": task_id, "query": "old project"})["events"], [])
+        refreshed = self.call("list-events", {"task_id": task_id, "query": "changed title", "limit": 2})
+        self.assertEqual([event["project_name"] for event in refreshed["events"]], ["New project"] * 2)
         snapshot.unlink()
         next_read = self.call("list-events", {"task_id": task_id, "limit": 1})
         self.assertTrue(next_read["events"][0]["task_title"].startswith("未保留标题"))
