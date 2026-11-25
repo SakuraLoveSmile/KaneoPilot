@@ -920,6 +920,52 @@ if let result = decode(ReconcileContinuationResponse.self, #"{"classification":"
     expect(result.confirmationAction == nil, "未知归因不可给出写入动作")
 }
 
+// MARK: - KP-DL01 交付页（只读 PR 状态快照）
+
+let deliveryLiveJSON = #"{"task_id":"dlv-task","observed_at":"2026-11-23T08:33:12+00:00","live":true,"error":null,"delivery":{"mode":"pr","pr_number":13,"pr_url":"https://github.com/o/r/pull/13","pr_state":"OPEN","branch":"kaneo/x","base_branch":"main","head_sha":"66b18f8cb1abdca83d1f7aba8dd6614af13e16f6","merged_at":null,"last_sync_at":"2026-11-23T08:11:46+00:00","next_sync_at":"2026-11-23T08:16:46+00:00","auto_merge_enabled":true,"notice":{"state":"waiting_checks","reason":"检查仍在运行","head_sha":"66b18f8cb1abdca83d1f7aba8dd6614af13e16f6","updated_at":"2026-11-23T08:11:46+00:00"},"notice_matches_head":true},"pr":{"state":"OPEN","is_draft":false,"mergeable":"MERGEABLE","merge_state_status":"UNSTABLE","review_decision":"","head_sha":"66b18f8cb1abdca83d1f7aba8dd6614af13e16f6","base_ref_name":"main","url":"https://github.com/o/r/pull/13","head_matches_delivery":true},"gate":{"state":"waiting_checks","reason":"检查仍在运行：app-ci/android、app-ci/macos，等待结果","ready":false},"checks":[{"name":"android","workflow":"app-ci","state":"running","conclusion":null,"url":"https://github.com/o/r/actions/runs/1/job/2","started_at":"2026-11-23T08:08:02+00:00","completed_at":"0001-01-01T00:00:00Z","superseded_runs":1},{"name":"analyze-test","workflow":"app-ci","state":"passed","conclusion":"SUCCESS","url":null,"started_at":"2026-11-23T08:08:02+00:00","completed_at":"2026-11-23T08:11:28+00:00","superseded_runs":0}],"checks_summary":{"total":2,"passed":1,"failed":0,"running":1,"unknown":0}}"#
+
+if let status = decode(DeliveryStatusView.self, deliveryLiveJSON) {
+    expect(status.live && status.taskId == "dlv-task", "交付页解码实时快照")
+    expect(status.hasPullRequest && status.delivery?.prNumber == 13, "交付页认得已交付的 PR")
+    expect(status.delivery?.currentNotice?.state == "waiting_checks", "同一提交的上次观测可当作当前记录")
+    expect(status.gate?.title == "等待检查" && status.gate?.needsAttention == true, "合并门沿用核心判定")
+    expect(status.pr?.stateText == "开放" && status.pr?.mergeStateText == "检查未全部通过", "PR 状态与合并状态按中文口径")
+    expect(status.pr?.reviewText == "未要求评审", "空评审结论写作未要求评审")
+    expect(status.checks?.count == 2 && status.checks?.first?.title == "app-ci/android", "检查按 workflow/名称展示")
+    expect(status.checks?.first?.stateText == "运行中" && status.checks?.first?.url != nil, "运行中的检查可打开日志")
+    expect(status.checks?.first?.supersededText == "另有 1 轮更早结果", "多轮检查提示旧结果")
+    if let check = status.checks?.first, let now = TimeFormat.parse("2026-11-23T08:08:22+00:00") {
+        expect(check.durationText(now: now) == "20 秒", "运行中的检查忽略 GitHub 的零值完成时间")
+    }
+    if let check = status.checks?.last {
+        expect(check.durationText() == "3 分 26 秒", "完成的检查显示耗时")
+    }
+    expect(status.checksSummary?.summaryText == "共 2 项 · 1 通过 · 1 运行中", "检查汇总按状态计数")
+}
+
+let deliveryMovedHeadJSON = #"{"task_id":"dlv-moved","observed_at":"2026-11-23T08:33:12+00:00","live":false,"error":null,"delivery":{"mode":"pr","pr_number":9,"pr_url":"https://github.com/o/r/pull/9","pr_state":"MERGED","branch":"kaneo/y","base_branch":"main","head_sha":"aaa","merged_at":"2026-11-22T04:00:41+00:00","last_sync_at":null,"next_sync_at":null,"auto_merge_enabled":true,"notice":{"state":"merged","reason":"PR 已合并，等待完成同步","head_sha":"bbb","updated_at":null},"notice_matches_head":false},"pr":null,"gate":null,"checks":null,"checks_summary":null}"#
+
+if let status = decode(DeliveryStatusView.self, deliveryMovedHeadJSON) {
+    expect(status.live == false && status.gate == nil && status.checks == nil, "已合并时不再读 GitHub，也不给合并门")
+    expect(status.hasPullRequest && status.delivery?.mergedAt == "2026-11-22T04:00:41+00:00", "已合并仍保留合并时间")
+    expect(status.delivery?.currentNotice == nil, "提交变了就不把旧观测当现在")
+}
+
+if let status = decode(DeliveryStatusView.self, #"{"task_id":"dlv-none","observed_at":"2026-11-23T08:33:12+00:00","live":false,"error":null,"delivery":null,"pr":null,"gate":null,"checks":null,"checks_summary":null}"#) {
+    expect(status.hasPullRequest == false, "没有交付时页面走空态")
+}
+
+if let status = decode(DeliveryStatusView.self, #"{"task_id":"dlv-error","observed_at":"2026-11-23T08:33:12+00:00","live":false,"error":{"code":"transient","message":"GitHub 调用失败：连接被重置"},"delivery":{"mode":"pr","pr_number":7,"pr_url":null,"pr_state":"OPEN","branch":"kaneo/z","base_branch":"main","head_sha":"ccc","merged_at":null,"last_sync_at":null,"next_sync_at":null,"auto_merge_enabled":false,"notice":null,"notice_matches_head":false},"pr":null,"gate":null,"checks":null,"checks_summary":null}"#) {
+    expect(status.error?.code == "transient" && status.error?.message.contains("连接被重置") == true, "读取失败保留原因")
+    expect(status.hasPullRequest && status.delivery?.autoMergeEnabled == false, "读取失败仍显示已交付的 PR")
+}
+
+expect(DeliveryPhase.text("ready") == "可以合并" && DeliveryPhase.text("waiting_checks") == "等待检查"
+       && DeliveryPhase.text("blocked") == "合并受阻", "交付状态词统一")
+expect(DeliveryPhase.text(nil) == "未读取" && DeliveryPhase.text("weird_state") == "weird_state", "未知交付状态原样回显")
+expect(DeliveryElapsed.text(45) == "45 秒" && DeliveryElapsed.text(90) == "1 分 30 秒", "耗时分秒口径")
+expect(DeliveryElapsed.text(3600) == "1 小时" && DeliveryElapsed.text(3720) == "1 小时 2 分", "耗时小时口径")
+
 print("夹具断言：\(checks - failures.count)/\(checks) 通过")
 if failures.isEmpty {
     print("RESULT: ALL FIXTURE CHECKS PASSED")

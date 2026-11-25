@@ -48,12 +48,10 @@ _PASSING_CONCLUSIONS = ('SUCCESS', 'NEUTRAL', 'SKIPPED')
 _MAX_CHECK_NAME = 120
 _MAX_CHECK_WORKFLOW = 80
 _MAX_REASON_LABELS = 2
-
-
-def _check_label(check):
-    name = gh_client.redact(check.get('name') or check.get('context') or '未命名检查')[:_MAX_CHECK_NAME]
-    workflow = gh_client.redact(check.get('workflowName') or '')[:_MAX_CHECK_WORKFLOW]
-    return workflow + '/' + name if workflow else name
+_ZERO_STAMP = '0001-01-01'
+_PENDING_STATES = ('PENDING', 'EXPECTED')
+# 同一时间戳时的取舍：失败优先，保持原因串稳定。
+_ROUND_TIER = {'pending': 0, 'unknown': 0, 'passed': 1, 'failed': 2}
 
 
 def _label_text(labels):
@@ -62,37 +60,110 @@ def _label_text(labels):
     return '、'.join(labels[:_MAX_REASON_LABELS]) + ' 等 ' + str(len(labels)) + ' 项'
 
 
+def stamp(value):
+    """Parse a GitHub check timestamp; 0001-01-01 and empty mean "not set".
+
+    A check that has not completed comes back with a zero completion time rather
+    than null, so comparing raw strings would rank it as the oldest round.
+    """
+    if not isinstance(value, str) or not value.strip() or value.startswith(_ZERO_STAMP):
+        return None
+    return util.parse_ts(value)
+
+
+def _check_identity(check):
+    """Redacted (workflow, name) of one rollup entry; same name = same round."""
+    name = gh_client.redact(str(check.get('name') or check.get('context')
+                                 or '未命名检查'))[:_MAX_CHECK_NAME]
+    workflow = gh_client.redact(str(check.get('workflowName') or ''))[:_MAX_CHECK_WORKFLOW]
+    return workflow, name or '未命名检查'
+
+
+def _label(workflow, name):
+    return workflow + '/' + name if workflow else name
+
+
+def check_state(check):
+    """passed|failed|pending|unknown for one raw rollup entry."""
+    typename = check.get('__typename')
+    if typename == 'CheckRun':
+        if check.get('status') != 'COMPLETED':
+            return 'pending'
+        return 'passed' if check.get('conclusion') in _PASSING_CONCLUSIONS else 'failed'
+    if typename == 'StatusContext':
+        if check.get('state') in _PENDING_STATES:
+            return 'pending'
+        return 'passed' if check.get('state') == 'SUCCESS' else 'failed'
+    return 'unknown'
+
+
+def _current(items):
+    """Which round of one check name counts now, and its state.
+
+    A re-run adds a new round beside the old one, and GitHub keeps the superseded
+    result in the rollup. Reading "any failure wins" therefore blocked the merge
+    after the failure had been fixed (GitHub itself already reported CLEAN) and
+    offered 「修复失败的检查」/重跑 for a job that no longer failed. A round still
+    in progress is the current one; otherwise the newest stamped round decides.
+    Without any usable timestamp recency is unknowable, so a failure there stays
+    conservative and keeps the gate.
+    """
+    for state in ('pending', 'unknown'):
+        for item in items:
+            if check_state(item) == state:
+                return item, state
+    stamped = [(item, stamp(item.get('completedAt')) or stamp(item.get('startedAt')))
+               for item in items]
+    usable = [(item, moment, _ROUND_TIER[check_state(item)])
+              for item, moment in stamped if moment is not None]
+    if usable:
+        item, _moment, _tier = max(usable, key=lambda entry: (entry[1], entry[2]))
+        return item, check_state(item)
+    failed = [item for item in items if check_state(item) == 'failed']
+    if failed:
+        return failed[0], 'failed'
+    return items[0], check_state(items[0])
+
+
+def check_rounds(pr):
+    """One row per (workflow, name): the raw entries and the round that counts.
+
+    Shared by the merge gate, the rerun/repair entries and the desktop delivery
+    page so all three name the same round. A malformed entry becomes an empty
+    object (unknown type) instead of an exception, so the gate keeps observing.
+    """
+    rollup = pr.get('statusCheckRollup')
+    if not isinstance(rollup, list):
+        return None
+    groups = {}
+    for check in rollup:
+        item = check if isinstance(check, dict) else {}
+        groups.setdefault(_check_identity(item), []).append(item)
+    rounds = []
+    for (workflow, name), items in groups.items():
+        current, state = _current(items)
+        rounds.append({'workflow': workflow, 'name': name, 'label': _label(workflow, name),
+                       'items': items, 'current': current, 'state': state})
+    return rounds
+
+
 def _classify_checks(pr):
     """Point at the check that stops the merge instead of echoing a status code.
 
-    Pending checks are normal progress and stay 'waiting_checks': GitHub also
-    reports UNSTABLE while they run, so judging the status code first would start
-    the long-blocked streak during a normal build. A failed check is a real
-    'blocked' observation and names itself. The reason stays deterministic
-    (sorted, deduplicated, no timestamps or observation counts) because the
-    stall streak is keyed by the exact string.
+    Only the current round of each check name is judged: pending is normal
+    progress and stays 'waiting_checks' (GitHub also reports UNSTABLE while
+    checks run), a failed current round is a real 'blocked' observation and
+    names itself. The reason stays deterministic (sorted, deduplicated, no
+    timestamps or observation counts) because the stall streak is keyed by the
+    exact string.
     """
-    checks = pr.get('statusCheckRollup')
-    if not isinstance(checks, list):
+    rounds = check_rounds(pr)
+    if rounds is None:
         return 'waiting_checks', 'GitHub 检查结果未知，继续观察'
-    failed, pending = [], []
-    for check in checks:
-        if not isinstance(check, dict):
-            return 'waiting_checks', 'GitHub 检查结果未知，继续观察'
-        typename = check.get('__typename')
-        if typename == 'CheckRun':
-            if check.get('status') != 'COMPLETED':
-                pending.append(_check_label(check))
-            elif check.get('conclusion') not in _PASSING_CONCLUSIONS:
-                failed.append(_check_label(check))
-        elif typename == 'StatusContext':
-            if check.get('state') in ('PENDING', 'EXPECTED'):
-                pending.append(_check_label(check))
-            elif check.get('state') != 'SUCCESS':
-                failed.append(_check_label(check))
-        else:
-            return 'waiting_checks', 'GitHub 检查类型未知，继续观察'
-    failed, pending = sorted(set(failed)), sorted(set(pending))
+    if any(row['state'] == 'unknown' for row in rounds):
+        return 'waiting_checks', 'GitHub 检查类型未知，继续观察'
+    failed = sorted({row['label'] for row in rounds if row['state'] == 'failed'})
+    pending = sorted({row['label'] for row in rounds if row['state'] == 'pending'})
     if failed:
         return 'blocked', '检查未通过：' + _label_text(failed) + '，修复或重跑后会自动合并'
     if pending:

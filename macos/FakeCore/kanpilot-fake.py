@@ -1318,6 +1318,82 @@ def cmd_list_tasks(state, payload):
     return {"tasks": [{k: t.get(k) for k in SUMMARY_KEYS} for t in tasks]}
 
 
+def cmd_get_delivery_status(state, payload):
+    """KP-DL01：交付页的只读快照。假核心不联网，按任务现有 delivery 造一份可读形状。"""
+    tid = payload.get("task_id")
+    if not tid:
+        return fail("缺少必填字段 task_id", "bad_request")
+    for task in merged_tasks(state):
+        if task["task_id"] != tid:
+            continue
+        scenario = fixture_scenario(state, "%s/%s" % (tid, task.get("run_id")))
+        override = scenario.get("delivery_status")
+        if isinstance(override, dict):
+            return override
+        return delivery_status_fixture(task)
+    return fail("任务不存在：%s" % tid, "not_found")
+
+
+def delivery_status_fixture(task):
+    """同一份 delivery 造出的稳定形状：无 PR / 已合并时 live=false，其余给一次可读的现场。"""
+    delivery = task.get("delivery") or {}
+    notice = delivery.get("auto_merge")
+    number = delivery.get("pr_number")
+    head = delivery.get("head_sha") or sha(task["task_id"], 40)
+    state = (delivery.get("pr_state") or "").upper() or None
+    value = {
+        "task_id": task["task_id"],
+        "observed_at": iso(datetime.now(timezone.utc)),
+        "live": False,
+        "error": None,
+        "delivery": {
+            "mode": delivery.get("mode"),
+            "pr_number": number,
+            "pr_url": delivery.get("pr_url"),
+            "pr_state": state,
+            "branch": delivery.get("branch"),
+            "base_branch": delivery.get("base_branch"),
+            "head_sha": head,
+            "merged_at": delivery.get("merged_at"),
+            "last_sync_at": delivery.get("last_sync_at"),
+            "next_sync_at": delivery.get("next_sync_at"),
+            "auto_merge_enabled": True,
+            "notice": notice,
+            "notice_matches_head": bool(notice and notice.get("head_sha") == head),
+        },
+        "pr": None,
+        "gate": None,
+        "checks": None,
+        "checks_summary": None,
+    }
+    if not isinstance(number, int) or delivery.get("merged_at") or state in ("MERGED", "CLOSED"):
+        return value
+    checks = [
+        {"name": "macos", "workflow": "app-ci", "state": "passed", "conclusion": "SUCCESS",
+         "url": "https://github.com/example/fixture/actions/runs/1/job/2",
+         "started_at": past(minutes=12), "completed_at": past(minutes=9), "superseded_runs": 0},
+        {"name": "android", "workflow": "app-ci", "state": "running", "conclusion": None,
+         "url": "https://github.com/example/fixture/actions/runs/1/job/3",
+         "started_at": past(minutes=8), "completed_at": None, "superseded_runs": 1},
+        {"name": "analyze-test", "workflow": "app-ci", "state": "failed", "conclusion": "FAILURE",
+         "url": None, "started_at": past(minutes=20), "completed_at": past(minutes=14),
+         "superseded_runs": 0},
+    ]
+    value.update(
+        live=True,
+        pr={"state": state or "OPEN", "is_draft": False, "mergeable": "MERGEABLE",
+            "merge_state_status": "UNSTABLE", "review_decision": "", "head_sha": head,
+            "base_ref_name": delivery.get("base_branch"), "url": delivery.get("pr_url"),
+            "head_matches_delivery": True},
+        gate={"state": "blocked",
+              "reason": "检查未通过：app-ci/analyze-test，修复或重跑后会自动合并",
+              "ready": False},
+        checks=checks,
+        checks_summary={"total": 3, "passed": 1, "failed": 1, "running": 1, "unknown": 0},
+    )
+    return value
+
+
 def cmd_get_task(state, payload):
     tid = payload.get("task_id")
     if not tid:
@@ -4812,6 +4888,7 @@ COMMANDS = {
     "set-paused": lambda s, p: cmd_set_paused(s, p),
     "resolve": lambda s, p: cmd_resolve(s, p),
     "recheck": lambda s, p: cmd_recheck(s, p),
+    "get-delivery-status": lambda s, p: cmd_get_delivery_status(s, p),
     "archive-task": lambda s, p: cmd_archive_task(s, p),
     "trash-task": lambda s, p: cmd_trash_task(s, p),
     "restore-task": lambda s, p: cmd_restore_task(s, p),

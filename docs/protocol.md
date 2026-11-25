@@ -159,6 +159,7 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 | `delivery-commit` | monitor | 核验执行轮次并提交任务工作树（§5.27） |
 | `delivery-publish` | delivery runner | 非强制推送、复用或创建 PR、写交付评论（§5.27） |
 | `delivery-sync` | delivery runner | 读取 PR 状态并登记同步结果（§5.27） |
+| `get-delivery-status` | 桌面 | 只读：当场读一次 PR 状态与合并门（详情「交付」页，KP-DL01，§5.27） |
 | `executor-instance` | App 调度器 | 登记/关闭本次 App 进程归属；不取消 Plus 会话或任务（§5.27） |
 | `round-observe` | monitor 执行端 | 只读续接缺席的观察进程（幂等；不改任务状态，§5.23.7） |
 | `get-goal-report` | monitor 执行端 | 只读：取回经身份/完整性校验的 Plus Goal 报告（T5，§5.23.10） |
@@ -1654,11 +1655,28 @@ A1 交付补充：live 的判定回执只保存命令摘要，不保存原始命
 
 - `automation.auto_merge_pr: bool` 默认 false，随 `set-project-automation` 保存并按 `expected_policy_revision` 防覆盖；旧配置无该字段视为关闭。独立于新任务接收开关 `enabled`，只控制已托管 PR 的交付。显式开启即授权该项目当前及后续符合条件的任务自动合并，界面保存前确认影响；关闭不撤销已发出的请求。首次由 false 开启时，将该项目待交付任务的 `next_sync_at` 提前为 now，仍由既有 delivery runner 领取和执行。
 - 不启动模型，不自动解决冲突，不绕过 GitHub 分支保护，不用 admin/force，不改既有执行/Review 权限。`delivery-sync` 沿既有当前执行轮次、Review pass、报告摘要、提交、仓库及 claim/租约守卫；确认项目当前映射仓库与任务仓库一致、未全局暂停、未暂停该任务或转为人工处理。外部读取期间及写入前重核这些身份与开关/策略版本，变更则停止。
-- OPEN PR 开启自动合并后读取 GitHub 结构化 `isDraft/mergeable/mergeStateStatus/reviewDecision/statusCheckRollup` 及既有 PR 身份。仅同仓库、同 base/head 分支、head=pushed=head_sha，非 draft、mergeable=MERGEABLE、mergeStateStatus=CLEAN、无 CHANGES_REQUESTED/REVIEW_REQUIRED，且全部已报告检查完成并结论为 SUCCESS/NEUTRAL/SKIPPED（status context 为 SUCCESS）时执行。空检查列表仅在 CLEAN 时可放行；字段缺失/未知、pending、failure、冲突、保护或 merge queue 阻止时均不写远端，保存具体等待/阻塞原因并继续观察，不伪造任务失败。主动发送前同时核对 Kaneo 原任务仍属当前项目、状态为 in-review，非空 requirements_sha256 与当前登记一致；源任务变化时阻止新合并，unknown/已合并仍允许只读对账。
+- OPEN PR 开启自动合并后读取 GitHub 结构化 `isDraft/mergeable/mergeStateStatus/reviewDecision/statusCheckRollup` 及既有 PR 身份。仅同仓库、同 base/head 分支、head=pushed=head_sha，非 draft、mergeable=MERGEABLE、mergeStateStatus=CLEAN、无 CHANGES_REQUESTED/REVIEW_REQUIRED，且全部已报告检查完成并结论为 SUCCESS/NEUTRAL/SKIPPED（status context 为 SUCCESS）时执行；同名检查只判「当前轮」（见「同名检查以当前轮为准（2026-11-23）」），被取代的旧失败不再挡住合并门。空检查列表仅在 CLEAN 时可放行；字段缺失/未知、pending、failure、冲突、保护或 merge queue 阻止时均不写远端，保存具体等待/阻塞原因并继续观察，不伪造任务失败。主动发送前同时核对 Kaneo 原任务仍属当前项目、状态为 in-review，非空 requirements_sha256 与当前登记一致；源任务变化时阻止新合并，unknown/已合并仍允许只读对账。
 - 采用 GitHub REST `PUT repos/{repo}/pulls/{number}/merge`，`sha` 固定已评审 head，`merge_method=merge`（保留来源提交祖先关系）；不支持该方式或服务器拒绝时显示原因，不自动换合并方式。GitHub 服务端原子核对 head；不声称本地锁能防止远端并发。实际合并仍受服务端权限与保护约束。
 - 发送前在短事务写 `runtime_operations` 回执，固定身份由 task/run/review key/report/head/repo/PR 导出；同身份仅一次发送。先 prepared 再 unknown 后外部写，网络事务外。超时、断连、无效响应或崩溃留下 unknown，后续只读 PR 对账，禁止盲目重发（包含策略版本或 Review 身份变化）。预留事务内若同任务已有其他 prepared/unknown 合并回执，亦禁止新发送，避免重新评审绕过未决请求。已明确拒绝同身份不自动重试，提示到 GitHub 处理；已 MERGED 可对账。响应成功也须重新读取同身份 PR 并确认 MERGED 才登记 accepted、merged_at 与 pr_merged 事件。
 - 读侧 `delivery.auto_merge` 可选对象：`{state, reason, head_sha, updated_at}`，state 为 `waiting_checks|blocked|merging|unknown|merged|disabled`。看板和详情展示 reason，unknown 明示结果待确认不会重复提交；不以此对象替代核心任务状态。无自动合并配置时保持被动观察。自动合并开启时 OPEN 等待沿用 300 秒快档检查；关闭时保留既有 5/30 分钟间隔。合并确认后复用 delivery runner 的 `advance-task` 同步 Kaneo/local done；同步失败保留已合并事实，不提前显示已完成。`reason` 必须点名拦下合并的对象：检查失败或运行中时列出检查名（可带 workflow，同名多次运行去重），检查全绿而状态仍非 CLEAN 时说明是保护规则/评审/目标分支，暂无可读检查时明说；`reason` 保持确定性（同一观测产生同一字符串，不拼时间、观测次数等动态内容），长期未就绪的连续观测以该字符串为键。任务停止轮询后（如升级为 `merge_checks_stalled`）该回执保持上次观测、不再自动刷新；用户手动 `recheck` 可只读重算该回执——不改任务状态、不写远端、不重置长期未就绪计数，未确认的合并回执与已前移的交付头不覆盖——使看板重新点名当前阻塞项。
 - 本功能不调用模型、无新增模型费用；开发验证仅使用隔离 DB、临时 Git 仓库与 fake GitHub/Kaneo。真实开启项目开关及合并需与实现/测试证据分开报告。
+
+#### 交付页只读观察（KP-DL01，2026-11-23）
+
+- 命令 `get-delivery-status {task_id}`（桌面）只读：读一次本任务的交付投影，至多一次结构化 `gh pr view --json …statusCheckRollup`，并用 `pr_auto_merge.eligibility` 原样给出合并门结论。不写 SQLite、不发 GitHub 写、不重排 `next_sync_at`，因此不改变引擎 300/1800 秒的同步节奏，也不替代 `delivery-sync`。
+- 响应：`{task_id, observed_at, live, error, delivery, pr, gate, checks, checks_summary}`。`delivery` 恒存在，字段来自交付投影（`notice` 是上次 `auto_merge` 观测；`notice_matches_head` 表示它是否仍对应当前 `head_sha`；`auto_merge_enabled` 取项目策略，缺失视为关闭）。
+- `live=false` 且 `error=null`：非 PR 交付、缺少 PR 编号、已合并（`merged_at`）或 PR 已关闭——没有可读现场，不是读取失败；此时 `pr/gate/checks/checks_summary` 均为 null。
+- `live=false` 且 `error={code,message}`：GitHub 或仓库来源读取失败（`GhError.kind` / `GitDeliveryError.code`，原文脱敏）。
+- `live=true`：`pr` 给 `state/is_draft/mergeable/merge_state_status/review_decision/head_sha/base_ref_name/url/head_matches_delivery`（`url` 同样只接受严格形状的 PR 页面地址，否则为空串）；`gate` 给 `{state,reason,ready}`，未阻塞时 `state=ready`、reason「检查与保护规则已满足，等待下一轮交付同步合并」。
+- `checks` 按 `(workflow, name)` 归组，同名多轮时**仍在运行的那轮视为当前轮**：GitHub 可能把已结束的旧轮排在更新的开始时间之后，纯时间序会把用户正在看的运行藏掉；同类别内再按 `completedAt` → `startedAt` → 列表顺序取。GitHub 对未完成检查返回的 `0001-01-01T00:00:00Z` 与空串一律视为没有时间。`superseded_runs` 记同名更早轮次数。排序 failed → running → unknown → passed，再按 workflow/name。检查名与 workflow 脱敏并截断（120/80）；`url` 只接受严格匹配本仓库的 `https://github.com/<repo>/actions/runs/<n>[/job/<m>]`，其余 null——地址类字段刻意不做 URL 脱敏（脱敏会把链接整段换成占位符，页面就用不了），只靠形状校验限定到本仓库。`statusCheckRollup` 不可读时 `checks=null` 而不是空数组。
+- 界面侧：任务详情「交付」段可见时每 20 秒调用一次，离开分段即停。该页只展示，不提供合并、重跑检查或推进交付的动作（布局见 ui-spec §4.12 之后的「交付页（KP-DL01）」）。
+
+#### 同名检查以当前轮为准（2026-11-23，KP-DL01 顺带修复）
+
+- 问题：GitHub 的 `statusCheckRollup` 保留被取代的轮次——重跑会在旧记录旁边再添一份。原实现「任一条失败即阻塞」因此有两个后果：失败修好后合并门永远不开（GitHub 自己已报 `CLEAN`，界面却说「检查未通过」），以及「修复失败的检查」与 `rerun-checks` 指向已经通过的旧作业（前者还要花一次模型费用）。
+- 规则：按 `(workflow, name)` 归组，只判每组的一轮。仍在运行的那轮（`CheckRun.status≠COMPLETED`、`StatusContext.state` 为 `PENDING/EXPECTED`）为当前轮；否则取 `completedAt`（缺失时回落 `startedAt`）最新的一轮，时间戳相同则失败优先，保持原因串稳定。GitHub 对未完成检查返回的零值时间 `0001-01-01T00:00:00Z` 与空串一律视为「没有时间」。完全没有可用时间戳时无法判断先后，保守处理：该组只要有失败就仍阻塞。
+- 共用：`pr_auto_merge.check_rounds` 是唯一实现，合并门 `eligibility`、`get-delivery-status` 的 `gate`/`checks`、`task_ai_check_failure._failing`（AI 修复材料）与 `rerun-checks` 都读它，四处永远指向同一轮。
+- 不变：不启动模型、不绕过保护、不做远端写以外的动作；原因串仍是确定性文本（排序去重、无时间戳），stall 连续观测判定照旧；未知类型、缺失字段或畸形条目仍按「继续观察」处理，不会因此放行合并。
 
 ## 5.28 执行期提问转交（P0 冻结，2026-10-14）
 
@@ -1832,7 +1850,7 @@ Release 正文的展示与归属分离及 CLI-only `repair-release-notes` 的一
 `prepare-task-ai-action` 按覆盖生成 `action_config` 并冻结进候选，确认弹窗的模型摘要即本次实际使用
 的模型；之后修改设置只影响新候选，已确认轮次继续用冻结快照。只开放模型与思考等级，不开放切换后端。
 
-- `rerun-checks {task_id}` 提供不调用模型的恢复：只对门禁点名失败的检查所属的真实运行/attempt 执行 `gh run rerun --failed`。发送前只读核对 PR 与 run 的 head、完成态与失败结论，按 run/attempt 写 `runtime_operations` 回执后仅发送一次；连接中断留 unknown 不自动重放，重复请求只回报已有回执。只重跑失败 Job，不改源码、不改变 Review 与合并门判定。
+- `rerun-checks {task_id}` 提供不调用模型的恢复：只对门禁点名失败的检查所属的真实运行/attempt 执行 `gh run rerun --failed`。发送前只读核对 PR 与 run 的 head、完成态与失败结论，按 run/attempt 写 `runtime_operations` 回执后仅发送一次；连接中断留 unknown 不自动重放，重复请求只回报已有回执。只重跑失败 Job，不改源码、不改变 Review 与合并门判定。失败检查按「当前轮」判定（见「同名检查以当前轮为准（2026-11-23）」），重跑成功后旧的失败轮次不再重复提供重跑或 AI 修复。
 
 #### 放弃一次性处理（2026-11-20）
 

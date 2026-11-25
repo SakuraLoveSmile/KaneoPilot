@@ -567,3 +567,65 @@ def test_empty_rollup_while_not_clean_admits_no_readable_checks():
 
 def test_empty_rollup_with_clean_status_is_allowed():
     assert pr_auto_merge.eligibility(merge_gate(mergeStateStatus='CLEAN')) is None
+
+
+def stamped(name, conclusion='SUCCESS', workflow='app-ci', *, completed=None, started=None, **changes):
+    value = check(name, conclusion, workflow, **changes)
+    if completed is not None:
+        value['completedAt'] = completed
+    if started is not None:
+        value['startedAt'] = started
+    return value
+
+
+def test_superseded_failure_does_not_block_a_rerun_that_passed():
+    # GitHub 保留被取代的那一轮：重跑成功后再按「任一失败」判定，合并门会永远不开，
+    # 而 GitHub 自己已经报 CLEAN。
+    rollup = [stamped('macos', 'FAILURE', completed='2026-11-23T08:11:28Z',
+                      started='2026-11-23T08:05:51Z'),
+              stamped('macos', 'SUCCESS', completed='2026-11-23T08:19:40Z',
+                      started='2026-11-23T08:14:02Z')]
+    assert pr_auto_merge.eligibility(
+        merge_gate(mergeStateStatus='CLEAN', statusCheckRollup=rollup)) is None
+
+
+def test_current_round_failure_still_blocks_after_an_older_pass():
+    rollup = [stamped('android', 'SUCCESS', completed='2026-11-23T08:11:28Z'),
+              stamped('android', 'FAILURE', completed='2026-11-23T08:19:40Z')]
+    state, reason = pr_auto_merge.eligibility(merge_gate(statusCheckRollup=rollup))
+    assert state == 'blocked'
+    assert reason == '检查未通过：app-ci/android，修复或重跑后会自动合并'
+
+
+def test_in_flight_rerun_waits_instead_of_naming_the_superseded_failure():
+    rollup = [stamped('android', 'FAILURE', completed='2026-11-23T08:11:28Z'),
+              stamped('android', '', completed='0001-01-01T00:00:00Z',
+                      started='2026-11-23T08:14:02Z', status='IN_PROGRESS')]
+    state, reason = pr_auto_merge.eligibility(merge_gate(statusCheckRollup=rollup))
+    assert state == 'waiting_checks'
+    assert reason == '检查仍在运行：app-ci/android，等待结果'
+
+
+def test_zero_completion_time_falls_back_to_the_start_time():
+    # 未完成检查的 completedAt 是 0001-01-01：不能当成「最早的一轮」。
+    rollup = [stamped('macos', 'FAILURE', completed='2026-11-23T08:11:28Z',
+                      started='2026-11-23T08:05:51Z'),
+              stamped('macos', 'SUCCESS', completed='0001-01-01T00:00:00Z',
+                      started='2026-11-23T08:14:02Z')]
+    assert pr_auto_merge.eligibility(
+        merge_gate(mergeStateStatus='CLEAN', statusCheckRollup=rollup)) is None
+
+
+def test_rounds_keep_two_pipelines_with_the_same_check_name_apart():
+    rounds = pr_auto_merge.check_rounds(merge_gate(statusCheckRollup=[
+        stamped('test', 'SUCCESS', 'app-ci', completed='2026-11-23T08:11:28Z'),
+        stamped('test', 'FAILURE', 'nightly', completed='2026-11-23T08:11:28Z')]))
+    assert sorted((row['workflow'], row['name'], row['state']) for row in rounds) == [
+        ('app-ci', 'test', 'passed'), ('nightly', 'test', 'failed')]
+
+
+def test_malformed_entry_keeps_the_gate_observing_instead_of_merging():
+    state, reason = pr_auto_merge.eligibility(merge_gate(
+        mergeStateStatus='CLEAN', statusCheckRollup=['not-a-dict']))
+    assert state == 'waiting_checks'
+    assert reason == 'GitHub 检查类型未知，继续观察'

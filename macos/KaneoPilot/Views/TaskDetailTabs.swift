@@ -1,13 +1,14 @@
 import SwiftUI
 import AppKit
 
-// MARK: - 详情浮层分段（ui-spec §4.1 T4 五段式）
+// MARK: - 详情浮层分段（ui-spec §4.1 T4；KP-DL01 起为六段式）
 
-/// 任务详情浮层的五个分段：概览 / 计划 / 执行 / 评审 / 记录。
+/// 任务详情浮层的六个分段：概览 / 计划 / 执行 / 评审 / 交付 / 记录。
+/// 「交付」是 KP-DL01 追加的只读页：当场读一次 PR 状态，页面可见时每 20 秒重读。
 /// `TaskSheetItem.startTab` 让看板入口直达指定分段（待办 → 计划；
 /// 进行中「查看实时会话」→ 执行）。
 enum TaskDetailTab: String, CaseIterable, Identifiable {
-    case overview, plan, execution, review, log
+    case overview, plan, execution, review, delivery, log
 
     var id: String { rawValue }
 
@@ -17,6 +18,7 @@ enum TaskDetailTab: String, CaseIterable, Identifiable {
         case .plan: return "计划"
         case .execution: return "执行"
         case .review: return "评审"
+        case .delivery: return "交付"
         case .log: return "记录"
         }
     }
@@ -696,6 +698,399 @@ struct TaskReviewTabView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.kpControl)
+    }
+}
+
+// MARK: - 交付页（KP-DL01：只读实时的 PR 状态）
+
+/// 「交付」页的读取器：进入分段时读一次 `get-delivery-status`，之后每 20 秒静默重读，
+/// 页面销毁即停。核心每次都会当场向 GitHub 要一次结构化 PR 状态，但只读：
+/// 不写库、不合并、不重跑检查，也不改变引擎自己的同步节奏。
+@MainActor
+final class DeliveryStatusStore: ObservableObject {
+    @Published private(set) var status: DeliveryStatusView?
+    @Published private(set) var loading = false
+    @Published private(set) var error: String?
+
+    private var client: CoreClient?
+    private var taskID = ""
+    private var pollTask: Task<Void, Never>?
+    private var generation = 0
+    private var refreshing = false
+    private static let pollInterval: UInt64 = 20_000_000_000
+
+    /// 同任务重复调用不重复起循环；换任务先停旧循环再读新任务。
+    func start(client: CoreClient, taskID: String) {
+        if self.taskID == taskID, pollTask != nil { return }
+        stop()
+        self.client = client
+        self.taskID = taskID
+        status = nil
+        error = nil
+        refreshing = false
+        generation += 1
+        let owner = generation
+        pollTask = Task { [weak self] in
+            guard let self else { return }
+            await self.refresh(generation: owner)
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.pollInterval)
+                guard !Task.isCancelled else { return }
+                await self.refresh(generation: owner)
+            }
+        }
+    }
+
+    func stop() {
+        generation += 1
+        refreshing = false
+        pollTask?.cancel()
+        pollTask = nil
+    }
+
+    /// 手动刷新沿用当前代数，不新建循环。
+    func refresh() async {
+        await refresh(generation: generation)
+    }
+
+    private func refresh(generation owner: Int) async {
+        guard let client, owner == generation, !refreshing, !taskID.isEmpty else { return }
+        refreshing = true
+        defer { if owner == generation { refreshing = false } }
+        if status == nil { loading = true }
+        defer { if owner == generation { loading = false } }
+        do {
+            let value = try await client.run("get-delivery-status",
+                                             payload: ["task_id": taskID],
+                                             timeout: 45,
+                                             as: DeliveryStatusView.self)
+            guard owner == generation else { return }
+            status = value
+            error = nil
+        } catch {
+            guard owner == generation else { return }
+            self.error = error.coreMessage
+        }
+    }
+}
+
+/// 「交付」分段：合并门结论 + 逐项检查 + PR 元数据 + 同步时间。
+/// 数据源只有只读命令 `get-delivery-status`；本页不提供推进、重跑或合并动作。
+struct TaskDeliveryTabView: View {
+    let taskID: String
+
+    @EnvironmentObject private var model: AppViewModel
+    @StateObject private var store: DeliveryStatusStore
+
+    /// 与 ExecutionProgressView 一致：`@MainActor` 读取器在 init 里构造，视图重建时保留同一实例。
+    init(taskID: String) {
+        self.taskID = taskID
+        _store = StateObject(wrappedValue: DeliveryStatusStore())
+    }
+
+    var body: some View {
+        Group {
+            if let status = store.status {
+                VStack(spacing: 0) {
+                    header(status)
+                    Divider().overlay(Color.kpSeparator).opacity(0.5)
+                    content(for: status)
+                }
+            } else if let error = store.error {
+                ContentUnavailableView {
+                    Label("读取交付状态失败", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(error)
+                } actions: {
+                    Button("重试") { Task { await store.refresh() } }
+                }
+            } else {
+                LoadingView()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.kpControl)
+        .task(id: taskID) { store.start(client: model.client, taskID: taskID) }
+        .onDisappear { store.stop() }
+    }
+
+    // MARK: 固定头部
+
+    private func header(_ status: DeliveryStatusView) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            HStack(spacing: Spacing.m) {
+                StatusBadge(text: gateTitle(status), style: gateStyle(status))
+                if let number = status.delivery?.prNumber {
+                    Text("PR #\(number)")
+                        .font(.kpBody.weight(.semibold))
+                        .textSelection(.enabled)
+                }
+                Spacer(minLength: 0)
+                Button("刷新") { Task { await store.refresh() } }
+                    .font(.kpSmall)
+                    .help("立刻向 GitHub 重读一次 PR 状态（只读）")
+            }
+            HStack(spacing: Spacing.s) {
+                Text("读取于 \(TimeFormat.fullString(status.observedAt))")
+                metaDot
+                Text(status.live ? "本次已读到 GitHub" : "本次未读到 GitHub")
+                if let url = status.delivery?.prUrl {
+                    metaDot
+                    Button("打开 PR") { Workspace.open(url) }
+                        .buttonStyle(.borderless)
+                }
+            }
+            .font(.kpSmall)
+            .foregroundStyle(Color.kpSecondary)
+        }
+        .padding(.horizontal, Spacing.xl)
+        .padding(.vertical, Spacing.l)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var metaDot: some View {
+        Circle().fill(Color.kpSecondary.opacity(0.6)).frame(width: 3, height: 3)
+            .accessibilityHidden(true)
+    }
+
+    // MARK: 正文
+
+    @ViewBuilder
+    private func content(for status: DeliveryStatusView) -> some View {
+        if status.hasPullRequest {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Spacing.xl) {
+                    if let error = store.error {
+                        inlineWarning("本次读取失败：\(error)。下面是上次成功读取的结果。")
+                    } else if let error = status.error {
+                        inlineWarning("GitHub 读取失败：\(error.message)。下面是引擎上次落库的观测。")
+                    }
+                    gateSection(status)
+                    if status.pr != nil {
+                        checksSection(status)
+                    }
+                    if let pr = status.pr {
+                        prSection(pr)
+                    }
+                    deliverySection(status)
+                    readonlyNote
+                }
+                .padding(.horizontal, Spacing.xl)
+                .padding(.vertical, Spacing.l)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        } else {
+            ContentUnavailableView {
+                Label("尚未创建 PR", systemImage: "arrow.triangle.branch")
+            } description: {
+                Text("该任务还没有交付到 Pull Request。评审通过并推送分支后，这里会显示合并门与逐项检查。")
+            } actions: {
+                Button("刷新") { Task { await store.refresh() } }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private func gateSection(_ status: DeliveryStatusView) -> some View {
+        TaskDetailTabSection(title: "合并门") {
+            if let gate = status.gate {
+                Text(gate.reason)
+                    .font(.kpBody)
+                    .foregroundStyle(gate.needsAttention ? Color.primary : Color.kpSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            } else if let notice = status.delivery?.currentNotice {
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text(notice.reason)
+                        .font(.kpBody)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                    Text("引擎上次观测 \(TimeFormat.fullString(notice.updatedAt))")
+                        .font(.kpSmall)
+                        .foregroundStyle(Color.kpSecondary)
+                }
+            } else {
+                Text(status.error?.message ?? "还没有可读的合并门状态；点「刷新」重读一次。")
+                    .font(.kpSmall)
+                    .foregroundStyle(Color.kpSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func checksSection(_ status: DeliveryStatusView) -> some View {
+        let checks = status.checks ?? []
+        TaskDetailTabSection(title: "检查") {
+            if let summary = status.checksSummary, summary.total > 0 {
+                Text(summary.summaryText)
+                    .font(.kpSmall)
+                    .foregroundStyle(Color.kpSecondary)
+            }
+            if status.checks == nil {
+                Text("本次没有读到检查结果；合并门结论仍按 GitHub 返回的状态判定。")
+                    .font(.kpSmall)
+                    .foregroundStyle(Color.kpSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if checks.isEmpty {
+                Text("本次没有检查。")
+                    .font(.kpSmall)
+                    .foregroundStyle(Color.kpSecondary)
+            } else {
+                ForEach(checks) { check in
+                    checkRow(check)
+                }
+            }
+        }
+    }
+
+    private func checkRow(_ check: DeliveryStatusCheck) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+            Image(systemName: check.stateKind.icon)
+                .foregroundStyle(check.stateKind.color)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                Text(check.title)
+                    .font(.kpBody)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: Spacing.xs) {
+                    Text(check.stateText)
+                    if let duration = check.durationText() {
+                        Text("· \(duration)")
+                    }
+                    if let superseded = check.supersededText {
+                        Text("· \(superseded)")
+                    }
+                }
+                .font(.kpSmall)
+                .foregroundStyle(Color.kpSecondary)
+            }
+            Spacer(minLength: 0)
+            if let url = check.url {
+                Button("打开") { Workspace.open(url) }
+                    .buttonStyle(.borderless)
+                    .font(.kpSmall)
+                    .help("在浏览器里打开这项检查的 Actions 日志")
+                    .accessibilityLabel("打开 \(check.title) 的运行日志")
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private func prSection(_ pr: DeliveryStatusPR) -> some View {
+        TaskDetailTabSection(title: "PR") {
+            FieldRow("状态", pr.stateText)
+            FieldRow("草稿", pr.isDraft == true ? "是" : "否")
+            FieldRow("可合并", pr.mergeableText)
+            FieldRow("合并状态", pr.mergeStateText)
+            FieldRow("评审", pr.reviewText)
+            FieldRow("交付提交", pr.headMatchesDelivery == false
+                     ? "PR head 已变化，交付提交仍冻结在已评审的提交" : "与已交付提交一致")
+            FieldRow("PR head", pr.headSha.map { String($0.prefix(12)) })
+            FieldRow("目标分支", pr.baseRefName)
+        }
+    }
+
+    @ViewBuilder
+    private func deliverySection(_ status: DeliveryStatusView) -> some View {
+        if let delivery = status.delivery {
+            TaskDetailTabSection(title: "交付") {
+                FieldRow("方式", delivery.mode.map { $0 == "manual" ? "人工交付" : "Pull Request" })
+                FieldRow("分支", delivery.branch)
+                FieldRow("目标分支", delivery.baseBranch)
+                FieldRow("自动合并", delivery.autoMergeEnabled == true ? "已开启" : "未开启")
+                FieldRow("最近同步", TimeFormat.fullString(delivery.lastSyncAt))
+                FieldRow("下次同步", TimeFormat.fullString(delivery.nextSyncAt))
+                FieldRow("合并时间", TimeFormat.fullString(delivery.mergedAt))
+                HStack(spacing: Spacing.m) {
+                    Button("打开 PR") { Workspace.open(delivery.prUrl) }
+                        .disabled(delivery.prUrl == nil)
+                    Button { Task { await store.refresh() } } label: {
+                        Label("重读状态", systemImage: "arrow.clockwise")
+                    }
+                }
+                .font(.kpSmall)
+            }
+        }
+    }
+
+    private var readonlyNote: some View {
+        Text("本页只读：每次读取都会向 GitHub 要一次 PR 状态，但不写库、不合并、不重跑检查。引擎仍按自己的节奏同步交付（1 小时内每 5 分钟，之后每 30 分钟）。")
+            .font(.kpSmall)
+            .foregroundStyle(Color.kpSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private func inlineWarning(_ text: String) -> some View {
+        Label {
+            Text(text)
+                .font(.kpSmall)
+                .foregroundStyle(Color.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        } icon: {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(Color.kpOrange)
+        }
+    }
+
+    private func gateTitle(_ status: DeliveryStatusView) -> String {
+        if let gate = status.gate { return gate.title }
+        if let notice = status.delivery?.currentNotice { return DeliveryPhase.text(notice.state) }
+        return DeliveryPhase.text(nil)
+    }
+
+    private func gateStyle(_ status: DeliveryStatusView) -> StatusStyle {
+        DeliveryGateStyle.style(status.gate?.state ?? status.delivery?.currentNotice?.state)
+    }
+}
+
+/// 合并门状态词到徽标样式；与自动合并通知共用同一套词（`DeliveryPhase`）。
+private enum DeliveryGateStyle {
+    static func style(_ state: String?) -> StatusStyle {
+        guard let raw = state?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return StatusStyle(icon: "questionmark.circle", tone: .gray, label: DeliveryPhase.text(nil))
+        }
+        switch raw.lowercased() {
+        case "ready":
+            return StatusStyle(icon: "arrow.triangle.merge", tone: .green, label: DeliveryPhase.text(raw))
+        case "waiting_checks":
+            return StatusStyle(icon: "clock", tone: .blue, label: DeliveryPhase.text(raw))
+        case "blocked":
+            return StatusStyle(icon: "exclamationmark.triangle", tone: .orange, label: DeliveryPhase.text(raw))
+        case "merging":
+            return StatusStyle(icon: "arrow.triangle.merge", tone: .blue, label: DeliveryPhase.text(raw))
+        case "merged":
+            return StatusStyle(icon: "checkmark.seal", tone: .green, label: DeliveryPhase.text(raw))
+        case "disabled":
+            return StatusStyle(icon: "pause.circle", tone: .gray, label: DeliveryPhase.text(raw))
+        default:
+            return StatusStyle(icon: "questionmark.circle", tone: .gray, label: DeliveryPhase.text(raw))
+        }
+    }
+}
+
+private extension DeliveryCheckState {
+    var icon: String {
+        switch self {
+        case .passed: return "checkmark.circle.fill"
+        case .failed: return "xmark.octagon.fill"
+        case .running: return "clock"
+        case .unknown: return "questionmark.circle"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .passed: return .kpGreen
+        case .failed: return .kpRed
+        case .running: return .kpBlue
+        case .unknown: return .kpGray
+        }
     }
 }
 

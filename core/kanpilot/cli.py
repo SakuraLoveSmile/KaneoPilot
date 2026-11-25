@@ -218,6 +218,9 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "delivery-commit": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (True, "str")}, _automation_command("cmd_delivery", "cmd_delivery_commit")),
     "delivery-publish": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (False, "str")}, _automation_command("cmd_delivery_pr", "cmd_delivery_publish")),
     "delivery-sync": ({"task_id": (True, "str"), "request_id": (True, "str"), "run_id": (True, "str"), "expected_execution_run_id": (False, "str")}, _automation_command("cmd_delivery_pr", "cmd_delivery_sync")),
+    # KP-DL01（§5.27「交付页只读观察」）：桌面「交付」页当场读一次 PR 状态；只读，不写库也不写 GitHub。
+    "get-delivery-status": ({"task_id": (True, "str")},
+                            _automation_command("delivery_status", "cmd_get_delivery_status")),
     # CLI-only：PR 头因目标分支前进而被更新（GitHub「Update branch」等）后显式重绑交付头。
     "rebind-delivery-head": (
         {"task_id": (True, "str"), "expected_head_sha": (True, "str"),

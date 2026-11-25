@@ -70,6 +70,33 @@ def test_failing_checks_keep_run_and_job_identity():
         kind._failing({"statusCheckRollup": rollup[1:]}, "owner/repo")
 
 
+def test_superseded_failure_is_not_offered_for_repair():
+    # 重跑成功后被取代的失败仍留在 rollup 里，不能再花一次模型费用去修它。
+    rollup = [
+        {"__typename": "CheckRun", "name": "android", "workflowName": "app-ci",
+         "status": "COMPLETED", "conclusion": "FAILURE", "completedAt": "2026-11-23T08:11:28Z",
+         "detailsUrl": "https://github.com/owner/repo/actions/runs/1/job/11"},
+        {"__typename": "CheckRun", "name": "android", "workflowName": "app-ci",
+         "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": "2026-11-23T08:19:40Z",
+         "detailsUrl": "https://github.com/owner/repo/actions/runs/2/job/22"},
+    ]
+    with pytest.raises(util.KanpilotError):
+        kind._failing({"statusCheckRollup": rollup}, "owner/repo")
+
+
+def test_current_round_failure_is_offered_with_its_own_run():
+    rollup = [
+        {"__typename": "CheckRun", "name": "android", "workflowName": "app-ci",
+         "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": "2026-11-23T08:11:28Z",
+         "detailsUrl": "https://github.com/owner/repo/actions/runs/1/job/11"},
+        {"__typename": "CheckRun", "name": "android", "workflowName": "app-ci",
+         "status": "COMPLETED", "conclusion": "FAILURE", "completedAt": "2026-11-23T08:19:40Z",
+         "detailsUrl": "https://github.com/owner/repo/actions/runs/2/job/22"},
+    ]
+    assert kind._failing({"statusCheckRollup": rollup}, "owner/repo") == [
+        dict(name="android", workflow="app-ci", conclusion="FAILURE", run_id=2, job_id=22)]
+
+
 def test_materials_refuse_a_moved_run(monkeypatch):
     monkeypatch.setattr(kind.release_github, "run", lambda repo, run_id: {
         "head_sha": "f" * 40, "status": "completed", "run_attempt": 1, "conclusion": "failure"})

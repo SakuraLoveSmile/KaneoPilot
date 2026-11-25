@@ -172,12 +172,13 @@ struct TaskDetailContentView: View {
         return question
     }
 
-    /// 五段原生分段控件保持 280pt，宽度不足时由顶栏移到下一行。
+    /// 六段原生分段控件保持 336pt（KP-DL01：五段 280pt 加宽容纳「交付」），
+    /// 宽度不足时由 `ViewThatFits` 把导航移到下一行。
     private var headerNavigation: some View {
         Picker("详情分段", selection: $tab) {
             ForEach(TaskDetailTab.allCases) { t in Text(t.title).tag(t) }
         }
-        .pickerStyle(.segmented).labelsHidden().frame(width: 280)
+        .pickerStyle(.segmented).labelsHidden().frame(width: 336)
         .fixedSize(horizontal: true, vertical: false).accessibilityLabel("详情分段切换")
     }
 
@@ -216,6 +217,9 @@ struct TaskDetailContentView: View {
             } else {
                 errorStateView
             }
+        case .delivery:
+            // KP-DL01：只读交付页自己读 PR 状态，不依赖 get-task 的快照。
+            TaskDeliveryTabView(taskID: currentTaskID)
         case .log:
             if let detail {
                 TaskLogTabView(detail: detail, events: events)
