@@ -36,6 +36,27 @@ task_id: t1
         "task_id": "t1", "reporter": "上杉九月", "summary": "移除截图中的六张统计卡片"}
 
 
+def test_summary_drops_the_dangling_colon_before_a_list(tmp_path):
+    plan = '''---
+task_id: t1
+---
+
+## 目标
+
+用户在“一起看”页填写自建服务地址后，不再出现无信息量的“一起看操作失败，请稍后重试”：
+
+1. 反代前缀缺少 v1 时自动补全。
+2. 服务端错误码都有中文提示。
+
+## 步骤
+
+1. x
+'''
+    task = _task(tmp_path, plan=plan)
+    assert release_delivery._changelog_summary(task) == (
+        "用户在“一起看”页填写自建服务地址后，不再出现无信息量的“一起看操作失败，请稍后重试”")
+
+
 def test_missing_or_broken_materials_are_empty(tmp_path):
     assert release_delivery._changelog_context({"task_id": "t1"}) == {"task_id": "t1"}
     broken_source = tmp_path / "source.json"

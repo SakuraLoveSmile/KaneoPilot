@@ -128,7 +128,9 @@ def _changelog_summary(task):
         if any(word in head for word in ('轻档','重档','方案')) and tail.strip():
             first=tail.strip()
     first=re.split(r'[。！？；;]|\.\s',first,maxsplit=1)[0]
-    first=first.strip(' 。；;')
+    # A plan objective often ends its opening sentence with '：' before a list;
+    # the rendered changelog line must be a complete sentence, not a dangling intro.
+    first=first.strip(' 。；;，,、：:')
     if len(first)>CHANGELOG_SUMMARY_LIMIT:
         first=first[:CHANGELOG_SUMMARY_LIMIT].rstrip()+'…'
     return first
