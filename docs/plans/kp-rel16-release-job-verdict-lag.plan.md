@@ -3,7 +3,7 @@
 - 项目标识：`personal-kaneopilot`
 - 任务编号：KP-REL16
 - 日期：2026-11-25（Asia/Taipei）
-- 状态：实现中（隔离测试通过后更新为待体验）
+- 状态：待体验（测试版 `v0.6.1-test.462` 已发布，包内 core 已核到修复；真实任务复测待安装后观察）
 - 基线：origin/main `bc842ad`；分支：`fix/20261125-kp-rel16-release-job-lag`；合入目标：main。
 - 工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261125-fix-kp-rel16-release-job-lag`。
 
@@ -41,9 +41,12 @@ MediaPlayer 任务「建议将播放/缓存设置收入二级菜单」的预发�
 - `cd core && python3 -m pytest tests/test_release_changelog.py tests/test_release_dispatch_void.py tests/test_release_source_checkpoint.py tests/test_release_verification*.py tests/test_external_build_repair.py tests/test_review_delivery.py tests/test_build_failure_ai_action.py tests/test_engine_business_tick.py -q`：221 项 + 240 subtests 通过。
 - 全量 `pytest tests -q`：本机跑到约 55 分钟仍停在与本改动无关的 `test_codex_environment.py`（进程在 `select` 等待），已终止；发布相关文件全部通过，但**全量未跑完**。
 
-## 发布
+## 发布（2026-11-25）
 
-待填。
+- 测试版 `v0.6.1-test.462`（run [45581720072](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/45581720072)，commit `6c77dd8`，annotated tag 指向同一提交），全部 job success，Release 为预发布、不进 latest。
+- 资产：`KaneoPilot-0.6.1-test.462-macos-arm64.dmg`（SHA256 `0a4e9193…a9d12`，46 636 525 字节，manifest 与 SHA256SUMS 一致）、`KaneoPilot-0.6.1-test.462-android.apk`、`manifest.json`、`SHA256SUMS`。
+- 云端 `checks (n, 3.11/3.13)` 与 `macos-fixtures` 覆盖 core 隔离测试与集成 fixture，全部通过——本地卡住的全量 suite 在 CI 侧跑完并通过。
+- 包内核验：挂载 DMG 后 `KaneoPilot.app/Contents/Resources/core/kanpilot/release_delivery.py` 第 37 行为 `class ReleasePending(ReleaseBlocked):`，第 1034 行为 `release_job_pending` 断言，第 1152 行为 `state='publishing'`。
 
 ## 未验证与后续
 
