@@ -225,3 +225,15 @@ PR 卡内用状态分布条和数量展示当前轮检查，按工作流列出�
 2026-11-25，用户确认「可以 构建一个测试版本 发布」。本轮在既有 UI11 工作树提交全部 T1–T27 成果并发布测试预发布，合入目标仍为 main。基础版本使用 0.5.10，当前正式版为 v0.5.9。发布前纳入最新公开测试版 v0.5.10-test.449 的评审修复提交 9dd802400a4d842c8f7e7d809b8409978bd0515f，保留其 JSON 评审协议与最终消息错误处理。云端 Packages 将以 channel=test、probe_session_fulltext=true 执行，实际版本取工作流构建号。
 
 本次 UI 改动及上述评审修复没有数据库 schema 变更。公开说明涵盖默认看板、任务详情、完整会话、设置与二级窗口、PR/Actions 状态和两项核验的展示语义。发布后核对完整门禁、注释标签、源码 SHA、四项资产、manifest 和 SHA256SUMS。当前发布步骤为实现中，实际 run、标签和产物核验结果在本节追加。安装体验沿用设置中开启「接收测试版」的入口。
+
+
+2026-11-25 测试预发布已完成，状态为待体验。
+
+- UI 提交为 `b584c5d`，纳入测试版 .449 的评审修复后，构建源码为 `07c75670a53f27521c210f7116d5b357ba044f53`。版本为 `v0.5.10-test.451`，注释标签对象为 `54a650572c55bc2d5cbff525373a08b9c2163bb8`，直接指向该源码提交。
+- [Packages #451](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/45551785882) 以 workflow_dispatch 执行，整体成功。17 个必需 job 均成功，包含 10 组 Python 检查、两组 macOS 夹具、两端安装包、Codex 原生平台核验及发布。
+- 额外的非门禁全文压力探针未通过主线程延迟目标。1 MiB 文本在 TextKit 阶段测得最大 577.469125 毫秒，目标小于 250 毫秒；此前功能断言已执行通过。已将该项已知性能问题写入本测试版公开说明，测试阈值与门禁保持原配置。
+- [GitHub 测试版](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.5.10-test.451) 已公开，prerelease=true、draft=false。当前 latest 仍为 v0.5.9。版本、构建号 451、通道 test、基础版本 0.5.10、来源分支与源码 SHA 均已读回一致。
+- 下载全部四项资产，逐项核对 GitHub digest、大小、manifest 与 SHA256SUMS。macOS DMG 为 47,306,389 字节，SHA-256 为 `5bbc7e5b28fce2bae27ac903dc235485f412d94a0ab2ca17380b23cffebd7516`。Android APK 为 8,557,692 字节，SHA-256 为 `ba5c92baa0f8c243707e66b4736901a89b46f289464a99d505f0ba89454c7a77`。
+- 只读挂载 DMG 后核对镜像完整性、DMG CodeDirectory 指纹、App 深层签名、local.kaneopilot 标识、版本 0.5.10-test.451、构建号 451 及 arm64 架构。包内 delivery_status.py、cli_review.py 与 pi_desktop_review.py 字节与发布源码一致。DMG 和 App 为项目既有 ad-hoc 签名，未公证。
+- 本轮包核验没有启动安装版或调用真实模型。临时挂载已卸载，下载产物、日志和发布核验临时文件在记录完成后清理。分支 push 自动产生的重复预览 #450 已取消，保留 #451 完整发布检查。首次 dispatch 输入布尔类型被 gh 拒绝，改为其支持的字符串 true 后成功创建 #451。
+- UI11 任务工作树保留供用户安装体验与后续合入 main，目前仍含独有实现成果。其位置为登记的 Worktree-Root 下 `20261124-feat-kp-ui11-native-workspace`，分支沿用本计划。用户验收并完成合入后按项目约定清理。
