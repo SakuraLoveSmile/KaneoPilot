@@ -115,35 +115,41 @@ def run_codex(argv, *, prompt, cwd, env, timeout, log_path, out_path, on_event=N
         recovered_final = completed_after_failure and result["exit_code"] == 0
         if result["error"] is None and result["exit_code"] == 0 and (not failed or recovered_final):
             try:
-                raw = Path(out_path).read_text(encoding="utf-8")
+                payload = Path(out_path).read_bytes()
             except OSError as exc:
                 # 退出码 0 但没有最终消息：与「有内容但格式不对」区分，避免把
                 # json.loads 的 "char 0" 误读成空文件。
                 result["error"] = f"Codex Review 未写出最终消息：{exc}"
             else:
-                if not raw.strip():
-                    result["error"] = "Codex Review 最终消息为空（退出码 0，没有产出最终答复）"
+                try:
+                    raw = payload.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    # 半截写入/异常编码也按失败归档，不能让解码异常抛成 internal。
+                    result["error"] = f"Codex Review 最终消息不是 UTF-8 文本：{exc}"
                 else:
-                    try:
-                        result["structured_output"] = json.loads(raw)
-                        result["is_error"] = False
-                        result["result_format"] = "json"
-                    except ValueError as exc:
-                        # --output-schema 只在原生 Codex/OpenAI 路径被保证执行；经第三方
-                        # 服务商（如 Magpie 网关）接入的模型可能改写文风，按历史
-                        # review_text_v1 契约作答。分段帧交给 Plus 同一严格解析器接收；
-                        # 非合法分段仍 fail-closed，不猜改、不从旧消息取结论。
-                        normalizations = []
-                        framed, frame_error = review._text_result(raw, normalizations=normalizations)
-                        if framed is None:
-                            result["error"] = (
-                                f"Codex Review 缺少有效最终 JSON：{exc}；{frame_error}；"
-                                f"最终消息开头：{excerpt(util.redact(raw, secrets))}")
-                        else:
-                            result["structured_output"] = framed
-                            result["result_format"] = "review_text_v1"
-                            result["result_normalizations"] = normalizations
+                    if not raw.strip():
+                        result["error"] = "Codex Review 最终消息为空（退出码 0，没有产出最终答复）"
+                    else:
+                        try:
+                            result["structured_output"] = json.loads(raw)
                             result["is_error"] = False
+                            result["result_format"] = "json"
+                        except ValueError as exc:
+                            # --output-schema 只在原生 Codex/OpenAI 路径被保证执行；经第三方
+                            # 服务商（如 Magpie 网关）接入的模型可能改写文风，按历史
+                            # review_text_v1 契约作答。分段帧交给 Plus 同一严格解析器接收；
+                            # 非合法分段仍 fail-closed，不猜改、不从旧消息取结论。
+                            normalizations = []
+                            framed, frame_error = review._text_result(raw, normalizations=normalizations)
+                            if framed is None:
+                                result["error"] = (
+                                    f"Codex Review 缺少有效最终 JSON：{exc}；{frame_error}；"
+                                    f"最终消息开头：{excerpt(util.redact(raw, secrets))}")
+                            else:
+                                result["structured_output"] = framed
+                                result["result_format"] = "review_text_v1"
+                                result["result_normalizations"] = normalizations
+                                result["is_error"] = False
         elif result["error"] is None:
             result["error"] = f"Codex Review 失败（退出码 {result['exit_code']}）"
         return result

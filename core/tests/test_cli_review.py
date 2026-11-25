@@ -445,6 +445,20 @@ def test_codex_misspelled_text_frame_still_blocks_with_head(tmp_path):
     assert '最终消息开头：<<<KANEPILOT_REVIEW_V1>>>' in result['error']
 
 
+def test_codex_non_utf8_final_message_blocks_instead_of_crashing(tmp_path):
+    """半截写入或异常编码：按失败归档，不让 UnicodeDecodeError 变成 internal。"""
+    output = tmp_path / 'binary.txt'
+    script = tmp_path / 'binary.py'
+    script.write_text('import json\nfrom pathlib import Path\n'
+                      f'Path({str(output)!r}).write_bytes(b"\\xff\\xfe\\x00bad bytes")\n'
+                      'print(json.dumps({"type": "turn.completed"}), flush=True)\n')
+    result = cli_review.run_codex([sys.executable, str(script)], prompt='', cwd=tmp_path,
+                                  env={}, timeout=5, log_path=tmp_path / 'raw.jsonl',
+                                  out_path=output)
+    assert result['is_error'] is True
+    assert '不是 UTF-8 文本' in result['error']
+
+
 def test_codex_prose_head_is_redacted_and_bounded(tmp_path):
     """摘要不得泄露凭据或把整段答复写进失败原因。"""
     script = tmp_path / 'secret.py'
