@@ -1999,11 +1999,37 @@ struct OkResponse: Decodable {
     let warnings: [String]?
 }
 
-struct RecheckCheck: Decodable, Identifiable {
+struct RecheckCheck: Decodable {
     let name: String?
     let ok: Bool?
     let detail: String?
-    var id: String { name ?? UUID().uuidString }
+    let gateState: String?
+
+    enum Group: String, CaseIterable {
+        case materials = "计划与材料"
+        case remote = "Kaneo 远端"
+        case other = "其他检查"
+    }
+
+    var group: Group {
+        switch name {
+        case "plan_file", "plan_sha256", "source_sha256", "requirements_sha256", "source_snapshot": return .materials
+        case "remote", "remote_status", "remote_requirements", "kaneo_get_task": return .remote
+        default: return .other
+        }
+    }
+
+    var label: String {
+        switch name {
+        case "plan_file", "plan_sha256": return "计划文件"
+        case "source_sha256", "source_snapshot": return "来源快照"
+        case "requirements_sha256": return "需求内容"
+        case "remote_requirements": return "远端需求"
+        case "remote_status", "kaneo_get_task": return "任务状态"
+        case "remote": return "读取远端任务"
+        default: return name ?? "未命名检查"
+        }
+    }
 }
 
 struct RecheckResponse: Decodable {
@@ -2012,6 +2038,32 @@ struct RecheckResponse: Decodable {
     let kaneoStatus: String?
     let requirementsSha256: String?
     let ok: Bool?
+
+    var mergeGate: RecheckCheck? { checks?.first { $0.name == "pr_merge_gate" } }
+
+    enum Conclusion: String {
+        case blocked = "PR 合并受阻"
+        case issues = "有校验项需要处理"
+        case waiting = "PR 正在等待检查"
+        case ready = "PR 合并条件已满足"
+        case unknownGate = "PR 合并状态待确认"
+        case incomplete = "校验信息不完整"
+        case checked = "本次检查已完成"
+    }
+
+    var conclusion: Conclusion {
+        guard let checks, !checks.isEmpty else { return .incomplete }
+        let gate = mergeGate
+        if gate?.ok == true && gate?.gateState == "blocked" { return .blocked }
+        if ok == false || checks.contains(where: { $0.ok == false }) { return .issues }
+        guard ok == true, checks.allSatisfy({ $0.ok == true }) else { return .incomplete }
+        guard let gate else { return .checked }
+        switch gate.gateState {
+        case "waiting": return .waiting
+        case "ready": return .ready
+        default: return .unknownGate
+        }
+    }
 }
 
 /// KP-SV02：当前执行轮次的只读事实核验；不代表需求或验证通过。
@@ -3261,6 +3313,17 @@ struct TaskDeliveryView: Decodable {
     let kaneoCommentAt: String?; let mergedAt: String?; let lastSyncAt: String?; let nextSyncAt: String?
     let autoMerge: PRAutoMergeDTO?
 
+    /// 只展示与尚未结束的 PR 和当前交付提交相符的观测。
+    var currentPullRequestNotice: PRAutoMergeDTO? {
+        guard prState?.uppercased() == "OPEN", (mergedAt ?? "").isEmpty,
+              let headSha, !headSha.isEmpty else { return nil }
+        return autoMergeNotice
+    }
+
+    var hasRecordedPRMerge: Bool {
+        prState?.uppercased() == "MERGED" || !(mergedAt ?? "").isEmpty || currentPullRequestNotice?.state == "merged"
+    }
+
     var autoMergeNotice: PRAutoMergeDTO? {
         guard let autoMerge, autoMerge.headSha == headSha, autoMerge.state != "disabled" else { return nil }
         return autoMerge
@@ -3905,6 +3968,11 @@ struct WorktreeRelocateBlockerDTO: Decodable, Equatable, Identifiable {
 
 struct WorktreeRelocatePreviewDTO: Decodable, Equatable {
     let root: String?
+    let worktreeCount: Int?
+    let repositoryCount: Int?
+    let poolSlotCount: Int?
+    let currentLeaseCount: Int?
+    let backupDir: String?
     let moves: [WorktreeRelocateMoveDTO]?
     let legacyRows: Int?
     let blockers: [WorktreeRelocateBlockerDTO]?

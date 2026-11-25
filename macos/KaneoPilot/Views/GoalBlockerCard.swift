@@ -68,14 +68,6 @@ struct GoalBlockerCard: View {
                          : "当前没有可在 Pilot 执行的目标操作；可刷新目标状态，或打开原会话处理。")
                         .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 }
-                let unfinished = snapshot.progress.filter { !["completed", "done"].contains($0.status) }
-                if !accepted, !unfinished.isEmpty {
-                    Text("未完成待办 \(unfinished.count) 项").font(.kpSmall.weight(.semibold))
-                    ForEach(Array(unfinished.prefix(2))) { item in
-                        Text("• \(item.label) · \(item.statusLabel)")
-                            .font(.kpSmall).textSelection(.enabled)
-                    }
-                }
                 if !snapshot.reasons.isEmpty || !snapshot.progress.isEmpty || !snapshot.limitations.isEmpty || !snapshot.nextSteps.isEmpty {
                     DisclosureGroup("查看全部缺项与建议", isExpanded: $detailsExpanded) {
                         VStack(alignment: .leading, spacing: Spacing.s) {
@@ -198,7 +190,7 @@ struct GoalBlockerUnavailableNote: View {
     }
 }
 
-private struct GoalBlockerDecisionSheet: View {
+struct GoalBlockerDecisionSheet: View {
     @ObservedObject var store: GoalBlockerStore
     let snapshot: GoalBlockerResponse
     let action: String
@@ -209,42 +201,64 @@ private struct GoalBlockerDecisionSheet: View {
     private var continuing: Bool { action == "continue" }
     private var current: Bool { snapshot.mutationIdentity != nil && snapshot.mutationIdentity == store.blocker?.mutationIdentity }
 
+    @State private var showItems = false
+
+    private var missingItems: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            ForEach(Array(snapshot.unverifiedItems.enumerated()), id: \.offset) { _, item in
+                Label(item, systemImage: "circle.dashed").font(.kpLabel).textSelection(.enabled)
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.m) {
-            Text(continuing ? "补充材料并继续同一目标" : "接受现状，进入独立评审")
-                .font(.kpTitle)
+        VStack(spacing: 0) {
+            SettingsSheetHeader(title: continuing ? "补充材料并继续同一目标" : "接受现状，进入独立评审",
+                                icon: continuing ? "arrow.uturn.forward.circle" : "person.badge.clock",
+                                scope: snapshot.title ?? "当前执行目标")
             ScrollView {
-                VStack(alignment: .leading, spacing: Spacing.s) {
-                    Text(continuing
-                        ? "将在原 Pi 会话继续同一目标，沿用原计划和工作树。会调用当前执行模型并产生费用。"
-                        : "这次确认接受当前结果，不代表验证通过。以下缺项和原始证据会保留并交给独立评审；评审仍可能要求修复或阻止交付。将使用已配置的评审模型并产生费用。")
-                        .font(.kpBody).fixedSize(horizontal: false, vertical: true)
-                    ForEach(Array(snapshot.unverifiedItems.enumerated()), id: \.offset) { _, item in
-                        Text("• \(item)").font(.kpSmall).textSelection(.enabled)
-                    }
+                VStack(alignment: .leading, spacing: Spacing.m) {
                     if continuing {
-                        Text("补充材料或说明").font(.kpBody.weight(.semibold))
+                        Text("补充材料或说明").font(.kpSection)
                         TextEditor(text: $message)
-                            .font(.kpBody)
-                            .frame(minHeight: 140)
+                            .font(.kpBody).frame(height: 108)
                             .overlay(RoundedRectangle(cornerRadius: Radius.control).stroke(Color.kpSeparator))
-                            .accessibilityLabel("补充材料或说明")
-                            .disabled(store.working)
+                            .accessibilityLabel("补充材料或说明").disabled(store.working)
+                        if !snapshot.unverifiedItems.isEmpty {
+                            DisclosureGroup("查看待补证事项", isExpanded: $showItems) { missingItems }
+                                .disclosureGroupStyle(DetailDisclosureStyle(systemImage: "list.bullet", itemCount: snapshot.unverifiedItems.count))
+                        }
+                    } else {
+                        GroupPanel {
+                            VStack(alignment: .leading, spacing: Spacing.s) {
+                                Label("当前结果仍未验证", systemImage: "exclamationmark.circle")
+                                    .font(.kpSection).foregroundStyle(Color.kpOrange)
+                                Text("原始证据和以下缺项会交给独立评审。评审仍可要求修复或阻止交付。").font(.kpBody)
+                                if !snapshot.unverifiedItems.isEmpty { missingItems }
+                            }.padding(Spacing.m)
+                        }
                     }
+                }.padding(Spacing.l).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                Label(continuing
+                      ? "继续后将沿用原 Pi 会话、计划和工作树，并产生执行模型费用。"
+                      : "确认后将调用已配置的独立评审模型，并产生评审费用。", systemImage: "info.circle")
+                    .font(.kpLabel).foregroundStyle(.secondary)
+                if !current {
+                    Text("目标或版本已变化，请关闭此窗口并刷新后重新选择。")
+                        .font(.kpSmall).foregroundStyle(Color.kpOrange)
                 }
+                if let error = store.error {
+                    Text(error).font(.kpSmall).foregroundStyle(Color.kpRed).textSelection(.enabled)
+                }
+            }.padding(.horizontal, Spacing.l).padding(.vertical, Spacing.s)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if !current {
-                Text("目标或版本已变化，请关闭此窗口并刷新后重新选择。")
-                    .font(.kpSmall).foregroundStyle(Color.kpOrange)
-            }
-            if let error = store.error {
-                Text(error).font(.kpSmall).foregroundStyle(Color.kpRed).textSelection(.enabled)
-            }
+            Divider()
             HStack(spacing: Spacing.s) {
-                Spacer(minLength: 0)
-                if store.working { ProgressView().controlSize(.small) }
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction).disabled(store.working)
+                Spacer()
+                if store.working { ProgressView().controlSize(.small) }
                 Button(continuing ? "确认继续执行" : "确认接受并进入评审") {
                     guard let identity = snapshot.mutationIdentity else { return }
                     Task {
@@ -254,11 +268,10 @@ private struct GoalBlockerDecisionSheet: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!current || !store.canAct)
-            }
+                .disabled(!current || !store.canAct || store.blocker?.actions.contains(action) != true)
+            }.padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
         }
-        .padding(Spacing.xl)
-        .frame(minWidth: 520, idealWidth: 600, minHeight: 360, idealHeight: 480)
+        .frame(width: 560, height: 420)
         .interactiveDismissDisabled(store.working)
     }
 }

@@ -169,6 +169,8 @@ def test_refresh_notice_reports_a_ready_gate(case):
                                           reader=reader)
     assert notice["state"] == "waiting_checks"
     assert "已满足" in notice["reason"]
+    assert notice["gate_state"] == "ready"
+    assert "gate_state" not in core.delivery_of(case.task())["auto_merge"]
 
 
 def test_refresh_notice_keeps_an_unconfirmed_merge_receipt(case):
@@ -188,18 +190,26 @@ def test_refresh_notice_skips_a_moved_head(case):
                                         reader=reader) is None
 
 
-def test_manual_recheck_refreshes_the_gate_line(case):
+@pytest.mark.parametrize(("check", "gate_state"), [
+    (_check("FAILURE"), "blocked"),
+    (_check(None, status="IN_PROGRESS"), "waiting"),
+])
+def test_manual_recheck_refreshes_the_gate_line(case, check, gate_state):
     from kanpilot import cmd_remote, remote
     case.update(pr_state="OPEN")
-    failing = pr(case, statusCheckRollup=[_check("FAILURE")])
+    failing = pr(case, statusCheckRollup=[check])
     source = {"task": {"id": "task1234", "projectId": case.task()["project_id"],
-                       "status": "in-review"}}
+                       "status": "in-review"},
+              "requirements_sha256": case.task()["requirements_sha256"]}
     with patch.object(remote, "get_client", return_value=None), \
          patch.object(remote, "get_task", return_value=source), \
          patch.object(gh_client, "pr_view", return_value=failing):
         result = cmd_remote.cmd_recheck(case.ctx, {"task_id": "task1234"})
     names = [item["name"] for item in result["checks"]]
     assert "pr_merge_gate" in names
+    gate = next(item for item in result["checks"] if item["name"] == "pr_merge_gate")
+    assert result["ok"] is True and gate["ok"] is True
+    assert gate["gate_state"] == gate_state
     detail = next(item["detail"] for item in result["checks"]
                   if item["name"] == "pr_merge_gate")
     assert "analyze-test" in detail

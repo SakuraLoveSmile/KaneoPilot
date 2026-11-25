@@ -304,12 +304,7 @@ struct SettingsView: View {
     @State private var worktreeConcurrencyError: String?
     @State private var worktreeSeeded = false
     @State private var showWorktreeRelocate = false
-    @State private var worktreeDestination = ""
-    @State private var worktreeRelocatePreview: WorktreeRelocatePreviewDTO?
-    @State private var worktreeRelocateError: String?
-    @State private var worktreeRelocating = false
     @State private var worktreeBackupDir = ""
-    @State private var worktreeOperationId = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -323,30 +318,36 @@ struct SettingsView: View {
             .padding(.horizontal, Spacing.l)
             .padding(.vertical, Spacing.m)
             .accessibilityLabel("设置分组：\(segment.title)")
-            if segment == .projects {
-                ProjectMappingsView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                Form {
-                    switch segment {
-                    case .projects:
-                        EmptyView()
-                    case .roles:
-                        rolesSection
-                        desktopQueueSection
-                    case .connections:
-                        mcpServiceSection
-                        MobileConnectionView()
-                    case .advanced:
-                        SoftwareUpdateSection()
-                        schedulerSection
-                        worktreeSection
-                        diagnosticsDataSection
+            switch segment {
+            case .roles:
+                GeometryReader { viewport in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: Spacing.xl) {
+                            rolesSection(compact: viewport.size.width < 650)
+                            desktopQueueSection
+                        }
+                        .padding(.horizontal, Spacing.l)
+                        .padding(.top, Spacing.s)
+                        .padding(.bottom, Spacing.xl)
                     }
                 }
-                .formStyle(.grouped)
-                .scrollContentBackground(.hidden)
-                .background(Color.kpControl)
+            case .projects:
+                ProjectMappingsView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .connections:
+                GeometryReader { viewport in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: Spacing.xl) {
+                            localConnections(wide: viewport.size.width >= 680)
+                            MobileConnectionView()
+                        }
+                        .padding(.horizontal, Spacing.l)
+                        .padding(.top, Spacing.s)
+                        .padding(.bottom, Spacing.xl)
+                    }
+                }
+            case .advanced:
+                advancedPage
             }
         }
         .background(Color.kpControl)
@@ -413,45 +414,49 @@ struct SettingsView: View {
         .onChange(of: pdThinkingLevel) { _, _ in invalidatePiDesktopCatalog(clear: false) }
     }
 
-    // MARK: 运行端页（KP-UI03）：规划 / 执行 / 评审三行加 Desktop 两行
+    // MARK: 运行端首页
 
-    /// 三个角色各一行：角色名、一句摘要（来自已保存的配置，不读草稿）、就绪状态、「编辑…」。
-    private var rolesSection: some View {
-        Section {
-            RoleSummaryRow(role: "规划",
-                           summary: plannerSummaryText,
-                           readiness: plannerReadiness.text,
-                           tone: plannerReadiness.tone,
-                           loading: model.plannerLoading,
-                           loadError: model.plannerError,
-                           retryAccessibilityLabel: "重新读取规划配置",
-                           onRetry: { Task { await loadPlanner() } },
-                           onEdit: { openRoleSheet(.planner) })
-            RoleSummaryRow(role: "执行",
-                           summary: execSummaryText,
-                           readiness: execReadiness.text,
-                           tone: execReadiness.tone,
-                           loading: execLoading,
-                           loadError: execError,
-                           retryAccessibilityLabel: "重试读取执行配置",
-                           onRetry: { Task { await loadExecConfig() } },
-                           onEdit: { openRoleSheet(.exec) })
-            RoleSummaryRow(role: "评审",
-                           summary: reviewSummaryText,
-                           readiness: reviewReadiness.text,
-                           tone: reviewReadiness.tone,
-                           loading: reviewLoading,
-                           loadError: reviewError,
-                           retryAccessibilityLabel: "重新读取 Review 配置",
-                           onRetry: { Task { await loadReview() } },
-                           onEdit: { openRoleSheet(.review) })
-        } header: {
-            Text("运行端")
-        } footer: {
-            Text("仅影响新建请求与新轮次；不修改 Codex / Claude / Qoder / Plus / pi 全局配置；不显示凭据值。")
-                .font(.kpLabel)
-                .foregroundStyle(Color.kpSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+    private func rolesSection(compact: Bool) -> some View {
+        let layout = compact
+            ? AnyLayout(VStackLayout(spacing: Spacing.s))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: Spacing.m))
+        return VStack(alignment: .leading, spacing: Spacing.s) {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                Text("角色运行端").font(.kpSection)
+                Spacer(minLength: 0)
+                Text("更改仅对新请求和新轮次生效。")
+                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+            }
+            layout {
+                RoleSummaryCard(compact: compact, role: "规划", systemImage: "list.bullet.clipboard",
+                               summary: plannerSummary,
+                               readiness: plannerReadiness.text,
+                               tone: plannerReadiness.tone,
+                               loading: model.plannerLoading,
+                               loadError: model.plannerError,
+                               retryAccessibilityLabel: "重新读取规划配置",
+                               onRetry: { Task { await loadPlanner() } },
+                               onEdit: { openRoleSheet(.planner) })
+                RoleSummaryCard(compact: compact, role: "执行", systemImage: "play",
+                               summary: execSummary,
+                               readiness: execReadiness.text,
+                               tone: execReadiness.tone,
+                               loading: execLoading,
+                               loadError: execError,
+                               retryAccessibilityLabel: "重试读取执行配置",
+                               onRetry: { Task { await loadExecConfig() } },
+                               onEdit: { openRoleSheet(.exec) })
+                RoleSummaryCard(compact: compact, role: "评审", systemImage: "checkmark.bubble",
+                               summary: reviewSummary,
+                               readiness: reviewReadiness.text,
+                               tone: reviewReadiness.tone,
+                               loading: reviewLoading,
+                               loadError: reviewError,
+                               retryAccessibilityLabel: "重新读取 Review 配置",
+                               onRetry: { Task { await loadReview() } },
+                               onEdit: { openRoleSheet(.review) })
+            }
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -473,50 +478,45 @@ struct SettingsView: View {
     }
 
     /// Plus 五字段的一句话摘要；权限取已保存值，规划与 Review 角色用固定值。
-    private func plusSummary(_ config: ExecPiDesktopConfig?, permission: String? = nil) -> String {
-        var parts = ["Pi-Desktop-Plus"]
-        if let config {
-            if config.effectiveModelSource == "inherit" {
-                parts.append("跟随 Plus 默认配置")
-            } else {
-                parts.append("\(config.providerId ?? "—") / \(config.modelId ?? "—")")
-                parts.append(config.thinkingLevel ?? "—")
-            }
+    private func plusSummary(_ config: ExecPiDesktopConfig?, permission: String? = nil,
+                             method: String? = nil) -> RoleConfigurationSummary {
+        let details: String
+        if let config, config.effectiveModelSource == "inherit" {
+            details = "跟随 Plus 默认配置"
+        } else if let config {
+            details = "\(config.providerId ?? "—") / \(config.modelId ?? "—") · \(config.thinkingLevel ?? "—")"
         } else {
-            parts.append("尚未保存")
+            details = "尚未保存"
         }
-        if let mode = permission ?? config?.permissionMode, !mode.isEmpty {
-            parts.append("权限：\(permissionLabel(mode))")
-        }
-        return parts.joined(separator: " · ")
+        let mode = permission ?? config?.permissionMode
+        let permissionText = mode.flatMap { $0.isEmpty ? nil : "权限：" + permissionLabel($0) }
+        let context = [method, permissionText].compactMap { $0 }.joined(separator: " · ")
+        return RoleConfigurationSummary(backend: "Pi-Desktop-Plus", details: details, context: context)
     }
 
     /// 规划行摘要：运行端 · 模型 · 思考等级（评审修复相同时注明）· 默认规划方式。只读已保存配置。
-    private var plannerSummaryText: String {
-        guard let saved = model.plannerConfig else { return "" }
+    private var plannerSummary: RoleConfigurationSummary? {
+        guard let saved = model.plannerConfig else { return nil }
         let method = saved.effectiveDefaultMethod == "spec_plan" ? "Spec Planner" : "内置规划"
         switch model.plannerEffectiveBackend {
         case "codex_desktop":
-            return "Codex Desktop · 继承 Desktop 会话/自动任务 · \(method)"
+            return RoleConfigurationSummary(backend: "Codex Desktop", details: "继承 Desktop 会话/自动任务", context: method)
         case "claude":
             let claude = saved.config?.claude
-            return "Claude · \(claude?.model ?? "sonnet") · \(claude?.effort ?? "high") · 内置规划"
+            return RoleConfigurationSummary(backend: "Claude", details: "\(claude?.model ?? "sonnet") · \(claude?.effort ?? "high")", context: "内置规划")
         case "qoder":
             let qoder = saved.config?.qoder
-            return "Qoder CLI · \(qoder?.model ?? "auto") · \(qoder?.reasoningEffort ?? "inherit") · 内置规划"
+            return RoleConfigurationSummary(backend: "Qoder CLI", details: "\(qoder?.model ?? "auto") · \(qoder?.reasoningEffort ?? "inherit")", context: "内置规划")
         case "pi_desktop":
-            return plusSummary(model.plannerPlusConfig,
-                               permission: ExecPiDesktopConfig.fixedPlanPermission) + " · 内置规划"
+            return plusSummary(model.plannerPlusConfig, permission: ExecPiDesktopConfig.fixedPlanPermission, method: "内置规划")
         default:
             let standard = saved.effective("standard")
             let reviewFix = saved.effective("review_fix")
-            var text = "Codex CLI · \(standard?.plannerModel ?? "—") · \(standard?.reasoningEffort ?? "—")"
-            if standard == reviewFix {
-                text += "（评审修复相同）"
-            } else {
-                text += " · 评审修复 \(reviewFix?.plannerModel ?? "—") · \(reviewFix?.reasoningEffort ?? "—")"
-            }
-            return text + " · " + method
+            let details = "\(standard?.plannerModel ?? "—") · \(standard?.reasoningEffort ?? "—")"
+            let fix = standard == reviewFix
+                ? "评审修复相同"
+                : "评审修复 \(reviewFix?.plannerModel ?? "—") · \(reviewFix?.reasoningEffort ?? "—")"
+            return RoleConfigurationSummary(backend: "Codex CLI", details: details, context: method + " · " + fix)
         }
     }
 
@@ -544,15 +544,15 @@ struct SettingsView: View {
     }
 
     /// 执行行摘要：已保存的任务执行后端 · 模型 · 思考等级（Plus 再加权限）。
-    private var execSummaryText: String {
-        guard let base = execBase else { return "" }
+    private var execSummary: RoleConfigurationSummary? {
+        guard let base = execBase else { return nil }
         switch base.effectiveBackend {
         case "pi_desktop":
             return plusSummary(base.piDesktop)
         case "codex":
-            return "Codex CLI · \(base.codex?.model ?? "—") · \(base.codex?.reasoningEffort ?? "—") · \(base.codex?.sandboxLabel ?? ExecCodexConfig.sandboxLabel(for: "workspace-write"))"
+            return RoleConfigurationSummary(backend: "Codex CLI", details: "\(base.codex?.model ?? "—") · \(base.codex?.reasoningEffort ?? "—")", context: base.codex?.sandboxLabel ?? ExecCodexConfig.sandboxLabel(for: "workspace-write"))
         default:
-            return "Pi CLI · \(base.provider ?? "—") / \(base.model ?? "—") · \(base.reasoningEffort ?? "—")"
+            return RoleConfigurationSummary(backend: "Pi CLI", details: "\(base.provider ?? "—") / \(base.model ?? "—")", context: "思考等级 \(base.reasoningEffort ?? "—")")
         }
     }
 
@@ -579,24 +579,24 @@ struct SettingsView: View {
     }
 
     /// 评审行摘要：已保存的 Review 运行端 · 模型 · 思考等级（Pi CLI 继承时写明）。
-    private var reviewSummaryText: String {
-        guard let config = reviewConfig ?? reviewDefaults else { return "" }
+    private var reviewSummary: RoleConfigurationSummary? {
+        guard let config = reviewConfig ?? reviewDefaults else { return nil }
         switch config.effectiveBackend {
         case "codex_desktop":
-            return "Codex Desktop · 继承 Desktop 会话/自动任务"
+            return RoleConfigurationSummary(backend: "Codex Desktop", details: "继承 Desktop 会话/自动任务")
         case "qoder":
-            return "Qoder CLI · \(config.qoder?.model ?? "auto") · \(config.qoder?.reasoningEffort ?? "inherit")"
+            return RoleConfigurationSummary(backend: "Qoder CLI", details: "\(config.qoder?.model ?? "auto") · \(config.qoder?.reasoningEffort ?? "inherit")")
         case "claude":
-            return "Claude · \(config.claude?.model ?? "—") · \(config.claude?.effort ?? "—")"
+            return RoleConfigurationSummary(backend: "Claude", details: "\(config.claude?.model ?? "—") · \(config.claude?.effort ?? "—")")
         case "codex":
-            return "Codex · \(config.codex?.model ?? config.codex?.plannerModel ?? "—") · \(config.codex?.reasoningEffort ?? "—")"
+            return RoleConfigurationSummary(backend: "Codex", details: "\(config.codex?.model ?? config.codex?.plannerModel ?? "—") · \(config.codex?.reasoningEffort ?? "—")")
         case "pi_desktop":
             return plusSummary(config.piDesktop, permission: ExecPiDesktopConfig.fixedReviewPermission)
         default:
             if config.effectiveMode == "custom" {
-                return "Pi CLI · \(config.provider ?? "—") / \(config.model ?? "—") · \(config.reasoningEffort ?? "—")"
+                return RoleConfigurationSummary(backend: "Pi CLI", details: "\(config.provider ?? "—") / \(config.model ?? "—") · \(config.reasoningEffort ?? "—")")
             }
-            return "Pi CLI · 继承本机 PI 默认会话配置"
+            return RoleConfigurationSummary(backend: "Pi CLI", details: "继承本机 PI 默认会话配置")
         }
     }
 
@@ -616,15 +616,16 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: Desktop 自动领取：页面两行加「管理…」面板
+    // MARK: Desktop 自动领取
 
     private var desktopBindingTitle: String {
         guard let status = model.desktopQueueStatus else { return "尚未读取 Desktop 领取状态" }
-        return status.autoConfigured ? "已绑定原生自动任务" : "尚未绑定原生自动任务"
+        let title = status.autoConfigured ? "已绑定原生自动任务" : "尚未绑定原生自动任务"
+        return model.desktopQueueError == nil ? title : "上次读取 · " + title
     }
 
     private var desktopBindingTone: Color {
-        guard let status = model.desktopQueueStatus else { return Color.kpGray }
+        guard model.desktopQueueError == nil, let status = model.desktopQueueStatus else { return Color.kpGray }
         return status.autoConfigured ? Color.kpGreen : Color.kpOrange
     }
 
@@ -634,35 +635,107 @@ struct SettingsView: View {
     }
 
     private var desktopQueueSection: some View {
-        Section {
-            Toggle(isOn: Binding(
-                get: { model.desktopQueueStatus?.enabled ?? false },
-                set: { value in Task { await model.setDesktopQueueEnabled(value) } })) {
-                    SettingsRowLabel(
-                        title: "允许 Desktop 领取",
-                        detail: "电脑需保持开机，Codex Desktop 需保持运行；模型与权限继承 Desktop 会话/自动任务。")
-                }
-                .disabled(model.desktopQueueInFlight || model.desktopQueueStatus == nil)
-                .accessibilityLabel("允许 Desktop 领取")
-            SettingsRow(desktopBindingTitle,
-                        detail: model.desktopQueueStatus.map { desktopQueueDetail($0) },
-                        status: desktopBindingTone) {
-                HStack(spacing: Spacing.s) {
-                    if model.desktopQueueInFlight || model.desktopAutomationInFlight {
-                        ProgressView().controlSize(.small)
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            HStack {
+                Text("Desktop 自动领取").font(.kpSection)
+                Spacer()
+                desktopManageAction
+            }
+            GroupPanel(background: Color.kpWindow.opacity(0.5), border: Color.kpSeparator.opacity(0.6)) {
+                HStack(spacing: Spacing.m) {
+                    Image(systemName: "desktopcomputer")
+                        .font(.kpTitle).foregroundStyle(Color.kpSecondary)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        Text("允许 Desktop 领取").font(.kpBody.weight(.semibold))
+                        HStack(spacing: Spacing.xs) {
+                            Circle().fill(desktopBindingTone).frame(width: 6, height: 6)
+                                .accessibilityHidden(true)
+                            Text(desktopBindingTitle).font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                        }
                     }
-                    Button("管理…") { openRoleSheet(.desktop) }
-                        .accessibilityLabel("管理 Desktop 自动领取")
+                    Spacer()
+                    if let queue = model.desktopQueueStatus {
+                        Toggle("允许 Desktop 领取", isOn: Binding(
+                            get: { queue.enabled },
+                            set: { value in Task { await model.setDesktopQueueEnabled(value) } }))
+                            .toggleStyle(.switch).labelsHidden()
+                            .disabled(model.desktopQueueInFlight)
+                    } else {
+                        Text(model.desktopQueueInFlight ? "读取中" : "未读取")
+                            .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                    }
                 }
+                .padding(Spacing.m)
+                ListRule()
+                desktopQueueGrid.padding(Spacing.m)
+            }
+            if let queue = model.desktopQueueStatus, !queue.autoConfigured,
+               let detail = queue.detail, !detail.isEmpty {
+                Text(detail).font(.kpLabel).foregroundStyle(Color.kpSecondary).textSelection(.enabled)
+            }
+            if let status = model.desktopAutomationStatus,
+               status.roles.plan.status == "MISSING" || status.roles.review.status == "MISSING" {
+                SettingsNotice(text: "任务缺失时，请在 Codex 恢复或重建并重新绑定，再刷新状态。",
+                               icon: "exclamationmark.circle", tone: Color.kpOrange)
             }
             desktopErrorRows
-        } header: {
-            Text("Desktop 自动领取")
-        } footer: {
-            Text("关闭领取只阻止新任务领取；定时检查在「管理…」里独立控制。关闭后不再定时唤醒；已开始的规划或 Review 会继续。恢复后可能立即处理到期任务。Codex 可能提前或延后几分钟启动。本地兼容适配；Codex 升级后若不兼容，请到 Codex 控制定时任务。任务缺失时，请在 Codex 恢复或重建并重新绑定，再刷新状态。")
-                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+            DisclosureGroup("领取与定时说明") {
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text("领取开关只影响新任务。电脑和 Codex Desktop 需保持运行，模型与权限沿用 Desktop 会话或自动任务。")
+                    Text("定时检查在「管理…」中设置。关闭定时检查后不再定时唤醒；已开始的规划或评审会继续。恢复后可能立即处理到期任务。")
+                    Text("本地兼容适配；Codex 升级后若不兼容，请到 Codex 控制定时任务。")
+                }
                 .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, Spacing.xs)
+            }
+            .font(.kpLabel).foregroundStyle(Color.kpSecondary)
         }
+    }
+
+    private var desktopManageAction: some View {
+        HStack(spacing: Spacing.s) {
+            if model.desktopQueueInFlight || model.desktopAutomationInFlight {
+                ProgressView().controlSize(.small)
+            }
+            Button("管理…") { openRoleSheet(.desktop) }
+                .controlSize(.small).accessibilityLabel("管理 Desktop 自动领取")
+        }
+    }
+
+    private var desktopQueueGrid: some View {
+        Grid(alignment: .leading, horizontalSpacing: Spacing.l, verticalSpacing: Spacing.s) {
+            GridRow {
+                Text("角色")
+                Text(model.desktopQueueError != nil && model.desktopQueueStatus != nil ? "等待领取（上次读取）" : "等待领取")
+                Text("定时检查")
+                Text("运行安排")
+            }
+            .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+            desktopQueueRow("规划", count: model.desktopQueueStatus?.queue.plan, role: .plan)
+            desktopQueueRow("评审", count: model.desktopQueueStatus?.queue.review, role: .review)
+        }
+    }
+
+    private func desktopQueueRow(_ title: String, count: Int?, role: DesktopAutomationRole) -> some View {
+        let state = model.desktopAutomationStatus?.roles.status(for: role)
+        return GridRow {
+            Text(title).fontWeight(.medium)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(count.map { "\($0) 项" } ?? "未读取").monospacedDigit()
+                .accessibilityLabel("\(title)等待领取，\(count.map(String.init) ?? "未读取")")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(state?.statusText ?? "未读取")
+                .accessibilityLabel("\(title)定时检查，\(state?.statusText ?? "未读取")")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(state.map { $0.scheduleSummary.isEmpty ? "未提供" : $0.scheduleSummary } ?? "未读取")
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help([state?.timeZone, "Codex 可能提前或延后几分钟启动。"]
+                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
+        }
+        .font(.kpBody)
     }
 
     @ViewBuilder
@@ -680,13 +753,14 @@ struct SettingsView: View {
     /// 管理面板：两个定时检查开关、「修改运行时间…」、聊天入口与「刷新状态」，全部即时生效，只有「完成」。
     private var desktopSheet: some View {
         SettingsManageSheet(title: "管理 · Desktop 自动领取",
-                            scope: "这里的开关与按钮即时生效，没有取消 / 保存。",
+                            scope: "定时检查开关即时生效，运行时间需单独保存。",
                             idealHeight: 440,
                             onDone: { closeRoleSheet() }) {
             desktopManageSection
         }
     }
 
+    @ViewBuilder
     private var desktopManageSection: some View {
         Section {
             desktopAutomationToggle("自动规划定时检查", role: .plan)
@@ -701,6 +775,12 @@ struct SettingsView: View {
                     .font(.kpLabel).foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        } header: {
+            Text("定时检查")
+        } footer: {
+            Text("关闭后，已开始的规划或 Review 会继续。")
+        }
+        Section {
             // 规划与 Review 共用一个「修改运行时间…」，打开后各有自己的编辑区（ui-spec §4.9 行结构）。
             // 草稿由本视图持有，关闭面板、折叠都不丢。
             DisclosureGroup {
@@ -736,10 +816,8 @@ struct SettingsView: View {
                 Spacer(minLength: 0)
             }
             desktopErrorRows
-        } footer: {
-            Text("关闭后不再定时唤醒；已开始的规划或 Review 会继续。")
-                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+        } header: {
+            Text("运行安排与聊天")
         }
     }
 
@@ -750,19 +828,6 @@ struct SettingsView: View {
         let planDirty = desktopPlanScheduleDraft.map { $0.schedule != planSaved } ?? false
         let reviewDirty = desktopReviewScheduleDraft.map { $0.schedule != reviewSaved } ?? false
         return planDirty || reviewDirty
-    }
-
-    /// 「已绑定」行的说明：等待领取数加定时检查摘要；未绑定时再附核心给出的原因。
-    private func desktopQueueDetail(_ status: DesktopQueueStatusResponse) -> String {
-        var parts = ["等待领取：规划 \(status.queue.plan) · Review \(status.queue.review) · \(desktopAutomationSummary)"]
-        if !status.autoConfigured, let detail = status.detail, !detail.isEmpty { parts.append(detail) }
-        return parts.joined(separator: "\n")
-    }
-
-    /// 页面行里的定时检查摘要，如「定时检查：规划运行中 · Review 已暂停」。
-    private var desktopAutomationSummary: String {
-        guard let status = model.desktopAutomationStatus else { return "定时检查：未读取" }
-        return "定时检查：规划\(status.roles.plan.statusText) · Review \(status.roles.review.statusText)"
     }
 
     /// 定时检查开关行：标题加其下「状态 · 运行安排 · 时区」，开关在右。运行时间编辑在面板里共用的折叠里。
@@ -858,7 +923,7 @@ struct SettingsView: View {
     private var plannerSheet: some View {
         SettingsEditSheet(
             title: "编辑 · 规划",
-            scope: "规划运行端、模型与思考等级、默认规划方式；仅影响新建规划请求。",
+            icon: "list.bullet.clipboard", scope: "用于新建规划请求",
             cancelAccessibilityLabel: "取消编辑规划",
             saveAccessibilityLabel: "保存规划配置",
             idealHeight: 460,
@@ -878,7 +943,7 @@ struct SettingsView: View {
     private var execSheet: some View {
         SettingsEditSheet(
             title: "编辑 · 执行",
-            scope: "任务执行后端、模型与权限；仅影响新轮次。",
+            icon: "terminal", scope: "用于新建执行轮次",
             cancelAccessibilityLabel: "取消编辑执行",
             saveAccessibilityLabel: "保存执行配置",
             idealHeight: 540,
@@ -898,7 +963,7 @@ struct SettingsView: View {
     private var reviewSheet: some View {
         SettingsEditSheet(
             title: "编辑 · 评审",
-            scope: "Review 运行端与配置方式；仅影响新建 Review 请求。",
+            icon: "checkmark.seal", scope: "用于新建评审请求",
             cancelAccessibilityLabel: "取消编辑评审",
             saveAccessibilityLabel: "保存 Review 配置",
             idealHeight: 400,
@@ -927,56 +992,59 @@ struct SettingsView: View {
 
     // MARK: 本机 MCP 服务
 
-    private var mcpServiceSection: some View {
-        Section {
-            SettingsRow(mcpServiceTitle, detail: mcpServiceDetail,
-                        status: mcpManager.status.running ? Color.kpGreen : Color.kpGray) {
-                if mcpManager.status.running && mcpManager.status.owned {
-                    Button("停止服务") {
-                        mcpManager.stop()
+    private func localConnections(wide: Bool) -> some View {
+        let layout = wide
+            ? AnyLayout(HStackLayout(alignment: .top, spacing: Spacing.m))
+            : AnyLayout(VStackLayout(alignment: .leading, spacing: Spacing.l))
+        return layout {
+            SettingsPanel("本机 MCP 服务", systemImage: "network", fillHeight: wide) {
+                HStack(spacing: Spacing.s) {
+                    Circle().fill(mcpManager.status.running ? Color.kpGreen : Color.kpGray)
+                        .frame(width: 8, height: 8).accessibilityHidden(true)
+                    Text(mcpServiceTitle).font(.kpSection)
+                    Spacer(minLength: 0)
+                    if mcpManager.status.running && mcpManager.status.owned {
+                        Button("停止服务") { mcpManager.stop() }
+                            .accessibilityLabel("停止本机 MCP 服务")
+                    } else if !mcpManager.status.running {
+                        Button("启动服务") { mcpManager.start() }
+                            .accessibilityLabel("启动本机 MCP 服务")
                     }
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel("停止本机 MCP 服务")
-                } else if !mcpManager.status.running {
-                    Button("启动服务") {
-                        mcpManager.start()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityLabel("启动本机 MCP 服务")
+                }
+                if !mcpServiceDetail.isEmpty {
+                    Text(mcpServiceDetail).font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                        .textSelection(.enabled)
+                }
+                Text("供运行端与调度台双向通信，处理运行控制和任务操作。")
+                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                    .help("标准 MCP 双向通信服务（kp_runtime_* 控制域与 kp_task_* 任务域）。")
+                if let error = mcpManager.status.error {
+                    SettingsNotice(text: error, icon: "exclamationmark.triangle.fill", tone: .kpRed)
+                    Button("重试") { mcpManager.retry() }
+                        .accessibilityLabel("重试启动 MCP 服务")
                 }
             }
-            // 「连接 Plus」用已保存的连接文件探测（P7）；路径只读显示，修改入口在「运行端 › 执行」面板。
-            SettingsRow("Plus 控制面", detail: plusControlDetail) {
-                HStack(spacing: Spacing.s) {
+            SettingsPanel("Plus 控制面", systemImage: "cable.connector", fillHeight: wide) {
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                    Text(piDesktopProbeControlText ?? "未探测").font(.kpBody.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    Spacer(minLength: 0)
                     if piDesktopProbeLoading { ProgressView().controlSize(.small) }
                     Button(piDesktopProbeLoading ? "连接中…" : "连接 Plus") {
                         Task { await probePiDesktopConnection(connectionFile: savedPiDesktopConnectionFile) }
                     }
-                    .disabled(piDesktopProbeLoading)
+                    .fixedSize().disabled(piDesktopProbeLoading)
                     .accessibilityLabel("连接并探测 Pi-Desktop-Plus")
                 }
-            }
-            if let error = mcpManager.status.error {
-                HStack(spacing: Spacing.s) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(Color.kpRed)
-                    Text(error)
-                        .font(.kpLabel)
-                        .foregroundStyle(Color.primary)
-                    Spacer()
-                    Button("重试") {
-                        mcpManager.retry()
-                    }
-                    .accessibilityLabel("重试启动 MCP 服务")
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text(verbatim: (savedPiDesktopConnectionFile as NSString).abbreviatingWithTildeInPath)
+                        .font(.kpLabel.monospaced()).textSelection(.enabled).help("已保存的连接文件")
+                    Text("本版本不需要会话挂接").font(.kpLabel)
                 }
-            }
-        } header: {
-            Text("本机 MCP 服务")
-        } footer: {
-            Text("标准 MCP 双向通信服务（kp_runtime_* 控制域与 kp_task_* 任务域）。")
-                .font(.kpLabel)
                 .foregroundStyle(Color.kpSecondary)
+            }
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// 「连接 Plus」探测用的连接文件：已保存的路径，没保存过用默认路径；未保存的草稿路径不参与。
@@ -984,12 +1052,6 @@ struct SettingsView: View {
         let saved = (execConfig?.piDesktop?.connectionFile ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return saved.isEmpty ? ExecPiDesktopConfig.defaultConnectionFile : saved
-    }
-
-    /// 「Plus 控制面」行说明：最近一次探测结果、会话挂接说明（全设置只此一处）、已保存的连接文件。
-    private var plusControlDetail: String {
-        let path = (savedPiDesktopConnectionFile as NSString).abbreviatingWithTildeInPath
-        return "\(piDesktopProbeControlText ?? "未探测") · 本版本不需要会话挂接 · 连接文件 \(path)"
     }
 
     private var mcpServiceTitle: String {
@@ -1030,6 +1092,7 @@ struct SettingsView: View {
 
     /// 「编辑 · 执行」面板正文（§4.10）：任务执行后端与各后端的模型配置，实际生效值与能力状态分开显示；
     /// 不把一个 Plus 选择表现成「全链路已切换」。保存、取消在面板脚栏。
+    @ViewBuilder
     private var execSection: some View {
         Section {
             if execLoading && !execLoaded {
@@ -1063,7 +1126,7 @@ struct SettingsView: View {
                 .frame(minHeight: 40)
                 .accessibilityElement(children: .combine)
             }
-            if execLoaded, let caps = execCaps, execBase != nil {
+            if execLoaded, execCaps != nil, execBase != nil {
                 // ① 任务执行后端（§5.23.3）：轮次执行的模型来源。
                 LabeledContent {
                     Picker("任务执行后端", selection: $selBackend) {
@@ -1078,6 +1141,16 @@ struct SettingsView: View {
                     SettingsRowLabel(title: "任务执行后端", detail: taskExecEffectiveText)
                 }
                 roleLegacyNotice(execLegacyBackend, fallback: "Pi-Desktop-Plus")
+            } else if !execLoading && execError == nil && !execLoaded {
+                Text("尚未读取执行配置")
+                    .font(.kpBody)
+                    .foregroundStyle(Color.kpSecondary)
+            }
+        } header: {
+            Text("运行端")
+        }
+        if execLoaded, let caps = execCaps, execBase != nil {
+            Section {
                 if selBackend == "pi_desktop" {
                     piDesktopBlock(caps)
                 } else if selBackend == "codex" {
@@ -1095,13 +1168,9 @@ struct SettingsView: View {
                 if selBackend == "pi" || (caps.checks ?? []).contains(where: { $0.ok == false }) {
                     execChecksList(caps)
                 }
-            } else if !execLoading && execError == nil && !execLoaded {
-                Text("尚未读取执行配置")
-                    .font(.kpBody)
-                    .foregroundStyle(Color.kpSecondary)
-            }
-        } footer: {
-            if execLoaded, execCaps != nil, execBase != nil {
+            } header: {
+                Text("执行参数")
+            } footer: {
                 Text("派发、监控与交付由核心命令执行，不调用控制端模型。"
                      + "仅影响新轮次 / 新控制轮；不修改 pi、Plus 与 Codex 全局配置；"
                      + "凭据只查就绪态，不保存密钥值。")
@@ -2044,6 +2113,7 @@ struct SettingsView: View {
     /// 「编辑 · 规划」面板正文（§4.10）：运行端选择 → 读取进度 → 错误横幅 →
     /// Codex 只读环境 + 两组草稿 / Plus 五字段块 → 方式；保存、取消在面板脚栏。
     /// 切换运行端只刷新只读能力与候选，不重载配置覆盖草稿。
+    @ViewBuilder
     private var plannerSection: some View {
         Section {
             if model.plannerLoading && !plannerLoaded {
@@ -2088,6 +2158,17 @@ struct SettingsView: View {
                 .accessibilityLabel("规划运行端")
                 .help("普通规划与评审修复规划的模型调用运行端；保存只影响之后创建的规划请求")
                 roleLegacyNotice(plannerLegacyBackend, fallback: "Codex CLI")
+                plannerMethodRow
+            } else if !model.plannerLoading && model.plannerError == nil {
+                Text("尚未读取规划配置")
+                    .font(.kpBody)
+                    .foregroundStyle(Color.kpSecondary)
+            }
+        } header: {
+            Text("运行端")
+        }
+        if plannerLoaded {
+            Section {
                 if plannerBackend == "codex_desktop" {
                     desktopInheritedConfig
                 } else if plannerBackend == "pi_desktop" {
@@ -2116,14 +2197,9 @@ struct SettingsView: View {
                                        model: $fixModel, effort: $fixEffort,
                                        managedByMagpie: model.magpieActive)
                 }
-                plannerMethodRow
-            } else if !model.plannerLoading && model.plannerError == nil {
-                Text("尚未读取规划配置")
-                    .font(.kpBody)
-                    .foregroundStyle(Color.kpSecondary)
-            }
-        } footer: {
-            if plannerLoaded {
+            } header: {
+                Text("规划参数")
+            } footer: {
                 Text("仅影响新建规划请求；不修改 Codex / Claude / Qoder / Plus 全局配置；不显示凭据值。")
                     .font(.kpLabel)
                     .foregroundStyle(Color.kpSecondary)
@@ -2551,6 +2627,7 @@ struct SettingsView: View {
     /// §4.10：Review 运行端（pi|pi_desktop）。
     /// pi 分支保留 inherit/custom；Plus 分支复用目录候选并固定 `auto`，
     /// 不混用任务执行的 `agent_preset`。保存只影响新建 Review 请求。
+    @ViewBuilder
     private var reviewSection: some View {
         Section {
             if reviewLoading && !reviewLoaded {
@@ -2614,6 +2691,16 @@ struct SettingsView: View {
                         }
                     }
                 }
+            } else if !reviewLoading && reviewError == nil {
+                Text("尚未读取 Review 配置")
+                    .font(.kpBody)
+                    .foregroundStyle(Color.kpSecondary)
+            }
+        } header: {
+            Text("运行端")
+        }
+        if reviewLoaded {
+            Section {
                 if reviewBackend == "codex_desktop" {
                     desktopInheritedConfig
                 } else if reviewBackend == "pi_desktop" {
@@ -2668,13 +2755,9 @@ struct SettingsView: View {
                         reviewCustomEditors
                     }
                 }
-            } else if !reviewLoading && reviewError == nil {
-                Text("尚未读取 Review 配置")
-                    .font(.kpBody)
-                    .foregroundStyle(Color.kpSecondary)
-            }
-        } footer: {
-            if reviewLoaded {
+            } header: {
+                Text("评审参数")
+            } footer: {
                 Text("仅影响新建 Review 请求（新控制轮），不改运行中进程。")
                     .font(.kpLabel)
                     .foregroundStyle(Color.kpSecondary)
@@ -2984,13 +3067,53 @@ struct SettingsView: View {
         }
     }
 
+    private enum AdvancedGroup: String, CaseIterable {
+        case updates = "软件更新"
+        case scheduler = "后台与引擎"
+        case worktrees = "工作树"
+        case diagnostics = "诊断与数据"
+    }
+
+    private var advancedPage: some View {
+        ScrollViewReader { proxy in
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: Spacing.l) {
+                    Image(systemName: "arrow.down.to.line")
+                        .foregroundStyle(Color.kpSecondary).accessibilityHidden(true)
+                    ForEach(AdvancedGroup.allCases, id: \.self) { group in
+                        Button(group.rawValue) { proxy.scrollTo(group, anchor: .top) }
+                            .accessibilityLabel("前往" + group.rawValue)
+                    }
+                }
+                .font(.kpLabel)
+                .buttonStyle(.link)
+                .padding(.horizontal, Spacing.l)
+                .padding(.bottom, Spacing.s)
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Spacing.xl) {
+                        SettingsPanel(AdvancedGroup.updates.rawValue, systemImage: "arrow.down.app") {
+                            SoftwareUpdateSection()
+                        }
+                        .id(AdvancedGroup.updates)
+                        schedulerSection.id(AdvancedGroup.scheduler)
+                        worktreeSection.id(AdvancedGroup.worktrees)
+                        diagnosticsDataSection.id(AdvancedGroup.diagnostics)
+                    }
+                    .padding(Spacing.l)
+                }
+            }
+        }
+    }
+
     // MARK: 执行端调度（§5.19，v1.6：App 内置调度器）
 
     private var schedulerSection: some View {
         let headline = model.executorScheduler?.automationHeadline
-        return Section("后台与引擎") {
+        return SettingsPanel(AdvancedGroup.scheduler.rawValue, systemImage: "gearshape.2") {
             Toggle(isOn: Binding(get: { model.loginItemEnabled }, set: { model.setLoginItemEnabled($0) })) {
                 SettingsRowLabel(title: "开机启动 KaneoPilot")
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             if model.loginItemNeedsApproval {
                 Label {
@@ -3000,10 +3123,12 @@ struct SettingsView: View {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.kpOrange)
                 }
             }
+            ListRule()
             Toggle(isOn: $executorEnabled) {
                 SettingsRowLabel(
                     title: "启用本机引擎",
                     detail: "App 监督自动调度引擎，按各项目的自动处理策略推进任务。关闭窗口后仍在菜单栏运行；退出 App 后停止。")
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .onChange(of: executorEnabled) { _, value in model.executorScheduler?.setEnabled(value) }
             // 步进后 0.6 秒内无新操作才提交（commitMaxActiveTasks）；没有单独的保存按钮。
@@ -3013,6 +3138,7 @@ struct SettingsView: View {
                 }
                 .accessibilityLabel("全局在途上限")
                 .accessibilityValue("\(maxActiveTasks)")
+                .disabled(!backgroundSeeded)
                 .onChange(of: maxActiveTasks) { _, value in scheduleMaxActiveCommit(value) }
             } label: {
                 SettingsRowLabel(title: "全局在途上限", detail: "同时推进的任务数上限（1–5）；步进后即时生效。")
@@ -3021,6 +3147,7 @@ struct SettingsView: View {
                 SettingsNotice(text: error, icon: "xmark.circle.fill", tone: Color.kpRed)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            ListRule()
             // 状态行：状态词与侧栏、菜单栏同源；说明是最近一次接收的摘要，「检查状态」在右。
             SettingsRow(headline?.text ?? "尚未读取引擎状态", detail: intakeSummaryText,
                         status: headline?.tone.color ?? Color.kpGray) {
@@ -3216,28 +3343,27 @@ struct SettingsView: View {
     // MARK: 工作树（KP-WT01）
 
     private var worktreeSection: some View {
-        Section("工作树") {
-            LabeledContent {
-                HStack(spacing: Spacing.s) {
-                    Text(worktreeRoot.isEmpty ? "读取中…" : worktreeRoot)
-                        .font(.kpBody)
-                        .foregroundStyle(Color.kpSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+        SettingsPanel(AdvancedGroup.worktrees.rawValue, systemImage: "folder") {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text("工作树位置").font(.kpBody.weight(.semibold))
+                    Text(verbatim: worktreeRoot.isEmpty ? (model.worktreeConfigError == nil ? "读取中…" : "未读取") : worktreeRoot)
+                        .font(.kpLabel.monospaced()).foregroundStyle(Color.kpSecondary)
                         .textSelection(.enabled)
-                    Button("更改…") { beginWorktreeRelocate() }
-                        .disabled(worktreeRelocating || worktreeRoot.isEmpty)
+                    Text("各阶段使用独立工作树，更改位置需要先停止本机引擎。").font(.kpLabel).foregroundStyle(Color.kpSecondary)
                 }
-            } label: {
-                SettingsRowLabel(title: "工作树位置",
-                                 detail: "规划、评审与执行都在各自的任务工作树中运行；更改位置需要先停止本机引擎。")
+                Spacer(minLength: Spacing.s)
+                Button("更改…") { beginWorktreeRelocate() }
+                    .disabled(worktreeRoot.isEmpty)
             }
+            ListRule()
             LabeledContent {
                 Stepper(value: $worktreeRetentionDays, in: 1...90) {
                     Text("\(worktreeRetentionDays) 天").font(.kpBody).monospacedDigit()
                 }
                 .accessibilityLabel("完成后保留天数")
                 .accessibilityValue("\(worktreeRetentionDays)")
+                .disabled(!worktreeSeeded)
                 .onChange(of: worktreeRetentionDays) { _, value in scheduleWorktreeRetention(value) }
             } label: {
                 SettingsRowLabel(title: "完成后保留天数",
@@ -3253,6 +3379,7 @@ struct SettingsView: View {
                 }
                 .accessibilityLabel("规划与评审并发上限")
                 .accessibilityValue("\(worktreeConcurrency)")
+                .disabled(!worktreeSeeded)
                 .onChange(of: worktreeConcurrency) { _, value in scheduleWorktreeConcurrency(value) }
             } label: {
                 SettingsRowLabel(title: "规划/评审并发上限",
@@ -3263,11 +3390,12 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let config = model.worktreeConfig {
-                Text(worktreeSummary(config))
+                Text((model.worktreeConfigError == nil ? "" : "上次读取 · ") + worktreeSummary(config))
                     .font(.kpLabel)
                     .foregroundStyle(Color.kpSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if let error = model.worktreeConfigError {
+            }
+            if let error = model.worktreeConfigError {
                 SettingsNotice(text: error, icon: "xmark.circle.fill", tone: Color.kpRed)
                     .fixedSize(horizontal: false, vertical: true)
                 Button("重试读取工作树配置") {
@@ -3275,19 +3403,20 @@ struct SettingsView: View {
                 }
                 .font(.kpLabel)
             }
-            Text("规划、评审与执行在各自的任务工作树中运行；任务完成满保留天数后归档并删除阶段树，保留摘要。")
-                .font(.kpSmall)
-                .foregroundStyle(Color.kpSecondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .task {
             await model.loadWorktreeConfig(measure: true)
         }
-        .onChange(of: model.worktreeConfig) { _, config in
+        .onChange(of: model.worktreeConfig, initial: true) { _, config in
             seedWorktree(from: config)
         }
         .sheet(isPresented: $showWorktreeRelocate) {
-            worktreeRelocateSheet
+            WorktreeRelocateSheet(source: worktreeRoot,
+                                  preview: { try await model.previewWorktreeRelocate(destination: $0, backupDir: worktreeBackupDir, operationId: $1) },
+                                  confirm: { destination, operation, audit in
+                                      _ = try await model.confirmWorktreeRelocate(destination: destination, backupDir: worktreeBackupDir,
+                                                                                 operationId: operation, expectedAuditSha256: audit)
+                                  }, onClose: { showWorktreeRelocate = false })
         }
     }
 
@@ -3347,10 +3476,6 @@ struct SettingsView: View {
     }
 
     private func beginWorktreeRelocate() {
-        worktreeDestination = ""
-        worktreeRelocatePreview = nil
-        worktreeRelocateError = nil
-        worktreeOperationId = UUID().uuidString
         worktreeBackupDir = defaultWorktreeBackupDir()
         showWorktreeRelocate = true
     }
@@ -3367,120 +3492,8 @@ struct SettingsView: View {
             .path
     }
 
-    private var worktreeRelocateSheet: some View {
-        VStack(alignment: .leading, spacing: Spacing.m) {
-            Text("更改工作树位置").font(.kpSection)
-            Text("当前：\(worktreeRoot)")
-                .font(.kpLabel)
-                .foregroundStyle(Color.kpSecondary)
-                .textSelection(.enabled)
-                .lineLimit(2)
-            Text("迁移会移动整个工作树根目录；预览列出受影响的任务与阻断原因。迁移前必须停止本机引擎。")
-                .font(.kpSmall)
-                .foregroundStyle(Color.kpSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: Spacing.s) {
-                TextField("新位置（绝对路径，目录不能已存在）", text: $worktreeDestination)
-                    .textFieldStyle(.roundedBorder)
-                Button("选择…") { pickWorktreeDestination() }
-            }
-            if let preview = worktreeRelocatePreview {
-                Text(preview.statusText)
-                    .font(.kpLabel)
-                    .foregroundStyle(preview.isReady ? Color.kpSecondary : Color.kpRed)
-                ForEach(preview.moves ?? []) { move in
-                    Text("• \(move.taskId)：\(move.from ?? "") → \(move.to ?? "")")
-                        .font(.kpSmall)
-                        .foregroundStyle(Color.kpSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                ForEach(preview.blockers ?? []) { blocker in
-                    Label {
-                        Text(blocker.detail ?? blocker.code)
-                            .font(.kpLabel)
-                            .foregroundStyle(Color.primary)
-                    } icon: {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(Color.kpOrange)
-                    }
-                }
-            }
-            if let error = worktreeRelocateError {
-                SettingsNotice(text: error, icon: "xmark.circle.fill", tone: Color.kpRed)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-            HStack(spacing: Spacing.m) {
-                Button("取消") { showWorktreeRelocate = false }
-                Spacer()
-                Button(worktreeRelocating ? "处理中…" : "预览") { previewWorktreeRelocate() }
-                    .disabled(worktreeRelocating || worktreeDestination.isEmpty)
-                Button("确认迁移") { confirmWorktreeRelocate() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(worktreeRelocating
-                              || worktreeDestination.isEmpty
-                              || worktreeRelocatePreview?.isReady != true
-                              || worktreeRelocatePreview?.auditSha256 == nil)
-            }
-        }
-        .padding(Spacing.l)
-        .frame(width: 560, height: 420)
-    }
-
-    private func pickWorktreeDestination() {
-        let panel = NSSavePanel()
-        panel.title = "选择新的工作树根位置"
-        panel.prompt = "选择"
-        panel.nameFieldStringValue = "managed-worktrees"
-        panel.canCreateDirectories = true
-        if panel.runModal() == .OK, let url = panel.url {
-            worktreeDestination = url.path
-        }
-    }
-
-    private func previewWorktreeRelocate() {
-        worktreeRelocateError = nil
-        worktreeRelocating = true
-        let destination = worktreeDestination
-        let backup = worktreeBackupDir
-        let operation = worktreeOperationId
-        Task {
-            defer { worktreeRelocating = false }
-            do {
-                worktreeRelocatePreview = try await model.previewWorktreeRelocate(
-                    destination: destination, backupDir: backup, operationId: operation)
-            } catch {
-                worktreeRelocateError = error.coreMessage
-                worktreeRelocatePreview = nil
-            }
-        }
-    }
-
-    private func confirmWorktreeRelocate() {
-        guard let preview = worktreeRelocatePreview, let audit = preview.auditSha256 else { return }
-        worktreeRelocateError = nil
-        worktreeRelocating = true
-        let destination = worktreeDestination
-        let backup = worktreeBackupDir
-        let operation = worktreeOperationId
-        Task {
-            defer { worktreeRelocating = false }
-            do {
-                _ = try await model.confirmWorktreeRelocate(
-                    destination: destination, backupDir: backup, operationId: operation,
-                    expectedAuditSha256: audit)
-                showWorktreeRelocate = false
-                await model.loadWorktreeConfig(measure: true)
-            } catch {
-                worktreeRelocateError = error.coreMessage
-            }
-        }
-    }
-
     private var diagnosticsDataSection: some View {
-        Section {
-            AutoArchiveSettingsRows()
+        SettingsPanel(AdvancedGroup.diagnostics.rawValue, systemImage: "stethoscope") {
             SettingsRow("复制诊断信息", detail: "引擎状态、检查结果、路径、调度参数与迁移记录；不含凭据。") {
                 Button("复制") { Task { await copyDiagnostics() } }
                     .accessibilityLabel("复制诊断信息")
@@ -3490,13 +3503,12 @@ struct SettingsView: View {
                     .disabled(dataDirectoryPath == nil)
                     .accessibilityLabel("打开数据目录")
             }
-        } header: {
-            Text("诊断与数据")
-        } footer: {
             Text("完整诊断与在线诊断在「总览 · 环境」；暂停或恢复自动推进用侧栏底部或菜单栏。")
                 .font(.kpLabel)
                 .foregroundStyle(Color.kpSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+            ListRule()
+            AutoArchiveSettingsRows()
         }
     }
 
@@ -3581,6 +3593,48 @@ struct SettingsView: View {
     }
 }
 
+/// 连接和高级页共用运行端首页的分组底色与标题层级。
+struct SettingsPanel<Content: View>: View {
+    let title: String
+    let systemImage: String
+    let fillHeight: Bool
+    let content: Content
+
+    init(_ title: String, systemImage: String, fillHeight: Bool = false, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.systemImage = systemImage
+        self.fillHeight = fillHeight
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Label {
+                Text(title).font(.kpSection)
+            } icon: {
+                Image(systemName: systemImage).foregroundStyle(Color.kpBlue)
+            }
+            .accessibilityAddTraits(.isHeader)
+            GroupPanel(background: Color.kpWindow.opacity(0.5), border: Color.kpSeparator.opacity(0.6)) {
+                VStack(alignment: .leading, spacing: Spacing.m) { content }
+                    .frame(maxWidth: .infinity, maxHeight: fillHeight ? .infinity : nil, alignment: .topLeading)
+                    .padding(Spacing.l)
+            }
+            .labeledContentStyle(SettingsPanelRowStyle())
+            .toggleStyle(.switch)
+        }
+    }
+}
+
+private struct SettingsPanelRowStyle: LabeledContentStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: Spacing.m) {
+            configuration.label.frame(maxWidth: .infinity, alignment: .leading)
+            configuration.content
+        }
+    }
+}
+
 /// 设置页只读行（Form 内）：左标签、右值（13pt，可选中），缺失值显示「—」（plan §S10 共用规则 3）。
 private struct SettingsFieldRow: View {
     let label: String
@@ -3634,6 +3688,7 @@ private struct AutoArchiveSettingsRows: View {
             )) {
                 SettingsRowLabel(title: "已完成任务自动归档",
                                  detail: "全局生效；到期后移入归档，保留记录，可随时恢复。")
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .disabled(controlsDisabled || (config?.enabled != true && days == nil))
 
@@ -3841,6 +3896,7 @@ extension SettingsRow where Trailing == EmptyView {
 /// 保存期间两个按钮都不可用，防止重复提交。保存失败的核心原文显示在脚栏上方，可选中。
 struct SettingsEditSheet<Content: View>: View {
     let title: String
+    let icon: String
     let scope: String
     let cancelAccessibilityLabel: String
     let saveAccessibilityLabel: String
@@ -3856,6 +3912,7 @@ struct SettingsEditSheet<Content: View>: View {
     private let content: Content
 
     init(title: String,
+         icon: String,
          scope: String,
          cancelAccessibilityLabel: String,
          saveAccessibilityLabel: String,
@@ -3870,6 +3927,7 @@ struct SettingsEditSheet<Content: View>: View {
          onSave: @escaping () -> Void,
          @ViewBuilder content: () -> Content) {
         self.title = title
+        self.icon = icon
         self.scope = scope
         self.cancelAccessibilityLabel = cancelAccessibilityLabel
         self.saveAccessibilityLabel = saveAccessibilityLabel
@@ -3887,7 +3945,7 @@ struct SettingsEditSheet<Content: View>: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SettingsSheetHeader(title: title, scope: scope)
+            SettingsSheetHeader(title: title, icon: icon, scope: scope)
             Form { content }
                 .formStyle(.grouped)
                 .scrollContentBackground(.hidden)
@@ -3939,25 +3997,184 @@ struct SettingsEditSheet<Content: View>: View {
     }
 }
 
+struct WorktreeRelocateSheet: View {
+    let source: String
+    let preview: (String, String) async throws -> WorktreeRelocatePreviewDTO
+    let confirm: (String, String, String) async throws -> Void
+    let onClose: () -> Void
+
+    private struct CheckedLocation {
+        let source: String
+        let destination: String
+        let operation: String
+        let result: WorktreeRelocatePreviewDTO
+    }
+
+    @State private var destination = ""
+    @State private var pending: String?
+    @State private var checked: CheckedLocation?
+    @State private var committing = false
+    @State private var error: String?
+    @State private var showMoves = false
+
+    private var ready: CheckedLocation? {
+        guard let checked, checked.destination == destination, checked.source == source,
+              checked.result.isReady, checked.result.dryRun != false,
+              checked.result.auditSha256?.isEmpty == false else { return nil }
+        return checked
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SettingsSheetHeader(title: "更改工作树位置", icon: "folder",
+                                scope: "迁移整个工作树根目录。预览和迁移前请先停止本机引擎。")
+            ScrollView {
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        Text("当前位置").font(.kpLabel).foregroundStyle(.secondary)
+                        Text(verbatim: source).font(.kpLabel.monospaced()).textSelection(.enabled)
+                    }
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        Text("新位置").font(.kpSection)
+                        HStack {
+                            TextField("填写尚未创建的目录绝对路径", text: Binding(get: { destination }, set: setDestination))
+                                .textFieldStyle(.roundedBorder).accessibilityLabel("新位置")
+                            Button("选择…") { pickDestination() }
+                        }.disabled(committing)
+                    }
+                    if let error {
+                        SettingsNotice(text: error, icon: "exclamationmark.circle.fill", tone: .kpOrange)
+                    }
+                    if let checked { previewContent(checked.result) }
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(Spacing.l)
+            }
+            Divider()
+            HStack {
+                Button("取消") { pending = nil; onClose() }.keyboardShortcut(.cancelAction).disabled(committing)
+                Spacer()
+                if pending != nil || committing { ProgressView().controlSize(.small) }
+                Button("预览") { readPreview() }
+                    .disabled(!destination.hasPrefix("/") || pending != nil || committing)
+                Button(committing ? "正在迁移…" : "确认迁移") { move() }
+                    .buttonStyle(.borderedProminent).disabled(ready == nil || committing || pending != nil)
+            }.padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
+        }.frame(width: 580, height: 440)
+            .interactiveDismissDisabled(committing)
+            .onChange(of: source) { if !committing { invalidate() } }
+            .onDisappear { pending = nil }
+    }
+
+    @ViewBuilder private func previewContent(_ result: WorktreeRelocatePreviewDTO) -> some View {
+        GroupPanel {
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                Label(ready != nil ? "可以迁移" : "暂不可迁移", systemImage: ready != nil ? "checkmark.circle" : "exclamationmark.circle")
+                    .font(.kpSection).foregroundStyle(ready != nil ? Color.kpGreen : Color.kpOrange)
+                if result.isReady && ready == nil {
+                    Text("未取得有效预览凭据，请重新预览。").font(.kpLabel)
+                }
+                ForEach(result.blockers ?? []) { blocker in
+                    Text(blocker.detail ?? blocker.code).font(.kpLabel).textSelection(.enabled)
+                }
+                let counts = [result.worktreeCount.map { "\($0) 个工作树" }, result.repositoryCount.map { "\($0) 个仓库" },
+                              result.poolSlotCount.map { "\($0) 个槽位" }, result.currentLeaseCount.map { "\($0) 份租约" }].compactMap { $0 }
+                if !counts.isEmpty { Text(counts.joined(separator: " · ")).font(.kpBody) }
+                if let backup = result.backupDir {
+                    Text("备份位置").font(.kpLabel).foregroundStyle(.secondary)
+                    Text(verbatim: backup).font(.kpLabel.monospaced()).textSelection(.enabled)
+                }
+            }.padding(Spacing.m)
+        }
+        if let moves = result.moves, !moves.isEmpty {
+            DisclosureGroup("移动清单", isExpanded: $showMoves) {
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    ForEach(moves) { item in
+                        VStack(alignment: .leading, spacing: Spacing.xs) {
+                            Text(item.taskId).font(.kpBody.weight(.medium))
+                            if let from = item.from { Text("从 \(from)") }
+                            if let to = item.to { Text("到 \(to)") }
+                        }.font(.kpLabel).textSelection(.enabled)
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.disclosureGroupStyle(DetailDisclosureStyle(systemImage: "list.bullet", itemCount: moves.count))
+        }
+    }
+
+    private func invalidate() {
+        pending = nil
+        checked = nil
+        error = nil
+        showMoves = false
+    }
+
+    private func setDestination(_ value: String) {
+        guard !committing, destination != value else { return }
+        destination = value
+        invalidate()
+    }
+
+    private func pickDestination() {
+        let panel = NSSavePanel()
+        panel.title = "选择新的工作树根位置"
+        panel.prompt = "选择"
+        panel.nameFieldStringValue = "managed-worktrees"
+        panel.canCreateDirectories = true
+        if panel.runModal() == .OK, let url = panel.url { setDestination(url.path) }
+    }
+
+    private func readPreview() {
+        invalidate()
+        let operation = UUID().uuidString, path = destination, original = source
+        pending = operation
+        Task {
+            defer { if pending == operation { pending = nil } }
+            do {
+                let result = try await preview(path, operation)
+                guard pending == operation else { return }
+                checked = CheckedLocation(source: original, destination: path, operation: operation, result: result)
+            } catch {
+                if pending == operation { self.error = error.coreMessage }
+            }
+        }
+    }
+
+    private func move() {
+        guard !committing, pending == nil, let ready, let audit = ready.result.auditSha256 else { return }
+        committing = true
+        error = nil
+        Task {
+            defer { committing = false }
+            do {
+                try await confirm(ready.destination, ready.operation, audit)
+                onClose()
+            } catch {
+                self.error = error.coreMessage
+            }
+        }
+    }
+}
+
 /// 面板页眉：标题（15pt，heading）加一句范围说明。
 struct SettingsSheetHeader: View {
     let title: String
+    let icon: String
     let scope: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.kpSection)
-                .accessibilityAddTraits(.isHeader)
-            Text(scope)
-                .font(.kpLabel)
-                .foregroundStyle(Color.kpSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+        HStack(spacing: Spacing.m) {
+            Image(systemName: icon).font(.kpTitle).foregroundStyle(Color.accentColor)
+                .frame(width: 40, height: 40)
+                .background(Color.accentColor.opacity(0.09), in: RoundedRectangle(cornerRadius: Radius.group))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                Text(title).font(.kpTitle).accessibilityAddTraits(.isHeader)
+                Text(scope).font(.kpLabel).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, Spacing.xl)
-        .padding(.top, Spacing.l)
-        .padding(.bottom, Spacing.xs)
+        .padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.m)
+        .background(Color.kpWindow)
+        .overlay(alignment: .bottom) { ListRule() }
     }
 }
 
@@ -3983,7 +4200,7 @@ struct SettingsManageSheet<Content: View>: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SettingsSheetHeader(title: title, scope: scope)
+            SettingsSheetHeader(title: title, icon: "calendar.badge.clock", scope: scope)
             Form { content }
                 .formStyle(.grouped)
                 .scrollContentBackground(.hidden)
@@ -4004,54 +4221,121 @@ struct SettingsManageSheet<Content: View>: View {
     }
 }
 
-/// 运行端页的角色行（ui-spec §4.9）：左边角色名加一行摘要，右边是就绪状态（令牌色圆点加文字，
-/// 不只靠颜色）与「编辑…」；读取中显示进度，读取失败时摘要下加核心原文、右侧多一个「重试」。
-struct RoleSummaryRow: View {
+private struct RoleConfigurationSummary {
+    let backend: String
+    let details: String
+    var context: String? = nil
+}
+
+/// 首页仅展示已读取的配置；编辑与重试分别沿用各角色自己的入口。
+private struct RoleSummaryCard: View {
+    let compact: Bool
     let role: String
-    let summary: String
+    let systemImage: String
+    let summary: RoleConfigurationSummary?
     let readiness: String
     let tone: Color
     var loading = false
     var loadError: String? = nil
     var retryAccessibilityLabel = "重试读取"
-    var onRetry: (() -> Void)? = nil
+    let onRetry: () -> Void
     let onEdit: () -> Void
 
     var body: some View {
-        LabeledContent {
-            HStack(spacing: Spacing.m) {
-                if loading {
-                    ProgressView().controlSize(.small)
+        GroupPanel(background: Color.kpWindow.opacity(0.5), border: Color.kpSeparator.opacity(0.6)) {
+            if compact {
+                HStack(alignment: .center, spacing: Spacing.m) {
+                    roleLabel
+                    configuration.frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .trailing, spacing: Spacing.xs) {
+                        status
+                        actions
+                    }
                 }
-                HStack(spacing: Spacing.s) {
-                    Circle().fill(tone).frame(width: 8, height: 8).accessibilityHidden(true)
-                    Text(readiness)
-                        .font(.kpLabel)
-                        .foregroundStyle(Color.kpSecondary)
+                .padding(Spacing.m)
+            } else {
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    roleLabel
+                    configuration
                 }
-                .accessibilityElement(children: .combine)
-                if loadError != nil, let onRetry {
-                    Button("重试", action: onRetry)
-                        .disabled(loading)
-                        .accessibilityLabel(retryAccessibilityLabel)
+                .padding(Spacing.m)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                ListRule()
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: Spacing.s) {
+                        status.fixedSize()
+                        Spacer(minLength: 0)
+                        actions
+                    }
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        status
+                        actions
+                    }
                 }
-                Button("编辑…", action: onEdit)
-                    .accessibilityLabel("编辑\(role)配置")
+                .padding(.horizontal, Spacing.m)
+                .padding(.vertical, Spacing.s)
             }
-        } label: {
-            SettingsRowLabel(title: role, detail: detailText, selectable: true)
         }
     }
 
-    private var detailText: String {
-        var lines: [String] = []
-        if !summary.isEmpty { lines.append(summary) }
-        if let loadError, !loadError.isEmpty {
-            lines.append("读取失败：\(loadError)")
-        } else if loading && summary.isEmpty {
-            lines.append("正在读取…")
+    private var roleLabel: some View {
+        HStack(spacing: Spacing.s) {
+            Image(systemName: systemImage).font(.kpBody.weight(.semibold)).foregroundStyle(Color.kpBlue)
+                .frame(width: 28, height: 28)
+                .background(Color.kpBlue.opacity(0.10), in: RoundedRectangle(cornerRadius: Radius.control))
+                .accessibilityHidden(true)
+            Text(role).font(.kpBody.weight(.semibold))
         }
-        return lines.joined(separator: "\n")
+        .fixedSize()
+    }
+
+    private var configuration: some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            if let summary {
+                if loadError != nil {
+                    Text("上次读取").font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                }
+                Text(summary.backend).font(compact ? .kpSection : .kpTitle)
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text(summary.details)
+                    if let context = summary.context, !context.isEmpty {
+                        Text(context)
+                    }
+                }
+                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+            } else if !loading && loadError == nil {
+                Text("尚未读取配置").font(.kpLabel).foregroundStyle(Color.kpSecondary)
+            }
+            if let loadError, !loadError.isEmpty {
+                Text(loadError).font(.kpLabel).foregroundStyle(Color.kpRed)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+    }
+
+    private var status: some View {
+        HStack(spacing: Spacing.xs) {
+            if loading {
+                ProgressView().controlSize(.small)
+                Text("读取中")
+            } else {
+                Circle().fill(loadError == nil ? tone : Color.kpRed).frame(width: 8, height: 8)
+                    .accessibilityHidden(true)
+                Text(loadError == nil ? readiness : "读取失败")
+            }
+        }
+        .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var actions: some View {
+        HStack(spacing: Spacing.s) {
+            if loadError != nil {
+                Button("重试", action: onRetry).disabled(loading).accessibilityLabel(retryAccessibilityLabel)
+            }
+            Button("编辑…", action: onEdit).accessibilityLabel("编辑\(role)配置")
+        }
+        .controlSize(.small).fixedSize()
     }
 }
 

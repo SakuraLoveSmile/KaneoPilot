@@ -142,5 +142,6 @@ struct KaneoPilotApp: App {
             }
         }
         MenuBarExtra("需要你 \(model.attentionCount)", systemImage: "arrow.triangle.branch") { MenuBarView().environmentObject(model) }
+            .menuBarExtraStyle(.window)
     }
 }

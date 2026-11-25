@@ -149,7 +149,8 @@ def refresh_notice(conn, task, now, *, reader=None):
     notice = _notice(state, reason, delivery, now)
     with db.write_txn(conn):
         core.update_delivery(conn, task, now, auto_merge=notice)
-    return notice
+    gate_state = {'blocked': 'blocked', 'waiting_checks': 'waiting'}[state] if blocked else 'ready'
+    return dict(notice, gate_state=gate_state)
 
 
 def _identity(task, delivery, repo):

@@ -714,7 +714,7 @@ def cmd_recheck(ctx, payload: dict) -> dict:
             notice = pr_auto_merge.refresh_notice(conn, task, ctx.now_iso)
             if notice:
                 checks.append({"name": "pr_merge_gate", "ok": True,
-                               "detail": notice["reason"]})
+                               "detail": notice["reason"], "gate_state": notice["gate_state"]})
         except (gh_client.GhError, git_delivery.GitDeliveryError) as exc:
             checks.append({"name": "pr_merge_gate", "ok": False, "detail": str(exc)})
 

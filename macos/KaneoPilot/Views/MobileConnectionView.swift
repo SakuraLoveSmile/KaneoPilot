@@ -24,48 +24,70 @@ struct MobileConnectionView: View {
 
     /// 状态行标题（状态词与原来一致）。
     private var statusText: String {
-        manager.starting ? "正在启动…" : manager.running
+        if manager.configuration == nil { return manager.error == nil ? "正在读取状态…" : "状态未读取" }
+        return manager.starting ? "正在启动…" : manager.running
             ? (manager.isSimulation ? "运行中（隔离模拟，无网络监听）" : "运行中")
             : (enabled ? "已启用，服务未运行" : "已关闭")
     }
 
-    /// 按行拆开（ui-spec §4.9 行结构）：状态、本机地址、操作、配对码、已配对设备各自一行。
+    private var bindingControls: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: Spacing.l) {
+                addressPicker
+                portField
+            }
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                addressPicker
+                portField
+            }
+        }
+        .disabled(enabled || manager.busy || manager.starting || manager.configuration == nil)
+    }
+
+    private var addressPicker: some View {
+        Picker("本机地址", selection: $host) {
+            Text("请选择地址").tag("")
+            ForEach(addresses) { address in
+                Text("\(address.name) · \(address.address)").tag(address.address)
+            }
+            if !host.isEmpty, !addresses.contains(where: { $0.address == host }) {
+                Text("\(host)（当前不可用）").tag(host)
+            }
+        }
+    }
+
+    private var portField: some View {
+        HStack(spacing: Spacing.s) {
+            Text("端口").font(.kpBody)
+            TextField("端口", text: $port)
+                .labelsHidden().textFieldStyle(.roundedBorder)
+                .frame(width: 80).accessibilityLabel("手机连接端口")
+        }
+    }
+
     var body: some View {
-        Section("手机连接") {
-            SettingsRow(statusText,
-                        detail: "通过局域网或已有 VPN 连接安卓手机。Mac 保留数据和执行器；关闭窗口后仍可连接，退出 App 后停止。",
-                        status: manager.running ? Color.kpGreen : Color.kpGray) {
-                HStack(spacing: Spacing.s) {
-                    if manager.starting { ProgressView().controlSize(.small) }
-                    Button("刷新") { Task { await manager.refresh(); seedDraft() } }
-                        .disabled(manager.busy)
-                        .accessibilityLabel("刷新手机连接状态")
-                }
-            }
-            LabeledContent {
-                HStack(spacing: Spacing.m) {
-                    Picker("本机地址", selection: $host) {
-                        Text("请选择地址").tag("")
-                        ForEach(addresses) { address in
-                            Text("\(address.name) · \(address.address)").tag(address.address)
-                        }
-                        if !host.isEmpty, !addresses.contains(where: { $0.address == host }) {
-                            Text("\(host)（当前不可用）").tag(host)
-                        }
+        SettingsPanel("手机连接", systemImage: "iphone") {
+            HStack(spacing: Spacing.m) {
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    HStack(spacing: Spacing.s) {
+                        Circle().fill(manager.running ? Color.kpGreen : Color.kpGray)
+                            .frame(width: 8, height: 8).accessibilityHidden(true)
+                        Text(statusText).font(.kpSection)
                     }
-                    .labelsHidden()
-                    .fixedSize()
-                    Text("端口").font(.kpLabel).foregroundStyle(Color.kpSecondary)
-                    TextField("端口", text: $port)
-                        .labelsHidden()
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 80)
-                        .accessibilityLabel("手机连接端口")
+                    if let endpoint = manager.configuration?.endpoint {
+                        Text(verbatim: endpoint).font(.kpLabel.monospaced()).textSelection(.enabled)
+                    }
+                    Text("安卓手机通过局域网或已有 VPN 连接。数据与执行器留在 Mac，关闭窗口后仍可连接，退出 App 后停止。")
+                        .font(.kpLabel).foregroundStyle(Color.kpSecondary)
                 }
-                .disabled(enabled || manager.busy || manager.starting)
-            } label: {
-                SettingsRowLabel(title: "本机地址", detail: manager.configuration?.endpoint, selectable: true)
+                Spacer(minLength: Spacing.s)
+                if manager.starting { ProgressView().controlSize(.small) }
+                Button("刷新") { Task { await manager.refresh(); seedDraft() } }
+                    .disabled(manager.busy)
+                    .accessibilityLabel("刷新手机连接状态")
             }
+            ListRule()
+            if !enabled { bindingControls }
             if manager.configuration != nil && addresses.isEmpty {
                 Text("未发现可用的本机 IPv4 地址，请先连接局域网或 VPN 后刷新。")
                     .font(.kpLabel).foregroundStyle(Color.kpSecondary)
@@ -97,15 +119,12 @@ struct MobileConnectionView: View {
                     }
                     .accessibilityLabel("生成手机配对二维码")
                 }
-                if enabled {
-                    Spacer(minLength: 0)
-                    Text("更换地址或端口前请先停用。地址变化将使旧设备失效，需要重新配对。")
-                        .font(.kpLabel).foregroundStyle(Color.kpSecondary)
-                        .multilineTextAlignment(.trailing)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
             .disabled(manager.busy || manager.starting)
+            if enabled {
+                Text("更换地址或端口前请先停用。地址变化将使旧设备失效，需要重新配对。")
+                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+            }
             if let error = manager.error {
                 SettingsNotice(text: error, icon: "exclamationmark.circle.fill", tone: Color.kpRed)
                     .fixedSize(horizontal: false, vertical: true)
@@ -130,18 +149,25 @@ struct MobileConnectionView: View {
                     }
                 }
             }
-            let devices = manager.configuration?.devices.filter { $0.revokedAt == nil } ?? []
-            if devices.isEmpty {
-                SettingsRow("已配对设备", detail: "尚无已配对设备")
+            ListRule()
+            let devices = manager.configuration?.devices.filter { $0.revokedAt == nil }
+            HStack(spacing: Spacing.s) {
+                Text("已配对设备").font(.kpBody.weight(.semibold))
+                Spacer()
+                Text(devices.map { $0.isEmpty ? "尚无已配对设备" : "\($0.count) 台" } ?? "未读取")
+                    .font(.kpLabel).foregroundStyle(Color.kpSecondary)
             }
-            ForEach(devices) { device in
-                SettingsRow(device.name, detail: "配对时间：\(device.createdAt)") {
+            ForEach(devices ?? []) { device in
+                HStack(spacing: Spacing.m) {
+                    SettingsRowLabel(title: device.name, detail: "配对时间：\(device.createdAt)")
+                    Spacer(minLength: Spacing.s)
                     Button("撤销设备") { Task { await manager.revoke(device) } }
                         .disabled(manager.busy)
                         .accessibilityLabel("撤销设备 \(device.name)")
                 }
             }
         }
+        .onChange(of: manager.configuration != nil, initial: true) { _, _ in seedDraft() }
         .confirmationDialog("更换地址将使已配对设备失效，需要重新配对。", isPresented: $changingAddress) {
             Button("更换地址并启用") { enable() }
             Button("取消", role: .cancel) { }

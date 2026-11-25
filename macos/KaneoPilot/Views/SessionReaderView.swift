@@ -23,8 +23,8 @@ struct SessionReaderView: View {
 
     let taskID: String?
     let preferredRunID: String?
-    let showsTaskTitle: Bool
-    let fallbackSessionTitle: String?
+    let sheetTaskTitle: String?
+    let onClose: (() -> Void)?
     /// §4.18：把当前会话摘要上报给执行页复盘头部（轮次、消息数、最近检查）。
     let onDigestChange: ((ExecutionSessionDigest?) -> Void)?
 
@@ -40,12 +40,13 @@ struct SessionReaderView: View {
     @FocusState private var focusedControl: String?
     @State private var availableWidth: CGFloat = 900
     @State private var contentMode: SessionContentMode = .summary
-    init(taskID: String?, preferredRunID: String? = nil, showsTaskTitle: Bool = true, fallbackSessionTitle: String? = nil,
+    init(taskID: String?, preferredRunID: String? = nil, sheetTaskTitle: String? = nil,
+         onClose: (() -> Void)? = nil,
          onDigestChange: ((ExecutionSessionDigest?) -> Void)? = nil) {
         self.taskID = taskID
         self.preferredRunID = preferredRunID
-        self.showsTaskTitle = showsTaskTitle
-        self.fallbackSessionTitle = fallbackSessionTitle
+        self.sheetTaskTitle = sheetTaskTitle
+        self.onClose = onClose
         self.onDigestChange = onDigestChange
         _store = StateObject(wrappedValue: SessionReaderStore(taskID: taskID,
                                                               preferredRunID: preferredRunID))
@@ -69,7 +70,7 @@ struct SessionReaderView: View {
         return ExecutionSessionDigest(
             roundIndex: index + 1,
             roundCount: ordered.count,
-            roundState: runStatus.map { ["finished", "failed"].contains($0) ? "已结束" : "进行中" },
+            roundState: runStatus.map(ExecutionSessionDigest.statusLabel),
             messageCount: selected?.messageCount,
             lastCheckedAt: store.lastStatusCheckedAt ?? selected?.lastCheckedAt)
     }
@@ -87,20 +88,49 @@ struct SessionReaderView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            if let onClose {
+                sheetHeader(onClose: onClose)
+            } else {
+                header
+            }
             Divider()
-            if let failure = store.readFailure {
+            if let failure = store.readFailure, onClose == nil || store.session != nil {
                 SessionBanner(text: "会话读取失败：\(failure)", stale: store.session != nil) {
                     Task { await store.refresh() }
                 }
             }
+            if onClose != nil, contentMode != .status, let reason = store.displayFailureText {
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                    Label(reason, systemImage: "exclamationmark.circle").font(.kpBody)
+                        .foregroundStyle(Color.kpRed).lineLimit(2).help(reason).textSelection(.enabled)
+                    Spacer(minLength: Spacing.s)
+                    Button("查看状态") { contentMode = .status }.controlSize(.small)
+                }
+                .padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.s)
+            }
             Group {
-                switch contentMode {
-                case .status: statusContent
-                case .summary: summaryContent
-                case .raw: messageContent
+                if onClose != nil && store.session == nil {
+                    sheetEmptyState
+                } else {
+                    switch contentMode {
+                    case .status: statusContent
+                    case .summary: summaryContent
+                    case .raw: messageContent
+                    }
                 }
             }.frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+            if onClose != nil && store.session != nil {
+                Divider()
+                HStack(spacing: Spacing.s) {
+                    Text(sessionStateLabel)
+                    if store.session?.isTrashed == true { Label("回收站", systemImage: "trash") }
+                    if store.session?.readOnly == true { Label("只读", systemImage: "eye") }
+                    Spacer(minLength: Spacing.s)
+                    readingStatus
+                }
+                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                .padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.s)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(GeometryReader { geometry in Color.clear.onAppear { availableWidth = geometry.size.width }.onChange(of: geometry.size.width) { _, width in availableWidth = width } })
@@ -210,26 +240,17 @@ struct SessionReaderView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
             HStack(alignment: .top, spacing: Spacing.m) {
-                if showsTaskTitle {
-                    Text(taskTitle).font(.kpTitle).lineLimit(2).textSelection(.enabled)
-                        .help(taskTitle).frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityLabel("任务：\(taskTitle)")
-                } else {
-                    Text(sessionStateLabel).font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                Text(taskTitle).font(.kpTitle).lineLimit(2).textSelection(.enabled)
+                    .help(taskTitle).frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel("任务：\(taskTitle)")
                 VStack(alignment: .trailing, spacing: Spacing.s) {
-                    if showsTaskTitle { Text(sessionStateLabel).font(.kpSmall).foregroundStyle(Color.kpSecondary) }
+                    Text(sessionStateLabel).font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     if store.session?.isTrashed == true { Label("回收站", systemImage: "trash").font(.kpSmall) }
                     if store.session?.readOnly == true { Label("只读", systemImage: "eye").font(.kpSmall) }
                     readingStatus
                 }
                 if store.loading { ProgressView().controlSize(.small).accessibilityLabel("正在读取会话状态") }
-                Button { Task { await store.refresh() } } label: { Label("刷新", systemImage: "arrow.clockwise") }
-                    .labelStyle(.iconOnly).help("重新检查当前会话状态")
-                    .accessibilityLabel("刷新会话").disabled(store.loading)
-                    .focused($focusedControl, equals: "refresh")
-                    .keyboardShortcut(focusedControl == "refresh" && !store.loading ? KeyboardShortcut(.return, modifiers: []) : nil)
+                refreshButton
             }
             if availableWidth >= 840 {
                 HStack(spacing: Spacing.m) { selectors; Spacer(minLength: 0); saveActionButton }
@@ -237,27 +258,140 @@ struct SessionReaderView: View {
                 HStack(spacing: Spacing.s) { selectors; Spacer(minLength: 0) }
                 HStack { Spacer(minLength: 0); saveActionMenu }
             }
-            Picker("会话视图", selection: $contentMode) {
-                ForEach(SessionContentMode.allCases, id: \.self) { mode in
-                    Text(mode.title).tag(mode)
-                }
-            }.pickerStyle(.segmented).labelsHidden().frame(width: 240)
-                .accessibilityLabel("会话视图：摘要、原文或状态")
-                .onChange(of: contentMode) { _, mode in
-                    Task { await store.setStatusOnly(mode == .status) }
-                }
+            modePicker.frame(width: 240)
         }
         .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
     }
 
+    private var refreshButton: some View {
+        Button { Task { await store.refresh() } } label: { Label("刷新", systemImage: "arrow.clockwise") }
+            .labelStyle(.iconOnly).help("重新检查当前会话状态")
+            .accessibilityLabel("刷新会话").disabled(store.loading)
+            .focused($focusedControl, equals: "refresh")
+            .keyboardShortcut(focusedControl == "refresh" && !store.loading ? KeyboardShortcut(.return, modifiers: []) : nil)
+    }
+
+    private var modePicker: some View {
+        Picker("会话视图", selection: $contentMode) {
+            ForEach(SessionContentMode.allCases, id: \.self) { mode in
+                Text(mode.title).tag(mode)
+            }
+        }.pickerStyle(.segmented).labelsHidden()
+            .accessibilityLabel("会话视图：摘要、原文或状态")
+            .onChange(of: contentMode) { _, mode in
+                Task { await store.setStatusOnly(mode == .status) }
+            }
+    }
+
+    private var saveFilter: Binding<String> {
+        Binding(get: { store.saveFilter }, set: { value in Task { await store.setSaveFilter(value) } })
+    }
+
+    private var selectedRun: Binding<String?> {
+        Binding(get: { store.selectedRunID }, set: { value in Task { await store.select(runID: value) } })
+    }
+
+    private var filterOptions: some View {
+        Group {
+            Text("正常会话").tag("active")
+            Text("回收站").tag("trashed")
+        }
+    }
+
+    private func sheetHeader(onClose: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.l) {
+            HStack(spacing: Spacing.m) {
+                Image(systemName: "text.bubble")
+                    .font(.kpSection).foregroundStyle(Color.kpBlue)
+                    .frame(width: 32, height: 32)
+                    .background(Color.kpBlue.opacity(0.08), in: RoundedRectangle(cornerRadius: Radius.group))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text(sheetTaskTitle ?? "执行会话").font(.kpTitle).lineLimit(2)
+                        .textSelection(.enabled).help(sheetTaskTitle ?? "执行会话")
+                    HStack(spacing: Spacing.s) {
+                        if sheetTaskTitle != nil { Text("执行会话") }
+                        if let backend = store.roundDetail?.backend ?? store.session?.backend {
+                            Text(RoleBackend.shortLabel(backend))
+                        }
+                    }.font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                }
+                Spacer(minLength: Spacing.s)
+                if store.loading { ProgressView().controlSize(.small) }
+                refreshButton
+                saveActionMenu.fixedSize().disabled(store.session == nil)
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle").font(.kpTitle)
+                }
+                .buttonStyle(.plain).foregroundStyle(Color.kpSecondary)
+                .accessibilityLabel("关闭执行会话").help("关闭执行会话")
+                .keyboardShortcut(.cancelAction)
+            }
+            HStack(spacing: Spacing.m) {
+                modePicker.fixedSize()
+                Spacer(minLength: Spacing.s)
+                sheetRoundMenu
+            }
+        }
+        .controlSize(.small)
+        .padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.l)
+    }
+
+    @ViewBuilder
+    private var sheetEmptyState: some View {
+        if let reason = store.readFailure {
+            ContentUnavailableView {
+                Label("无法读取会话", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(reason).textSelection(.enabled)
+            } actions: {
+                Button("重试") { Task { await store.refresh() } }.disabled(store.loading)
+            }
+        } else if store.loading {
+            ProgressView("正在读取会话")
+        } else if store.saveFilter == "trashed" {
+            ContentUnavailableView {
+                Label("回收站里没有会话", systemImage: "trash")
+            } actions: {
+                Button("查看正常会话") { Task { await store.setSaveFilter("active") } }
+            }
+        } else {
+            ContentUnavailableView("暂无执行会话", systemImage: "text.bubble")
+        }
+    }
+
+    private var sheetRoundMenu: some View {
+        Menu {
+            Picker("会话范围", selection: saveFilter) { filterOptions }
+                .pickerStyle(.inline)
+            if !store.sessions.isEmpty {
+                Divider()
+                Picker("执行轮次", selection: selectedRun) {
+                    ForEach(store.sessions) { session in
+                        Text("\(TimeFormat.short(session.startedAt)) · \(statusLabel(session, selected: session.runId == store.selectedRunID)) · \(session.runId ?? "—")")
+                            .tag(session.runId)
+                    }
+                }.pickerStyle(.inline)
+            }
+        } label: {
+            let scope = store.saveFilter == "trashed" ? "回收站" : "执行轮次"
+            if let session = store.session ?? store.sessions.first(where: { $0.runId == store.selectedRunID }) {
+                let suffix = store.sessions.count > 1 ? session.runId.map { " · " + $0.suffix(8) } : nil
+                Text("\(scope) · \(TimeFormat.short(session.startedAt)) · \(statusLabel(session))\(suffix ?? "")")
+            } else {
+                Text(scope)
+            }
+        }
+        .help(store.session?.markerLabel ?? "选择执行轮次或浏览回收站")
+        .fixedSize()
+    }
+
     private var selectors: some View {
         HStack(spacing: Spacing.m) {
-            Picker("会话筛选", selection: Binding(get: { store.saveFilter }, set: { value in Task { await store.setSaveFilter(value) } })) {
-                Text("正常会话").tag("active"); Text("回收站").tag("trashed")
-            }.pickerStyle(.segmented).labelsHidden().frame(width: 170)
+            Picker("会话筛选", selection: saveFilter) { filterOptions }.pickerStyle(.segmented).labelsHidden().frame(width: 170)
                 .accessibilityLabel("会话保存状态筛选：正常会话或回收站")
             if !store.sessions.isEmpty {
-                Picker("执行轮次", selection: Binding(get: { store.selectedRunID }, set: { value in Task { await store.select(runID: value) } })) {
+                Picker("执行轮次", selection: selectedRun) {
                     ForEach(store.sessions) { session in
                         Text(roundLabel(session)).tag(session.runId)
                     }
@@ -384,20 +518,24 @@ struct SessionReaderView: View {
         store.displayStatusLabel(session, selected: selected)
     }
 
+    private var contentStatusRow: some View {
+        HStack(alignment: .top, spacing: Spacing.m) {
+            Label(statusLabel(store.session), systemImage: store.displayStatusIcon)
+                .foregroundStyle(statusColor)
+            Spacer(minLength: 0)
+            Text(RoleBackend.shortLabel(store.roundDetail?.backend ?? store.session?.backend))
+                .foregroundStyle(Color.kpSecondary)
+        }.font(.kpSmall)
+            .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.s)
+    }
+
     @ViewBuilder
     private var summaryContent: some View {
         if store.session == nil {
             statusContent
         } else {
             VStack(spacing: 0) {
-                HStack(alignment: .top, spacing: Spacing.m) {
-                    Label(statusLabel(store.session), systemImage: store.displayStatusIcon)
-                        .foregroundStyle(statusColor)
-                    Spacer(minLength: 0)
-                    Text(RoleBackend.shortLabel(store.roundDetail?.backend ?? store.session?.backend))
-                        .foregroundStyle(Color.kpSecondary)
-                }.font(.kpSmall)
-                    .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.s)
+                if onClose == nil { contentStatusRow }
                 if (store.roundDetail?.backend ?? store.session?.backend) == "codex_desktop" {
                     codexDesktopNotice
                 } else if store.loadedCount == 0 {
@@ -413,7 +551,7 @@ struct SessionReaderView: View {
                         store: store,
                         state: store.messageState,
                         runState: store.roundDetail?.runStatus ?? store.session?.runStatus,
-                        onShowRaw: { contentMode = .raw })
+                        isInTaskSheet: onClose != nil, onShowRaw: { contentMode = .raw })
                 }
             }
         }
@@ -435,19 +573,23 @@ struct SessionReaderView: View {
             statusContent
         } else {
             VStack(spacing: 0) {
-                HStack(alignment: .top, spacing: Spacing.m) {
-                    Label(statusLabel(store.session), systemImage: store.displayStatusIcon)
-                        .foregroundStyle(statusColor)
-                    Spacer(minLength: 0)
-                    Text(RoleBackend.shortLabel(store.roundDetail?.backend ?? store.session?.backend))
-                        .foregroundStyle(Color.kpSecondary)
-                }.font(.kpSmall)
-                    .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.s)
+                if onClose == nil { contentStatusRow }
                 if (store.roundDetail?.backend ?? store.session?.backend) == "codex_desktop" {
                     codexDesktopNotice
                 } else {
-                    SessionContentToolbar(store: store, state: store.messageState)
-                    SessionSearchField(store: store, inputState: store.searchInputState)
+                    if onClose != nil {
+                        HStack(spacing: Spacing.l) {
+                            searchField
+                            contentToolbar.fixedSize()
+                        }
+                        .padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.s)
+                    } else {
+                        VStack(spacing: Spacing.s) {
+                            contentToolbar
+                            searchField
+                        }
+                        .padding(.horizontal, Spacing.l).padding(.bottom, Spacing.s)
+                    }
                     Divider()
                     if store.loadedCount == 0 {
                         VStack(spacing: Spacing.m) {
@@ -458,7 +600,7 @@ struct SessionReaderView: View {
                                 .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                         }.padding(Spacing.l).frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        SessionMessageList(store: store, state: store.messageState,
+                        SessionMessageList(store: store, state: store.messageState, isInTaskSheet: onClose != nil,
                                            query: store.committedQuery, hasMore: store.hasMore,
                                            loading: store.loading, restoreAnchor: store.restoreAnchor,
                                            detailSize: CGSize(width: max(640, min(availableWidth, 960)), height: 600))
@@ -468,11 +610,22 @@ struct SessionReaderView: View {
         }
     }
 
+    private var searchField: some View {
+        SessionSearchField(store: store, inputState: store.searchInputState)
+    }
+
+    private var contentToolbar: some View {
+        SessionContentToolbar(store: store, state: store.messageState, showsSearchCount: onClose != nil)
+    }
+
     private var copySessionIDButton: some View {
-        Button("复制会话 ID") {
+        Button {
             Workspace.copy(externalSessionID)
             model.showToast("已复制会话 ID")
-        }.disabled(externalSessionID == nil)
+        } label: {
+            Label("复制会话 ID", systemImage: "doc.on.doc")
+        }
+        .help("复制会话 ID").disabled(externalSessionID == nil)
     }
 
     @ViewBuilder
@@ -487,81 +640,148 @@ struct SessionReaderView: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: Spacing.l) {
-                    DetailSection(title: "会话状态") {
-                        Label {
-                            Text(statusLabel(store.session))
-                                .foregroundStyle(Color.primary)
-                        } icon: {
-                            Image(systemName: store.displayStatusIcon)
-                                .foregroundStyle(statusColor)
+                    if onClose != nil {
+                        HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                            statusHeading
+                            Spacer()
+                            summaryButton.buttonStyle(.link)
                         }
-                        .font(.kpTitle)
-                        if let failure = store.displayFailureText {
-                            Text(failure).font(.kpBody).lineLimit(3).help(failure)
-                        } else if let detail = store.displayStatusDetail {
-                            Text(detail).font(.kpBody).foregroundStyle(Color.kpSecondary).lineLimit(3).help(detail)
-                        }
-                        FieldRow("运行软件", RoleBackend.shortLabel(store.roundDetail?.backend ?? store.session?.backend))
-                        if let request = model.requests.first(where: { $0.taskId == store.session?.taskId && $0.runId == store.selectedRunID }) {
-                            FieldRow("当前阶段", Labels.stage(request.stage))
-                        }
-                        if (store.roundDetail?.backend ?? store.session?.backend) == "codex_desktop" {
-                            FieldRow("模型与权限", "继承 Desktop 会话/自动任务")
-                        } else if let config = store.roundDetail?.config?.summaryText {
-                            FieldRow("模型", config)
-                        }
-                        FieldRow("开始时间", TimeFormat.fullString(store.roundDetail?.startedAt ?? store.session?.startedAt))
-                        if let endedAt = store.displayEndedAt { FieldRow("结束时间", TimeFormat.fullString(endedAt)) }
-                        FieldRow("最近检查", TimeFormat.fullString(store.lastStatusCheckedAt))
-                    }
-                    if let failure = store.previousFailureText {
-                        DisclosureGroup("此前失败记录") {
-                            Text(failure).font(.kpBody).foregroundStyle(Color.kpSecondary).textSelection(.enabled)
-                            if let endedAt = store.previousFailureEndedAt {
-                                FieldRow("此前结束时间", TimeFormat.fullString(endedAt))
+                        statusExplanation
+                        recoveryActions
+                        previousFailure
+                        DetailSection(title: "运行资料") {
+                            GroupPanel(background: Color.kpSecondary.opacity(0.05)) {
+                                Grid(alignment: .leading, horizontalSpacing: Spacing.xl, verticalSpacing: Spacing.s) {
+                                    ForEach(statusFields, id: \.label) { field in
+                                        GridRow {
+                                            Text(field.label).font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                                            Text(field.value).font(.kpBody).textSelection(.enabled)
+                                        }
+                                        .accessibilityElement(children: .combine)
+                                    }
+                                    if let externalSessionID {
+                                        GridRow(alignment: .firstTextBaseline) {
+                                            Text("会话 ID").font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                                            HStack(spacing: Spacing.s) {
+                                                Text(externalSessionID).font(.kpLabel.monospaced())
+                                                    .lineLimit(1).truncationMode(.middle).help(externalSessionID)
+                                                    .textSelection(.enabled)
+                                                copySessionIDButton.labelStyle(.iconOnly).buttonStyle(.borderless)
+                                            }
+                                        }
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(Spacing.l)
                             }
-                        }.font(.kpBody)
-                    }
-                    if isPlus || store.retryEligible {
-                        HStack(spacing: Spacing.m) {
-                            if store.retryEligible {
-                                Button { retryConfirmationRunID = store.selectedRunID } label: {
-                                    Label("重新执行（沿用计划）", systemImage: "arrow.clockwise")
-                                }.buttonStyle(.borderedProminent)
-                                    .disabled(!store.canRetryExecution || store.acting || store.requestingStart)
-                            }
-                            if isPlus {
-                            Button("检查 Plus 状态") { Task { await store.checkControlStatus() } }
-                                .disabled(store.controlLoading || store.requestingStart || store.acting)
-                            if store.controlStatus?.canStart == true {
-                                Button(store.controlStatus?.startLabel ?? "请求开始") { startConfirmation = store.controlStatus }
-                                    .disabled(store.controlLoading || store.requestingStart)
-                            }
-                            }
-                            if store.controlLoading || store.requestingStart || store.acting { ProgressView().controlSize(.small) }
                         }
-                        if let reason = store.retryBlockedReason {
-                            Text(reason).font(.kpSmall).foregroundStyle(Color.kpSecondary).help(reason)
+                    } else {
+                        DetailSection(title: "会话状态") {
+                            statusHeading
+                            statusExplanation
+                            ForEach(statusFields, id: \.label) { field in FieldRow(field.label, field.value) }
                         }
-                    }
-                    Divider()
-                    DetailSection(title: "会话内容") {
-                        Text("切换到会话内容，查看本轮已导出的对话与运行记录。")
-                            .font(.kpBody).foregroundStyle(Color.kpSecondary)
-                        HStack(spacing: Spacing.m) {
-                            Button("查看会话摘要") {
-                                contentMode = .summary
-                                Task { await store.setStatusOnly(false) }
+                        previousFailure
+                        recoveryActions
+                        Divider()
+                        DetailSection(title: "会话内容") {
+                            Text("切换到会话内容，查看本轮已导出的对话与运行记录。")
+                                .font(.kpBody).foregroundStyle(Color.kpSecondary)
+                            HStack(spacing: Spacing.m) {
+                                summaryButton
+                                if isPlus { Button("打开 Pi-Desktop-Plus") { openPlus() } }
+                                copySessionIDButton
                             }
-                            if isPlus { Button("打开 Pi-Desktop-Plus") { openPlus() } }
-                            copySessionIDButton
                         }
                     }
                 }
-                .padding(Spacing.l)
+                .padding(.horizontal, onClose == nil ? Spacing.l : Spacing.xl)
+                .padding(.vertical, Spacing.l)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+
+    private var summaryButton: some View {
+        Button("查看会话摘要") { contentMode = .summary }
+    }
+
+    private var statusHeading: some View {
+        Label {
+            Text(statusLabel(store.session))
+        } icon: {
+            Image(systemName: store.displayStatusIcon).foregroundStyle(statusColor)
+        }
+        .font(.kpTitle)
+    }
+
+    @ViewBuilder private var statusExplanation: some View {
+        if let text = store.displayFailureText ?? store.displayStatusDetail {
+            Text(text).font(.kpBody)
+                .foregroundStyle(store.displayFailureText == nil ? Color.kpSecondary : Color.primary)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+        }
+    }
+
+    private var statusFields: [(label: String, value: String)] {
+        let backend = store.roundDetail?.backend ?? store.session?.backend
+        var fields = [("运行软件", RoleBackend.shortLabel(backend))]
+        if let request = model.requests.first(where: { $0.taskId == store.session?.taskId && $0.runId == store.selectedRunID }) {
+            fields.append(("当前阶段", Labels.stage(request.stage)))
+        }
+        if backend == "codex_desktop" {
+            fields.append(("模型与权限", "继承 Desktop 会话/自动任务"))
+        } else if let config = store.roundDetail?.config?.summaryText {
+            fields.append(("模型", config))
+        }
+        fields.append(("开始时间", TimeFormat.fullString(store.roundDetail?.startedAt ?? store.session?.startedAt)))
+        if let endedAt = store.displayEndedAt { fields.append(("结束时间", TimeFormat.fullString(endedAt))) }
+        fields.append(("最近检查", TimeFormat.fullString(store.lastStatusCheckedAt)))
+        return fields
+    }
+
+    @ViewBuilder private var previousFailure: some View {
+        if let failure = store.previousFailureText {
+            DisclosureGroup("此前失败记录") {
+                Text(failure).font(.kpBody).foregroundStyle(Color.kpSecondary).textSelection(.enabled)
+                if let endedAt = store.previousFailureEndedAt {
+                    FieldRow("此前结束时间", TimeFormat.fullString(endedAt))
+                }
+            }.font(.kpBody)
+        }
+    }
+
+    @ViewBuilder private var recoveryActions: some View {
+        if isPlus || store.retryEligible {
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: Spacing.s) { recoveryButtons }.fixedSize()
+                    VStack(alignment: .leading, spacing: Spacing.s) { recoveryButtons }
+                }
+                if let reason = store.retryBlockedReason {
+                    Text(reason).font(.kpSmall).foregroundStyle(Color.kpSecondary).textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var recoveryButtons: some View {
+        if store.retryEligible {
+            Button { retryConfirmationRunID = store.selectedRunID } label: {
+                Label("重新执行（沿用计划）", systemImage: "arrow.clockwise")
+            }.buttonStyle(.borderedProminent)
+                .disabled(!store.canRetryExecution || store.acting || store.requestingStart)
+        }
+        if isPlus {
+            Button("检查 Plus 状态") { Task { await store.checkControlStatus() } }
+                .disabled(store.controlLoading || store.requestingStart || store.acting)
+            if store.controlStatus?.canStart == true {
+                Button(store.controlStatus?.startLabel ?? "请求开始") { startConfirmation = store.controlStatus }
+                    .disabled(store.controlLoading || store.requestingStart)
+            }
+            if onClose != nil { Button("打开 Pi-Desktop-Plus") { openPlus() } }
+        }
+        if store.controlLoading || store.requestingStart || store.acting { ProgressView().controlSize(.small) }
     }
 
     private var statusColor: Color {
@@ -589,12 +809,13 @@ private struct SessionTimelineContainer: View {
     let store: SessionReaderStore
     @ObservedObject var state: SessionReaderMessageState
     let runState: String?
+    let isInTaskSheet: Bool
     let onShowRaw: () -> Void
 
     var body: some View {
         SessionTimelineView(
             rounds: SessionTimelineBuilder.build(messages: store.messages, runState: runState),
-            onShowRaw: onShowRaw)
+            isInTaskSheet: isInTaskSheet, onShowRaw: onShowRaw)
     }
 }
 
@@ -602,20 +823,28 @@ private struct SessionContentToolbar: View {
     @ObservedObject var store: SessionReaderStore
     @ObservedObject var state: SessionReaderMessageState
 
+    let showsSearchCount: Bool
+
     var body: some View {
+        let searching = showsSearchCount && !store.committedQuery.isEmpty
+        let canPause = state.following && !searching
         HStack(spacing: Spacing.m) {
-            Text("已加载 \(store.loadedCount) 条\(store.hasMore ? " · 读取中" : "")")
-                .foregroundStyle(Color.kpSecondary)
+            if searching {
+                Text("匹配 \(state.rows.count) 条\(store.hasMore ? " · 仅已加载" : "")")
+                    .foregroundStyle(Color.kpSecondary)
+            } else {
+                Text("已加载 \(store.loadedCount) 条\(store.hasMore ? " · 读取中" : "")")
+                    .foregroundStyle(Color.kpSecondary)
+            }
             Spacer(minLength: 0)
-            Button(state.following ? "暂停跟随" : "回到最新") {
-                if state.following {
+            Button(canPause ? "暂停跟随" : "回到最新") {
+                if canPause {
                     store.pauseFollowing()
                 } else {
                     store.jumpToLatest()
                 }
-            }.accessibilityLabel(state.following ? "暂停跟随最新消息" : "回到最新消息并继续跟随")
+            }.accessibilityLabel(canPause ? "暂停跟随最新消息" : "回到最新消息并继续跟随")
         }.font(.kpSmall).controlSize(.small)
-            .padding(.horizontal, Spacing.l).padding(.bottom, Spacing.s)
     }
 }
 
@@ -649,8 +878,6 @@ private struct SessionSearchField: View {
                     .keyboardShortcut(focusedControl == "clear" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
             }
         }
-        .padding(.horizontal, Spacing.l)
-        .padding(.bottom, Spacing.s)
     }
 }
 
@@ -658,6 +885,7 @@ private struct SessionSearchField: View {
 private struct SessionMessageList: View {
     let store: SessionReaderStore
     @ObservedObject var state: SessionReaderMessageState
+    let isInTaskSheet: Bool
     let query: String
     let hasMore: Bool
     let loading: Bool
@@ -669,7 +897,7 @@ private struct SessionMessageList: View {
     var body: some View {
         ScrollViewReader { proxy in
             VStack(spacing: 0) {
-                if !query.isEmpty {
+                if !query.isEmpty && !isInTaskSheet {
                     HStack {
                         Text("匹配 \(state.rows.count) 条\(hasMore ? " · 仅搜索已加载内容" : "")").font(.kpSmall)
                         Spacer()
@@ -679,15 +907,22 @@ private struct SessionMessageList: View {
                     }.padding(.horizontal, Spacing.l).padding(.bottom, Spacing.s)
                 }
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: Spacing.l) {
+                    LazyVStack(alignment: .leading, spacing: isInTaskSheet ? Spacing.m : Spacing.l) {
                         if !query.isEmpty && state.rows.isEmpty {
-                            Text("没有匹配消息").font(.kpBody)
-                            Button("清除搜索") { store.search = "" }
-                                .focused($focusedControl, equals: "clear-empty")
-                                .keyboardShortcut(focusedControl == "clear-empty" ? KeyboardShortcut(.return, modifiers: []) : nil)
+                            if isInTaskSheet {
+                                Label("没有匹配消息", systemImage: "magnifyingglass")
+                                    .font(.kpBody).foregroundStyle(Color.kpSecondary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, Spacing.xl)
+                            } else {
+                                Text("没有匹配消息").font(.kpBody)
+                                Button("清除搜索") { store.search = "" }
+                                    .focused($focusedControl, equals: "clear-empty")
+                                    .keyboardShortcut(focusedControl == "clear-empty" ? KeyboardShortcut(.return, modifiers: []) : nil)
+                            }
                         }
                         ForEach(state.rows) { row in
-                            SessionMessageRow(row: row, query: query,
+                            SessionMessageRow(row: row, query: query, isInTaskSheet: isInTaskSheet,
                                               collapsed: state.collapsed.contains(row.id),
                                               onToggle: { toggle(row, proxy: proxy) },
                                               onDetail: { showDetail(row, raw: false, proxy: proxy) },
@@ -703,7 +938,8 @@ private struct SessionMessageList: View {
                     }
                     .frame(maxWidth: 960, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(Spacing.l)
+                    .padding(.horizontal, isInTaskSheet ? Spacing.xl : Spacing.l)
+                    .padding(.vertical, Spacing.l)
                     .coordinateSpace(name: "session-reader-content")
                     .background(GeometryReader { geo in Color.clear.preference(key: SessionContentHeightKey.self, value: geo.size.height) })
                     .background(ScrollMetricsObserver(readerID: store.performanceReaderID,
@@ -1027,6 +1263,7 @@ struct SessionMessageRow: View {
     @FocusState private var focusedControl: String?
     let row: SessionMessageRowData
     let query: String
+    let isInTaskSheet: Bool
     let collapsed: Bool
     let onToggle: () -> Void
     let onDetail: () -> Void
@@ -1037,60 +1274,78 @@ struct SessionMessageRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(spacing: Spacing.s) {
-                Text(Labels.messageType(message.type)).font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                if isInTaskSheet {
+                    Label {
+                        Text(Labels.messageType(message.type)).font(.kpBody.weight(.semibold))
+                    } icon: {
+                        Image(systemName: roleIcon).foregroundStyle(message.type == "user" ? Color.kpBlue : Color.kpSecondary)
+                    }
+                } else {
+                    Text(Labels.messageType(message.type)).font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                }
                 Text(TimeFormat.short(message.sourceAt)).font(.kpSmall).foregroundStyle(Color.kpSecondary)
                 Spacer(minLength: 0)
-                if presentation.requiresDetail {
+                if presentation.requiresDetail && (!isInTaskSheet || row.match == nil) {
                     Button("查看全文", action: onDetail).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
                         .focused($focusedControl, equals: "detail")
                     .keyboardShortcut(focusedControl == "detail" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
-                } else if presentation.collapsible {
+                } else if presentation.collapsible && (!isInTaskSheet || row.match == nil) {
                     Button(collapsed ? "展开" : "收起", action: onToggle).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
                         .accessibilityLabel(collapsed ? "展开本条消息" : "收起本条消息")
                         .focused($focusedControl, equals: "toggle")
                     .keyboardShortcut(focusedControl == "toggle" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
                 }
-                Button("复制原文") { Workspace.copy(message.content) }.font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
-                    .accessibilityLabel("复制本条消息原文")
-                    .focused($focusedControl, equals: "copy")
-                    .keyboardShortcut(focusedControl == "copy" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
-            }
-            if presentation.isTool {
-                Text(presentation.toolName ?? "工具结果").font(.kpBody).fontWeight(.semibold)
-                if let summary = presentation.commandSummary, !summary.isEmpty {
-                    Text(summary)
-                        .font(.kpLabel.monospaced()).textSelection(.enabled)
+                if isInTaskSheet && hasRawRecord {
+                    rawButton
                 }
-                Text(presentation.statusText).font(.kpSmall).foregroundStyle(presentation.exitCode.map { $0 == 0 ? Color.kpSecondary : Color.primary } ?? Color.kpSecondary)
-                if presentation.rawResult {
-                    Text("原始工具结果 · \(presentation.byteCount) 字节").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                if isInTaskSheet {
+                    copyButton.labelStyle(.iconOnly).buttonStyle(.borderless)
+                } else {
+                    copyButton.labelStyle(.titleOnly)
                 }
             }
-            if let match = row.match {
-                HStack {
-                    Text("\(match.field)命中").font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                    Button("定位全文", action: onDetail).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
-                        .focused($focusedControl, equals: "locate")
-                    .keyboardShortcut(focusedControl == "locate" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
+            if isInTaskSheet && presentation.isTool {
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                        Text(presentation.toolName ?? Labels.messageType(message.type)).font(.kpLabel.weight(.semibold))
+                        Spacer(minLength: Spacing.s)
+                        Text(presentation.statusText).font(.kpSmall.monospacedDigit())
+                            .foregroundStyle(exitColor)
+                    }
+                    if let command = presentation.commandSummary, !command.isEmpty,
+                       collapsed || presentation.requiresDetail || row.match != nil || command != presentation.input {
+                        Text(command).font(.kpLabel.monospaced()).textSelection(.enabled)
+                    }
+                    if presentation.rawResult {
+                        Text("原始工具结果 · \(presentation.byteCount) 字节").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    }
+                    Divider()
+                    messageBody
                 }
-                messageText(match.snippet)
-            } else if presentation.isTool && !collapsed && !presentation.requiresDetail {
-                toolSections
+                .padding(Spacing.m)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.kpSecondary.opacity(0.06), in: RoundedRectangle(cornerRadius: Radius.group))
             } else {
-                messageText(collapsed || presentation.requiresDetail ? presentation.preview : presentation.body)
-                    .lineLimit(collapsed || presentation.requiresDetail ? 4 : nil)
-            }
-            if presentation.hasOtherContent {
-                HStack {
-                    Text("另有原始内容").font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                    Button("查看原文", action: onRaw).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
-                    .focused($focusedControl, equals: "raw")
-                    .keyboardShortcut(focusedControl == "raw" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
+                if presentation.isTool {
+                    Text(presentation.toolName ?? "工具结果").font(.kpBody).fontWeight(.semibold)
+                    if let summary = presentation.commandSummary, !summary.isEmpty {
+                        Text(summary)
+                            .font(.kpLabel.monospaced()).textSelection(.enabled)
+                    }
+                    Text(presentation.statusText).font(.kpSmall).foregroundStyle(presentation.exitCode.map { $0 == 0 ? Color.kpSecondary : Color.primary } ?? Color.kpSecondary)
+                    if presentation.rawResult {
+                        Text("原始工具结果 · \(presentation.byteCount) 字节").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    }
                 }
-            } else if presentation.isTool || message.type == "system" {
-                Button("查看原文", action: onRaw).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
-                    .focused($focusedControl, equals: "raw")
-                    .keyboardShortcut(focusedControl == "raw" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
+                messageBody
+            }
+            if !isInTaskSheet && hasRawRecord {
+                HStack {
+                    if presentation.hasOtherContent {
+                        Text("另有原始内容").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    }
+                    rawButton
+                }
             }
         }
         .frame(minHeight: 40, alignment: .top)
@@ -1098,9 +1353,62 @@ struct SessionMessageRow: View {
         .accessibilityLabel("\(Labels.messageType(message.type))，\(TimeFormat.short(message.sourceAt))，\(presentation.isTool ? presentation.statusText : "")，\(collapsed ? "已折叠" : "已展开")，\(row.match.map { $0.field + "命中" } ?? "")，\(presentation.accessibilitySummary)")
     }
 
+    private var roleIcon: String {
+        switch message.type {
+        case "user": return "person.crop.circle"
+        case "assistant": return "text.bubble"
+        case "system": return "gearshape"
+        default: return presentation.isTool ? "terminal" : "doc.text"
+        }
+    }
+
+    private var exitColor: Color {
+        guard let code = presentation.exitCode else { return .kpSecondary }
+        return code == 0 ? .kpGreen : .kpRed
+    }
+
+    private var hasRawRecord: Bool {
+        presentation.hasOtherContent || presentation.isTool || message.type == "system"
+    }
+
+    private var rawButton: some View {
+        Button(isInTaskSheet ? (presentation.hasOtherContent ? "查看其他原始内容" : "原始记录") : "查看原文", action: onRaw)
+            .font(.kpSmall).controlSize(.small)
+            .help("查看本条消息的原始记录")
+            .focused($focusedControl, equals: "raw")
+            .keyboardShortcut(focusedControl == "raw" ? KeyboardShortcut(.return, modifiers: []) : nil)
+    }
+
+    private var copyButton: some View {
+        Button { Workspace.copy(message.content) } label: {
+            Label("复制原文", systemImage: "doc.on.doc")
+        }
+        .font(.kpSmall).controlSize(.small)
+        .help("复制本条消息原文").accessibilityLabel("复制本条消息原文")
+        .focused($focusedControl, equals: "copy")
+        .keyboardShortcut(focusedControl == "copy" ? KeyboardShortcut(.return, modifiers: []) : nil)
+    }
+
+    @ViewBuilder private var messageBody: some View {
+        if let match = row.match {
+            HStack {
+                Text("\(match.field)命中").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                Button("定位全文", action: onDetail).font(.kpSmall).buttonStyle(.bordered).controlSize(.small)
+                    .focused($focusedControl, equals: "locate")
+                .keyboardShortcut(focusedControl == "locate" && true ? KeyboardShortcut(.return, modifiers: []) : nil)
+            }
+            messageText(match.snippet)
+        } else if presentation.isTool && !collapsed && !presentation.requiresDetail {
+            toolSections
+        } else {
+            messageText(collapsed || presentation.requiresDetail ? presentation.preview : presentation.body)
+                .lineLimit(collapsed || presentation.requiresDetail ? 4 : nil)
+        }
+    }
+
     private func messageText(_ text: String) -> some View {
         Text(highlighted(text, query: query))
-            .font(message.isMonospaced ? Font.kpLabel.monospaced() : .kpBody)
+            .font((isInTaskSheet ? presentation.isTool : message.isMonospaced) ? Font.kpLabel.monospaced() : .kpBody)
             .lineSpacing(3).textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
     }

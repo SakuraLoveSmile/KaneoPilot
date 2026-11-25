@@ -81,7 +81,10 @@ struct PendingView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                StatusFilterBar(selection: $statusFilter, options: statusOptions)
+                WorkspaceListHeader(title: "待处理事项", icon: "tray.full",
+                                    summary: "\(model.attentionCount) 项需要你") {
+                    StatusFilterBar(selection: $statusFilter, options: statusOptions)
+                }
                 Group {
                     if model.isLoading && model.requests.isEmpty {
                         LoadingView()
@@ -142,18 +145,13 @@ struct PendingView: View {
     private var contentList: some View {
         List {
             Section {
-                HStack(alignment: .firstTextBaseline, spacing: Spacing.l) {
-                    Spacer(minLength: 0)
-                    Text("\(model.attentionCount) 项需要你")
-                        .font(.kpSmall)
-                        .monospacedDigit()
-                }
-                .foregroundStyle(Color.kpSecondary)
-                .padding(.bottom, Spacing.s)
-                .listRowInsets(rowInsets)
-                .listRowSeparator(.hidden)
                 if statusFilter == "all" || statusFilter == "attention" {
                     attentionRows
+                }
+            } header: {
+                if statusFilter == "all" || statusFilter == "attention" {
+                    Label("需要决策", systemImage: "person.crop.circle.badge.exclamationmark")
+                        .font(.kpLabel.weight(.semibold))
                 }
             }
             .listRowBackground(Color.clear)
@@ -196,7 +194,7 @@ struct PendingView: View {
                 .listRowBackground(Color.kpWindow.opacity(0.5))
             }
         }
-        .listStyle(.plain)
+        .listStyle(.inset)
         .scrollContentBackground(.hidden)
         .contentMargins(.top, Spacing.l, for: .scrollContent)
         .contentMargins(.horizontal, 0, for: .scrollContent)
@@ -332,7 +330,7 @@ struct PendingView: View {
             .frame(minWidth: 88, alignment: .trailing)
             .fixedSize(horizontal: true, vertical: false)
         }
-        .padding(.vertical, Spacing.l)
+        .padding(.vertical, Spacing.m)
         .frame(minHeight: RowHeight.preferredTwoLine)
         .accessibilityElement(children: .contain)
         .listRowInsets(rowInsets)
@@ -531,7 +529,7 @@ struct PendingView: View {
                 .foregroundStyle(.tertiary)
                 .accessibilityHidden(true)
         }
-        .padding(.vertical, Spacing.l)
+        .padding(.vertical, Spacing.m)
         .frame(minHeight: RowHeight.preferredTwoLine)
         .accessibilityElement(children: .combine)
         .accessibilityLabel([task.title ?? task.taskId, project, attentionReason(task), updated.map { "更新于\($0)" }].compactMap { $0 }.joined(separator: "，"))
@@ -773,8 +771,6 @@ struct RequestDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: Spacing.l) {
                 header(detail)
-                requestFields(detail)
-                roleSection(detail)
                 taskSection(detail)
                 if let code = detail.task?.exception?.failureCode,
                    let title = AutomationPresentation.title(code) {
@@ -784,10 +780,13 @@ struct RequestDetailView: View {
                     }
                 }
                 attemptsSection(detail)
+                requestFields(detail)
+                roleSection(detail)
                 logSection(detail)
             }
-            .padding(Spacing.l)
+            .padding(Spacing.xl)
         }
+        .background(Color.kpWindow)
         .safeAreaInset(edge: .bottom) { actionBar(detail) }
     }
 
@@ -799,11 +798,14 @@ struct RequestDetailView: View {
     private func roleSection(_ detail: GetRequestResponse) -> some View {
         let rows = roleRows(detail)
         if !rows.isEmpty {
-            DetailSection(title: "运行端与身份") {
-                ForEach(rows, id: \.label) { row in
-                    FieldRow(row.label, row.value)
+            DisclosureGroup("运行端与身份") {
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    ForEach(rows, id: \.label) { row in
+                        FieldRow(row.label, row.value)
+                    }
                 }
             }
+            .disclosureGroupStyle(DetailDisclosureStyle(systemImage: "desktopcomputer"))
         }
     }
 
@@ -885,51 +887,53 @@ struct RequestDetailView: View {
 
     /// 头部：kind + attention_state 徽标 + 只读徽标。
     private func header(_ detail: GetRequestResponse) -> some View {
-        HStack(spacing: Spacing.m) {
-            KindBadge(kind: detail.request?.kind)
-            Text(detail.request?.requestId ?? requestID)
-                .font(.kpTitle)
-                .lineLimit(1)
-                .textSelection(.enabled)
-            StatusBadge(text: AttentionState.style(detail.attentionState).label,
-                        style: AttentionState.style(detail.attentionState))
-            if detail.readOnly == true {
-                Label("只读", systemImage: "lock.fill")
-                    .font(.kpSmall)
-                    .foregroundStyle(Color.kpSecondary)
-                    .accessibilityLabel("只读")
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            HStack(spacing: Spacing.s) {
+                Text("\(Labels.kind(detail.request?.kind))请求").font(.kpTitle)
+                StatusBadge(text: AttentionState.style(detail.attentionState).label,
+                            style: AttentionState.style(detail.attentionState))
+                if detail.readOnly == true {
+                    Label("只读", systemImage: "lock.fill")
+                        .font(.kpSmall).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            Text(detail.request?.requestId ?? requestID)
+                .font(.kpLabel.monospaced()).foregroundStyle(.secondary)
+                .textSelection(.enabled)
         }
         .accessibilityElement(children: .combine)
     }
 
     /// 请求字段区（kind/stage/status/priority/not_before/claimed_by/租约时间等）。
     private func requestFields(_ detail: GetRequestResponse) -> some View {
-        DetailSection(title: "请求字段") {
-            let r = detail.request
-            FieldRow("request_id", r?.requestId)
-            FieldRow("类型", Labels.kind(r?.kind))
-            FieldRow("阶段", Labels.stage(r?.stage))
-            FieldRow("状态", Labels.requestStatus(r?.displayStatus ?? r?.status))
-            if r?.kind == "plan" {
-                // v2 §5.22.2：未授权 plan 请求标注「等待确认材料」。
-                FieldRow("材料确认",
-                         r?.manualAuthorized == true ? "已确认" : "等待确认材料")
-            }
-            FieldRow("优先级", r?.priority.map { "\($0)" })
-            FieldRow("not_before", TimeFormat.fullString(r?.notBefore))
-            FieldRow("requested_by", r?.requestedBy)
-            FieldRow("claimed_by", r?.claimedBy)
-            FieldRow("领取时间", TimeFormat.fullString(r?.claimedAt))
-            FieldRow("最近心跳", TimeFormat.fullString(r?.heartbeatAt))
-            FieldRow("租约到期", TimeFormat.fullString(r?.leaseExpiresAt))
-            FieldRow("尝试次数", r?.attemptNo.map { "\($0)" })
-            FieldRow("创建时间", TimeFormat.fullString(r?.createdAt))
-            if let result = r?.result, !result.isNull {
-                FieldRow("结果", result.text)
+        DisclosureGroup("请求字段") {
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                let r = detail.request
+                FieldRow("request_id", r?.requestId)
+                FieldRow("类型", Labels.kind(r?.kind))
+                FieldRow("阶段", Labels.stage(r?.stage))
+                FieldRow("状态", Labels.requestStatus(r?.displayStatus ?? r?.status))
+                if r?.kind == "plan" {
+                    // v2 §5.22.2：未授权 plan 请求标注「等待确认材料」。
+                    FieldRow("材料确认",
+                             r?.manualAuthorized == true ? "已确认" : "等待确认材料")
+                }
+                FieldRow("优先级", r?.priority.map { "\($0)" })
+                FieldRow("not_before", TimeFormat.fullString(r?.notBefore))
+                FieldRow("requested_by", r?.requestedBy)
+                FieldRow("claimed_by", r?.claimedBy)
+                FieldRow("领取时间", TimeFormat.fullString(r?.claimedAt))
+                FieldRow("最近心跳", TimeFormat.fullString(r?.heartbeatAt))
+                FieldRow("租约到期", TimeFormat.fullString(r?.leaseExpiresAt))
+                FieldRow("尝试次数", r?.attemptNo.map { "\($0)" })
+                FieldRow("创建时间", TimeFormat.fullString(r?.createdAt))
+                if let result = r?.result, !result.isNull {
+                    FieldRow("结果", result.text)
+                }
             }
         }
+        .disclosureGroupStyle(DetailDisclosureStyle(systemImage: "list.bullet.rectangle"))
     }
 
     /// 关联任务摘要（task 为 null → 「无关联任务」）。

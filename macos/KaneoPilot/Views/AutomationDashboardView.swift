@@ -106,59 +106,62 @@ struct AutomationDashboardView: View {
         }
     }
 
-    /// 18pt 状态标题加其下一行计数；标题本身不可点（需要你的入口是下面的区段与侧栏）。
     private var statusStrip: some View {
         let shown = headline
-        return VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: Spacing.m) {
             HStack(spacing: Spacing.s) {
-                Image(systemName: shown.symbol)
-                    .font(.kpTitle)
-                    .foregroundStyle(headlineColor(shown.tone))
-                    .accessibilityHidden(true)
-                Text(shown.title).font(.kpTitle)
+                Label {
+                    Text(shown.title)
+                } icon: {
+                    Image(systemName: shown.symbol)
+                        .foregroundStyle(headlineColor(shown.tone))
+                }
+                .font(.kpTitle)
+                .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: Spacing.s)
+                Image(systemName: "info.circle")
+                    .font(.kpBody)
+                    .foregroundStyle(Color.kpSecondary)
+                    .help(Self.flowNote)
+                    .accessibilityLabel("流水线说明")
+                    .accessibilityHint(Self.flowNote)
             }
-            .accessibilityElement(children: .combine)
-            .accessibilityAddTraits(.isHeader)
-            flowCounts
+            GroupPanel(background: Color.kpWindow.opacity(0.5), border: Color.kpSeparator.opacity(0.5)) {
+                HStack(spacing: 0) {
+                    ForEach(BoardColumn.allCases.filter { $0 != .failed }) { column in
+                        if column != .needsPlan { VerticalRule() }
+                        countButton(column)
+                    }
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
-    /// 流水线五格：看板六列去掉「阻塞 / 失败」（它们在「需要你」里）。
-    private var flowColumns: [BoardColumn] { BoardColumn.allCases.filter { $0 != .failed } }
-
-    /// 「待规划 · 待办 · 进行中 · 待评审 · 已完成」，行尾 ⓘ 悬停显示「已排队不等于已开始」那句说明。
-    private var flowCounts: some View {
-        HStack(spacing: 6) {
-            ForEach(Array(flowColumns.enumerated()), id: \.element.id) { index, column in
-                if index > 0 { Text("·").foregroundStyle(Color.kpSecondary) }
-                countButton(column)
-            }
-            Image(systemName: "info.circle")
-                .font(.kpBody)
-                .foregroundStyle(Color.kpSecondary)
-                .padding(.leading, 6)
-                .help(Self.flowNote)
-                .accessibilityLabel("流水线说明")
-                .accessibilityHint(Self.flowNote)
-        }
-        .font(.kpBody)
-        .padding(.leading, 28)
-    }
-
-    /// 一项计数：名称次要色，数字非 0 时主色半粗、0 或缺失时次要色常规；整项可点，进入任务页对应列。
     private func countButton(_ column: BoardColumn) -> some View {
         let count = model.overview?.counts?.board?[column.rawValue]
-        let hasItems = (count ?? 0) > 0
+        let value = count.map(String.init) ?? "—"
         return Button { onTasks(column) } label: {
-            HStack(spacing: Spacing.xs) {
-                Text(column.title).foregroundStyle(Color.kpSecondary)
-                Text(count.map(String.init) ?? "—")
-                    .font(hasItems ? Font.kpBody.weight(.semibold) : Font.kpBody)
-                    .foregroundStyle(hasItems ? Color.primary : Color.kpSecondary)
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                HStack(spacing: Spacing.xs) {
+                    Circle().fill(column.color).frame(width: 6, height: 6)
+                    Text(column.title)
+                        .font(.kpLabel)
+                        .foregroundStyle(Color.kpSecondary)
+                }
+                Text(value)
+                    .font(.kpMetric)
+                    .foregroundStyle((count ?? 0) > 0 ? Color.primary : Color.kpSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
             }
+            .padding(.horizontal, Spacing.m)
+            .padding(.vertical, Spacing.s)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.borderless)
+        .help("查看\(column.title)任务")
         .accessibilityLabel("\(column.title) \(count.map(String.init) ?? "未提供")")
         .accessibilityHint("进入任务页对应列")
     }

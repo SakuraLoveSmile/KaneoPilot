@@ -159,6 +159,7 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 | `delivery-commit` | monitor | 核验执行轮次并提交任务工作树（§5.27） |
 | `delivery-publish` | delivery runner | 非强制推送、复用或创建 PR、写交付评论（§5.27） |
 | `delivery-sync` | delivery runner | 读取 PR 状态并登记同步结果（§5.27） |
+| `get-delivery-status` | 桌面 | 只读：读取 PR 状态、检查与合并门（§5.27） |
 | `executor-instance` | App 调度器 | 登记/关闭本次 App 进程归属；不取消 Plus 会话或任务（§5.27） |
 | `round-observe` | monitor 执行端 | 只读续接缺席的观察进程（幂等；不改任务状态，§5.23.7） |
 | `get-goal-report` | monitor 执行端 | 只读：取回经身份/完整性校验的 Plus Goal 报告（T5，§5.23.10） |
@@ -401,6 +402,8 @@ v2 起 `request_id`/`run_id`/`planner_input_sha256` 为必填；旧三字段形�
 ### 5.11 recheck
 
 `recheck {task_id}` → 重算计划/来源哈希 + 远端 `get-task`（可缺省 `offline:true` 只验本地）→ `{"task_id", "checks": [{name, ok, detail}], "kaneo_status"?, "requirements_sha256"?, "ok": bool}`；写 `kaneo_checked_at` 与观察 `kaneo_status`。
+
+手动在线复校若读取了 PR 合并条件，`pr_merge_gate` 项另带 `gate_state: blocked | waiting | ready`，分别表示受阻、等待检查、条件已满足。该项的 `ok` 仍表示读取成功；顶层 `ok` 仍按既有检查项汇总。读取错误、旧响应或信息不足时，客户端不得仅凭 `ok` 推断 PR 可合并或任务验证通过。
 
 ### 5.12 migrate
 
@@ -1273,6 +1276,7 @@ _id, created_at}`，提示先核对 Plus 会话。
 - Plus 分支：`claim(stage=review)` 后核对请求 `run_id`、任务本轮执行 worktree、计划哈希、执行证据与关联来源（**不得**只审主仓库）；runner 用只读 `git status/diff` 生成改动材料，并把计划/报告/执行证据复制到**专属 Review worktree** 的材料目录（该 worktree 是审查输入，不复用仍活动的执行会话）；`pi_session_create(mode:"plan", interactionMode:"unattended", …)` + `permissionMode:"auto"`，并按 §5.24.3 核验实际硬策略及版本，未确认时不发送。指令只要求审查并输出冻结结果（新轮次使用 review_text_v1），不 `SubmitPlan`、不 `SubmitGoal`、不代批任何契约。Plus 的 `INTERACTION_REQUIRED` 持久回执直接生成 `blocked` 报告，保留问题/选项，经现有 `review_blocked` 结算交回用户，不要求模型自行再整理、不登记 pass、不推进远端任务。已登记结论的确定性恢复不要求重新连接；无效拦截回执明确受阻，不伪造审查通过。
 - 内部结算结果结构冻结为 `{"conclusion":"pass|changes_requested|blocked","report_markdown":"<非空>","fix":{"title","description","priority"}|null}`；`changes_requested` 必须有 `fix`；`priority ∈ no-priority|low|medium|high|urgent`（`bridge.VALID_PRIORITIES`）。Plus 无原生 outputSchema 能力：runner 在 `completed` + 完整转录后严格解析，**不**把 MCP `structuredContent` 当模型结构化输出保证。
 - 新 Plus Review 指令使用 `review_text_v1` 传输，避免模型手工转义长 Markdown。最终答复依次为下列独占行及分段正文：`<<<KANPILOT_REVIEW_V1>>>`、`conclusion: <结论>`、`priority: <优先级>`、`<<<REPORT>>>`、报告原文、`<<<FIX_TITLE>>>`、修复标题、`<<<FIX_DESCRIPTION>>>`、修复说明、`<<<END_KANPILOT_REVIEW_V1>>>`。全部标记必须各出现一次且顺序固定，标记行保留给协议；报告/标题/说明中的引号、反斜杠、换行和 Markdown 代码块均直接保留，不做 JSON 转义。`changes_requested` 三段正文均非空；pass/blocked 的两个修复段必须为空且 priority=no-priority。允许唯一完整分段结果包一层无语言或 text 代码栅栏；允许该结果前后附普通叙述说明，说明不作为结论来源，移除时记录 `job.result_normalizations=removed_text_frame_commentary`，原转录保留。外侧若含 JSON 对象/数组、额外代码栅栏、协议样式标记或 conclusion/priority 字段（包括大小写、缩进、引号及冒号/等号变体）必须拒收；多份结果、缺段、重复标记及非法枚举仍禁止。只放宽传输外壳，不推断外侧自然语言的语义，也不改写分段正文；已有失败请求不因解析器升级自动重新结算。解析后组装上述冻结对象并走共享严格校验；`job.result_format=review_text_v1` 记录来源。合法历史 JSON 保持兼容（记 json）；严格 JSON 解析失败后，答复中的协议标记或版本头必须执行文本校验，失败不得从报告中的 JSON 示例提取结论；合法历史 JSON 报告中的标记字面量仍作为正文数据，外壳检查见下一条。损坏 JSON 不猜改、不从旧 assistant 消息取代最终答复。此传输格式不改变报告登记、请求租约、快照身份、proposal、超时或失败恢复规则。
+- **CLI 后端（claude / codex / qoder）的输出帧（2026-11-23）**：CLI 分支沿 `executor_prompts/review_cli.md` 的 JSON 契约（`{conclusion, report_markdown, fix}`，Codex 经 `--output-schema` 传递）；`review_instruction` 对 CLI 后端只下发 JSON 要求（`output_format=json`），**不**再追加上一条的 review_text_v1 分段帧——同一条指令既要求 JSON 又写「不要输出 JSON」时，不强制 schema 的服务商会照后者作答。第三方服务商（如 Magpie 网关模型）不保证执行 `--output-schema`，因此 Codex 的 `last-message.txt` 若不是 JSON、但整体是合法 review_text_v1 分段帧，交给 Plus 同一严格解析器接收并记 `job.result_format=review_text_v1`（`result_normalizations` 同 Plus 规则）；既非 JSON 也非合法分段（缺段、乱序、额外 JSON 外壳、普通散文）仍判「缺少有效最终 JSON」→ `review_blocked`，不猜改、不从旧消息取结论。失败原因按实际情形区分且都仍是 `review_blocked`：「Codex Review 未写出最终消息」（退出码 0 但没有 `last-message.txt`）、「Codex Review 最终消息为空」（文件只有空白）、「Codex Review 缺少有效最终 JSON」（有内容但格式不符，附格式错误、分段校验原因与脱敏后截断 240 字符的最终消息开头）；`json.loads` 的 `char 0` 不再作为唯一诊断。Plus 分支的 review_text_v1 规则不变。
 - 严格 JSON 解析失败后，只要最终答复仍含分段定界符 `<<<` 或 `>>>`（包括错拼或截断的标记），就必须按分段协议检查；唯一候选 JSON 代码块已成功解码为对象时，仅在其外侧检查定界符，对象正文中的标记、Python `>>>` 等字符保留原文。结果缺段、重复、乱序或错拼时明确报告“评审结果不完整或格式错误”，不得把损坏分段内的 JSON 示例提升为结论。最终消息的 thinking/思考草稿不作为报告来源。失败提示指向保留的 `transcript.json` 与现有“重新 Review”入口；只修正诊断，不自动重发模型请求或结算历史失败轮次。
 - 历史 JSON 结果接收仅允许两项可审计的格式标准化：最终答复含唯一完整的 `json`/无语言代码栅栏时，可去掉栅栏外的普通说明（外侧含其他栅栏或 JSON 对象/数组标记则拒收）；`changes_requested.fix` 恰好只有非空 `title`、`description` 而缺 `priority` 时，补 `no-priority`，表示模型未指定优先级，不推断等级。标准化后仍走完整冻结结构校验；显式空值、非法优先级、其他缺字段/多字段、多块或无效 JSON 均受阻。原转录不改写，job 的 `result_normalizations` 和事件记录标准化动作；其他后端与共享严格校验器不变。已失败并结束租约的旧请求不得借此重放结算或跳过周期保护。
 - 意外生成 proposal：只读确认本 session/turn 身份后 `pi_plans_resolve(action:"reject", confirm:true)` 关闭并记 `review_blocked`，**不**按其 markdown 登记 pass。
@@ -1659,6 +1663,17 @@ A1 交付补充：live 的判定回执只保存命令摘要，不保存原始命
 - 发送前在短事务写 `runtime_operations` 回执，固定身份由 task/run/review key/report/head/repo/PR 导出；同身份仅一次发送。先 prepared 再 unknown 后外部写，网络事务外。超时、断连、无效响应或崩溃留下 unknown，后续只读 PR 对账，禁止盲目重发（包含策略版本或 Review 身份变化）。预留事务内若同任务已有其他 prepared/unknown 合并回执，亦禁止新发送，避免重新评审绕过未决请求。已明确拒绝同身份不自动重试，提示到 GitHub 处理；已 MERGED 可对账。响应成功也须重新读取同身份 PR 并确认 MERGED 才登记 accepted、merged_at 与 pr_merged 事件。
 - 读侧 `delivery.auto_merge` 可选对象：`{state, reason, head_sha, updated_at}`，state 为 `waiting_checks|blocked|merging|unknown|merged|disabled`。看板和详情展示 reason，unknown 明示结果待确认不会重复提交；不以此对象替代核心任务状态。无自动合并配置时保持被动观察。自动合并开启时 OPEN 等待沿用 300 秒快档检查；关闭时保留既有 5/30 分钟间隔。合并确认后复用 delivery runner 的 `advance-task` 同步 Kaneo/local done；同步失败保留已合并事实，不提前显示已完成。`reason` 必须点名拦下合并的对象：检查失败或运行中时列出检查名（可带 workflow，同名多次运行去重），检查全绿而状态仍非 CLEAN 时说明是保护规则/评审/目标分支，暂无可读检查时明说；`reason` 保持确定性（同一观测产生同一字符串，不拼时间、观测次数等动态内容），长期未就绪的连续观测以该字符串为键。任务停止轮询后（如升级为 `merge_checks_stalled`）该回执保持上次观测、不再自动刷新；用户手动 `recheck` 可只读重算该回执——不改任务状态、不写远端、不重置长期未就绪计数，未确认的合并回执与已前移的交付头不覆盖——使看板重新点名当前阻塞项。
 - 本功能不调用模型、无新增模型费用；开发验证仅使用隔离 DB、临时 Git 仓库与 fake GitHub/Kaneo。真实开启项目开关及合并需与实现/测试证据分开报告。
+
+#### 任务详情的 PR 只读观察（KP-DL01 / KP-UI11）
+
+- 命令 `get-delivery-status {task_id, include_terminal_checks?: bool}`（桌面）只读：读一次本任务的交付投影，至多一次结构化 `gh pr view --json …statusCheckRollup`，并用 `pr_auto_merge.eligibility` 原样给出合并门结论。不写 SQLite、不发 GitHub 写、不重排 `next_sync_at`，因此不改变引擎 300/1800 秒的同步节奏，也不替代 `delivery-sync`。
+- 响应：`{task_id, observed_at, live, error, delivery, pr, gate, checks, checks_summary}`。`delivery` 恒存在，字段来自交付投影（`notice` 是上次 `auto_merge` 观测；`notice_matches_head` 表示它是否仍对应当前 `head_sha`；`auto_merge_enabled` 取项目策略，缺失视为关闭）。
+- `live=false` 且 `error=null`：非 PR 交付、缺少 PR 编号、默认跳过的已合并或已关闭 PR——没有可读现场，不是读取失败；此时 `pr/gate/checks/checks_summary` 均为 null。
+- 发布页指定 `include_terminal_checks=true` 时也读取已合并或已关闭 PR 的检查，终态 `gate=null`。仓库和 PR 编号必须匹配登记的地址与现场地址。
+- `live=false` 且 `error={code,message}`：GitHub 或仓库来源读取失败（`GhError.kind` / `GitDeliveryError.code`，原文脱敏）。
+- `live=true`：`pr` 给 `state/is_draft/mergeable/merge_state_status/review_decision/head_sha/base_ref_name/url/head_matches_delivery`（`url` 同样只接受严格形状的 PR 页面地址，否则为空串）；`gate` 给 `{state,reason,ready}`，未阻塞时 `state=ready`、reason「检查与保护规则已满足，等待下一轮交付同步合并」。
+- `checks` 按 `(workflow, name)` 归组，同名多轮时**仍在运行的那轮视为当前轮**：GitHub 可能把已结束的旧轮排在更新的开始时间之后，纯时间序会把用户正在看的运行藏掉；同类别内再按 `completedAt` → `startedAt` → 列表顺序取。GitHub 对未完成检查返回的 `0001-01-01T00:00:00Z` 与空串一律视为没有时间。`superseded_runs` 记同名更早轮次数。排序 failed → running → unknown → passed，再按 workflow/name。检查名与 workflow 脱敏并截断（120/80）；`url` 只接受严格匹配本仓库的 `https://github.com/<repo>/actions/runs/<n>[/job/<m>]`，其余 null——地址类字段刻意不做 URL 脱敏（脱敏会把链接整段换成占位符，页面就用不了），只靠形状校验限定到本仓库。`statusCheckRollup` 不可读时 `checks=null` 而不是空数组。
+- 每项检查可含 GitHub 的原始 `status` 和 `conclusion`，供发布页区分排队、运行、取消、中立与跳过。界面只读刷新，展示约定见 ui-spec §4。
 
 ## 5.28 执行期提问转交（P0 冻结，2026-10-14）
 

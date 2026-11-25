@@ -5,44 +5,116 @@ struct MenuBarView: View {
     @EnvironmentObject private var model: AppViewModel
     @ObservedObject private var scheduler = AppRuntime.shared.scheduler
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismiss) private var dismiss
     @State private var pauseInFlight = false
 
     private var paused: Bool { scheduler.status?.paused?.global == true }
     private var pending: Int { scheduler.attentionItems.count }
+    private var heartbeat: String {
+        scheduler.engineStatus?.instances.contains(where: { $0.active == true }) == true
+            ? "引擎心跳正常" : "引擎心跳未确认"
+    }
 
     var body: some View {
-        Text(scheduler.automationHeadline.text)
-        Text("在途 \(scheduler.status?.automation?.activeTasks ?? 0) · 需要你 \(pending)")
-        Text(scheduler.engineStatus?.instances.contains(where: { $0.active == true }) == true ? "引擎心跳正常" : "引擎心跳未确认")
-        Text("上次接收任务：\(lastIntake)")
-        if let error = scheduler.error { Text(error).foregroundStyle(Color.kpSecondary) }
-        ForEach(scheduler.attentionItems.prefix(5)) { item in
-            Button(item.questionPreview.map { "\(item.title ?? item.taskId) · \(item.questionLabel) · \($0.count)题 · \($0.firstTitle) · 回答" } ?? item.title ?? item.taskId) {
-                model.attentionTaskToOpen = item.taskId
-                AppRuntime.shared.mainWindowDidOpen()
-                openWindow(id: "main")
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            HStack {
+                Label("KaneoPilot", systemImage: "arrow.triangle.branch").font(.kpSection)
+                Spacer()
+                Text(scheduler.automationHeadline.text).font(.kpLabel.weight(.semibold))
+                    .foregroundStyle(scheduler.automationHeadline.tone.color)
+            }
+            GroupPanel {
+                HStack(spacing: Spacing.l) {
+                    metric("在途任务", count: scheduler.status?.automation?.activeTasks)
+                    Divider()
+                    metric("需要你", count: scheduler.attentionLoaded ? pending : nil)
+                }
+                .padding(Spacing.m).fixedSize(horizontal: false, vertical: true)
+                ListRule()
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    if heartbeat != scheduler.automationHeadline.text {
+                        Label(heartbeat, systemImage: "waveform.path.ecg")
+                    }
+                    Text("上次接收任务：\(lastIntake)")
+                }
+                .font(.kpLabel).foregroundStyle(.secondary).padding(Spacing.m)
+            }
+            if let error = scheduler.error {
+                ScrollView { Text(error).font(.kpLabel).foregroundStyle(Color.kpRed)
+                    .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
+                    .frame(maxHeight: 56)
+            }
+            if !scheduler.attentionItems.isEmpty {
+                ViewThatFits(in: .vertical) {
+                    attentionList.fixedSize(horizontal: false, vertical: true)
+                    ScrollView { attentionList }.frame(height: 216)
+                }
+                .frame(maxHeight: 216, alignment: .top)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            Divider()
+            HStack {
+                Button(paused ? "恢复自动推进" : "暂停自动推进") {
+                    pauseInFlight = true
+                    Task {
+                        await scheduler.setPaused(!paused)
+                        pauseInFlight = false
+                    }
+                }
+                .disabled(pauseInFlight || scheduler.status == nil || scheduler.isSchedulingStopped)
+                Button { scheduler.checkNow() } label: {
+                    Label("刷新引擎状态", systemImage: "arrow.clockwise")
+                }.labelStyle(.iconOnly).help("刷新引擎状态").disabled(scheduler.isSchedulingStopped)
+                Spacer()
+                Button(scheduler.isSchedulingStopped && !scheduler.isStopping ? "重试退出" : "退出") {
+                    NSApplication.shared.terminate(nil)
+                }
+                .disabled(scheduler.isStopping)
+            }
+            Button(action: showMainWindow) {
+                Label("打开 KaneoPilot", systemImage: "macwindow")
+                    .frame(maxWidth: .infinity)
+            }.buttonStyle(.borderedProminent)
+        }
+        .padding(Spacing.l).frame(width: 336)
+    }
+
+    private var attentionList: some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            Text("待处理任务").font(.kpLabel.weight(.semibold)).foregroundStyle(.secondary)
+            ForEach(scheduler.attentionItems.prefix(5)) { item in
+                Button {
+                    model.attentionTaskToOpen = item.taskId
+                    showMainWindow()
+                } label: {
+                    HStack(spacing: Spacing.s) {
+                        VStack(alignment: .leading, spacing: Spacing.xs) {
+                            Text(item.title ?? item.taskId).font(.kpBody).lineLimit(2)
+                            if let question = item.questionPreview {
+                                Text("\(item.questionLabel) · \(question.count)题 · \(question.firstTitle) · 回答")
+                                    .font(.kpSmall).foregroundStyle(.secondary).lineLimit(2)
+                            }
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.kpSmall).foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, Spacing.xs).contentShape(Rectangle())
+                }.buttonStyle(.plain)
             }
         }
-        Divider()
-        Button("打开 KaneoPilot") {
-            AppRuntime.shared.mainWindowDidOpen()
-            openWindow(id: "main")
-        }
-        Button(paused ? "恢复自动推进" : "暂停自动推进") {
-            pauseInFlight = true
-            Task {
-                await scheduler.setPaused(!paused)
-                pauseInFlight = false
-            }
-        }
-        .disabled(pauseInFlight || scheduler.status == nil || scheduler.isSchedulingStopped)
-        Button("刷新引擎状态") { scheduler.checkNow() }
-            .disabled(scheduler.isSchedulingStopped)
-        Divider()
-        Button(scheduler.isSchedulingStopped && !scheduler.isStopping ? "重试退出" : "退出") {
-            NSApplication.shared.terminate(nil)
-        }
-        .disabled(scheduler.isStopping)
+    }
+
+    private func metric(_ title: String, count: Int?) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            Text(title).font(.kpLabel).foregroundStyle(.secondary)
+            Text(count.map(String.init) ?? "—").font(.kpMetric)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func showMainWindow() {
+        dismiss()
+        AppRuntime.shared.mainWindowDidOpen()
+        openWindow(id: "main")
     }
 
     private var lastIntake: String {

@@ -84,7 +84,6 @@ final class AppViewModel: ObservableObject {
     @Published var toast: String?
     @Published var alertMessage: String?
     @Published var actionInFlight: String?
-    @Published var recheckResult: RecheckResponse?
     @Published var lastRefreshAt: Date?
 
     // MARK: - 批量整理状态 (T2)
@@ -273,6 +272,11 @@ final class AppViewModel: ObservableObject {
 
     /// get-task + list-events(task_id)，供任务详情列与 push 页共用。
     func fetchDetail(taskID: String) async throws -> (TaskDetail, [EventItem]) {
+        let (task, events) = try await fetchDetailWithEventResult(taskID: taskID)
+        return (task, (try? events.get()) ?? [])
+    }
+
+    func fetchDetailWithEventResult(taskID: String) async throws -> (TaskDetail, Result<[EventItem], Error>) {
         let executionVersions = executionAnswerDrafts.values.filter { $0.taskID == taskID }
             .map { ($0, $0.beginObservation()) }
         async let taskResult = attempt {
@@ -289,7 +293,6 @@ final class AppViewModel: ObservableObject {
             }
             throw CoreError.badOutput("get-task 无结果")
         }
-        let list = (try? e.get())?.events ?? []
         for (key, store) in reviewResolutionDrafts where key.hasPrefix("\(taskID)/") {
             store.observe(current: taskResp.task.reviewResolution,
                           canResolve: taskResp.task.allowedActions?.contains("resolve_review_blocker") == true
@@ -305,7 +308,7 @@ final class AppViewModel: ObservableObject {
                 ? taskResp.task.releaseVerificationQuestion : taskResp.task.executionQuestion, currentRunID: taskResp.task.runId,
                           readOnly: taskResp.task.readOnly == true)
         }
-        return (taskResp.task, list)
+        return (taskResp.task, e.map { $0.events ?? [] })
     }
 
     /// 任务列选中 → 详情列。
@@ -884,14 +887,17 @@ final class AppViewModel: ObservableObject {
         return store
     }
 
-    func recheck(taskID: String) async {
+    func recheck(taskID: String, onResult: @escaping (RecheckResponse) -> Void) async {
         await perform("重新校验") {
             let result = try await self.client.run("recheck",
                                                    payload: ["task_id": taskID],
                                                    timeout: 120,
                                                    as: RecheckResponse.self)
-            self.recheckResult = result
-            return result.ok == false ? "校验未通过，详见结果" : "校验完成"
+            guard result.taskId == nil || result.taskId == taskID else {
+                throw CoreError.badOutput("校验结果与当前任务不匹配，请重新校验。")
+            }
+            onResult(result)
+            return result.conclusion.rawValue
         }
     }
 

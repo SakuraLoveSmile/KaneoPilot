@@ -73,8 +73,7 @@ struct BoardView: View {
     }
     @State private var detailItem: TaskSheetItem?
     @State private var planningAfterDetailDismissal: String?
-    @State private var displayMode: BoardDisplayMode = .compactList
-    @State private var userSelectedMode: Bool = false
+    @State private var displayMode: BoardDisplayMode = .board
     // 批量整理状态 (T2)
     @State private var isBatchMode = false
     @State private var selectedTaskIDs: Set<String> = []
@@ -83,8 +82,6 @@ struct BoardView: View {
     @State private var observeChip: ObserveChip = .all
     /// 项目折叠仅影响本机列表；搜索期间临时展开，不更改保存的偏好。
     @AppStorage("tasks.collapsedProjectIDs") private var collapsedProjectIDsData = Data()
-    /// 紧凑列表当前在屏幕上：批量选择、全选与键盘上下移动据此取可见范围。
-    @State private var compactListShown = false
 
     /// 键盘焦点：当前聚焦卡片 task_id，只驱动 2pt 描边；真正的键事件入口
     /// 是看板容器（boardFocused），避免逐卡 AppKit 焦点在浮层关闭后丢失。
@@ -112,7 +109,7 @@ struct BoardView: View {
 
     /// 批量选择与全选的可见范围：列表只包括展开项目中的当前 chip，看板为全部搜索结果。
     private var selectableTasks: [TaskSummary] {
-        compactListShown
+        displayMode == .compactList
             ? ObserveScope.visible(allFilteredTasks, chip: observeChip,
                                    collapsedProjectIDs: collapsedProjectIDs, isSearching: !search.isEmpty)
             : allFilteredTasks
@@ -207,13 +204,7 @@ struct BoardView: View {
                     .disabled(!model.coreFound)
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Picker("视图模式", selection: Binding(
-                        get: { displayMode },
-                        set: { newMode in
-                            userSelectedMode = true
-                            displayMode = newMode
-                        }
-                    )) {
+                    Picker("视图模式", selection: $displayMode) {
                         ForEach(BoardDisplayMode.allCases) { mode in
                             Text(mode.label).tag(mode)
                         }
@@ -306,12 +297,7 @@ struct BoardView: View {
 
     private var board: some View {
         GeometryReader { geo in
-            let effectiveMode: BoardDisplayMode = {
-                if userSelectedMode { return displayMode }
-                return geo.size.width < 840 ? .compactList : displayMode
-            }()
-
-            if effectiveMode == .compactList {
+            if displayMode == .compactList {
                 TaskCompactListView(
                     tasks: allFilteredTasks,
                     chip: $observeChip,
@@ -327,8 +313,6 @@ struct BoardView: View {
                     onToggleSelect: toggleSelection,
                     onToggleProject: toggleProject
                 )
-                .onAppear { compactListShown = true }
-                .onDisappear { compactListShown = false }
             } else {
                 boardGrid(geo: geo)
             }
@@ -536,7 +520,7 @@ struct BoardView: View {
 
     /// 键盘焦点能否落在当前可见的任务上：紧凑列表按 chip，看板按列。
     private func isNavigable(_ taskID: String) -> Bool {
-        compactListShown ? selectableTasks.contains { $0.taskId == taskID } : column(containing: taskID) != nil
+        displayMode == .compactList ? selectableTasks.contains { $0.taskId == taskID } : column(containing: taskID) != nil
     }
 
     /// ↑↓：列内移动（首尾停住）。
@@ -1268,7 +1252,7 @@ struct BatchActionBar: View {
 // MARK: - 统一确认面板 (T2/T3)
 
 /// 弹出确认面板：显示“可处理 N 项、跳过 M 项”、任务明细和逐项原因。
-/// 宽 560–640pt，明细独立滚动，长标题最多两行。
+/// 筛选只改变显示的行，确认操作始终针对全部选中项。
 struct BatchConfirmSheet: View {
     let action: BatchAction
     let tasks: [TaskSummary]
@@ -1314,143 +1298,54 @@ struct BatchConfirmSheet: View {
         }
     }
 
-    private var eligibleCount: Int {
-        analyzedTasks.filter(\.isEligible).count
-    }
-
-    private var skippedCount: Int {
-        analyzedTasks.filter { !$0.isEligible }.count
-    }
-
-    private var hasQueuedRequest: Bool {
-        analyzedTasks.contains { $0.isEligible && $0.willCancelQueued }
-    }
+    @State private var filter = Filter.all
+    private enum Filter { case all, eligible, skipped }
 
     var body: some View {
+        let analyzed = analyzedTasks
+        let eligible = analyzed.filter(\.isEligible)
+        let skipped = analyzed.filter { !$0.isEligible }
+        let visible = filter == .all ? analyzed : filter == .eligible ? eligible : skipped
         VStack(spacing: 0) {
-            // 顶部标题
-            HStack {
-                Text("批量\(action.verb)任务")
-                    .font(.kpTitle)
-                Spacer()
-            }
-            .padding([.top, .horizontal], Spacing.l)
-            .padding(.bottom, Spacing.s)
-
-            // 统计与说明
-            VStack(alignment: .leading, spacing: Spacing.s) {
-                HStack(spacing: Spacing.m) {
-                    Text("可处理 \(eligibleCount) 项")
-                        .font(.kpBody.weight(.medium))
-                        .foregroundStyle(.primary)
-                    Text("跳过 \(skippedCount) 项")
-                        .font(.kpBody)
-                        .foregroundStyle(skippedCount > 0 ? Color.primary : Color.kpSecondary)
-                }
-
-                if hasQueuedRequest {
-                    HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "exclamationmark.circle")
-                            .foregroundStyle(Color.kpOrange)
-                        Text("这些任务尚未领取的排队请求将被取消。")
-                            .font(.kpSmall)
-                            .foregroundStyle(Color.kpSecondary)
-                    }
-                }
-
-                HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "shield")
-                        .foregroundStyle(Color.kpSecondary)
-                    Text("不删除 Kaneo 任务、计划、报告或会话。")
-                        .font(.kpSmall)
-                        .foregroundStyle(Color.kpSecondary)
-                }
-
-                if eligibleCount == 0 {
+            SettingsSheetHeader(title: "批量\(action.verb)任务", icon: action == .archive ? "archivebox" : "trash",
+                                scope: "已选择 \(analyzed.count) 项。Kaneo 任务、计划、报告和会话都会保留。")
+            Picker("筛选任务", selection: $filter) {
+                Text("全部 \(analyzed.count)").tag(Filter.all)
+                Text("可处理 \(eligible.count)").tag(Filter.eligible)
+                Text("跳过 \(skipped.count)").tag(Filter.skipped)
+            }.pickerStyle(.segmented).labelsHidden().padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.m)
+            ScrollView {
+                BatchRows(items: visible, emptyText: "此分类下没有任务") { item in
                     Label {
-                        Text("当前所选项全部受限，无法执行本次操作。")
-                            .foregroundStyle(Color.primary)
-                    } icon: {
-                        Image(systemName: "exclamationmark.circle.fill")
-                            .foregroundStyle(Color.kpRed)
-                    }
-                    .font(.kpSmall)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(Spacing.m)
-            .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.control))
-            .padding(.horizontal, Spacing.l)
-            .padding(.vertical, Spacing.s)
-
-            // 任务明细（独立滚动）
-            ScrollView(.vertical, showsIndicators: true) {
-                LazyVStack(spacing: Spacing.s) {
-                    ForEach(analyzedTasks, id: \.id) { (item: CategorizedTask) in
-                        HStack(alignment: .top, spacing: Spacing.s) {
-                            Image(systemName: item.isEligible ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .foregroundStyle(item.isEligible ? Color.kpGreen : Color.kpOrange)
-                                .font(.kpBody)
-                                .padding(.top, 2)
-
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(item.task.title ?? item.task.taskId)
-                                    .font(.kpBody)
-                                    .lineLimit(2)
-                                    .lineSpacing(3)
-                                    .foregroundStyle(.primary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                                HStack(spacing: Spacing.s) {
-                                    Text(item.task.projectName ?? "—")
-                                        .font(.kpSmall)
-                                        .foregroundStyle(Color.kpSecondary)
-                                        .padding(.horizontal, Spacing.xs)
-                                        .padding(.vertical, 1)
-                                        .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 3))
-
-                                    Text(item.reason)
-                                        .font(.kpSmall)
-                                        .foregroundStyle(item.isEligible ? Color.kpSecondary : Color.primary)
-                                }
-                            }
-                            Spacer(minLength: 0)
+                        VStack(alignment: .leading, spacing: Spacing.xs) {
+                            Text(item.task.title ?? item.id).font(.kpBody.weight(.medium))
+                            Text([item.task.projectName, item.reason].compactMap { $0 }.joined(separator: " · "))
+                                .font(.kpLabel).foregroundStyle(.secondary).textSelection(.enabled)
                         }
-                        .padding(Spacing.s)
-                        .background(Color.kpWindow, in: RoundedRectangle(cornerRadius: Radius.control))
-                        .overlay(RoundedRectangle(cornerRadius: Radius.control).stroke(Color.kpSeparator, lineWidth: 1))
+                    } icon: {
+                        Image(systemName: item.isEligible ? "checkmark.circle" : "arrow.right.circle")
+                            .foregroundStyle(item.isEligible ? Color.kpGreen : Color.kpOrange)
                     }
-                }
-                .padding(.horizontal, Spacing.l)
-                .padding(.vertical, Spacing.s)
+                }.padding(.horizontal, Spacing.xl).padding(.bottom, Spacing.m)
             }
-            .frame(maxHeight: 280)
-
+            if eligible.contains(where: \.willCancelQueued) || eligible.isEmpty {
+                Label(eligible.isEmpty ? "所选任务均受限，无法执行本次操作。" : "未领取的排队请求将随任务移出而取消。",
+                      systemImage: "exclamationmark.circle")
+                    .font(.kpLabel).foregroundStyle(Color.kpOrange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.s)
+            }
             Divider()
-
-            // 底部操作栏
             HStack {
-                Button("取消") {
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
-
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
                 Spacer()
-
-                Button("确认\(action.verb) (\(eligibleCount))") {
-                    let eligibleList = analyzedTasks.filter(\.isEligible).map(\.task)
-                    let skippedList = analyzedTasks.filter { !$0.isEligible }.map { ($0.task, $0.reason) }
+                Button("确认\(action.verb)（\(eligible.count)）") {
                     dismiss()
-                    onConfirm(eligibleList, skippedList)
-                }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-                .accessibilityLabel("确认\(action.verb)")
-                .disabled(eligibleCount == 0)
-            }
-            .padding(Spacing.l)
-        }
-        .frame(width: 600)
+                    onConfirm(eligible.map(\.task), skipped.map { ($0.task, $0.reason) })
+                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    .accessibilityLabel("确认\(action.verb)").disabled(eligible.isEmpty)
+            }.padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.m)
+        }.frame(width: 580, height: 440)
     }
 }
 
@@ -1462,112 +1357,49 @@ struct BatchReportSheet: View {
     let report: BatchReport
     let onDismiss: () -> Void
 
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("批量\(report.action.verb)完成")
-                    .font(.kpTitle)
-                Spacer()
-            }
-            .padding([.top, .horizontal], Spacing.l)
-            .padding(.bottom, Spacing.s)
+    private enum Filter { case all, attention, succeeded }
+    @State private var filter: Filter
 
-            // 统计徽标行
-            HStack(spacing: Spacing.m) {
-                statBadge(title: "成功", count: report.succeededCount, color: Color.kpGreen)
-                if report.skippedCount > 0 {
-                    statBadge(title: "跳过", count: report.skippedCount, color: Color.kpOrange)
-                }
-                if report.failedCount > 0 {
-                    statBadge(title: "失败", count: report.failedCount, color: Color.kpRed)
-                }
-                if report.unconfirmedCount > 0 {
-                    statBadge(title: "未确认", count: report.unconfirmedCount, color: Color.kpGray)
-                }
-                if report.unexecutedCount > 0 {
-                    statBadge(title: "未执行", count: report.unexecutedCount, color: Color.kpGray)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, Spacing.l)
-            .padding(.vertical, Spacing.s)
-
-            if let refreshError = report.refreshFailedMessage {
-                HStack(spacing: Spacing.s) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(Color.kpOrange)
-                    Text("提示：\(refreshError)")
-                        .font(.kpSmall)
-                        .foregroundStyle(.primary)
-                }
-                .padding(Spacing.s)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.kpOrange.opacity(0.12), in: RoundedRectangle(cornerRadius: Radius.control))
-                .padding(.horizontal, Spacing.l)
-                .padding(.bottom, Spacing.s)
-            }
-
-            // 逐项原因列表（独立滚动）
-            ScrollView(.vertical, showsIndicators: true) {
-                LazyVStack(spacing: Spacing.s) {
-                    ForEach(report.items) { item in
-                        HStack(alignment: .top, spacing: Spacing.s) {
-                            statusIcon(for: item.outcome)
-                                .padding(.top, 2)
-
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(item.title)
-                                    .font(.kpBody)
-                                    .lineLimit(2)
-                                    .lineSpacing(3)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                Text(item.outcome.displayText)
-                                    .font(.kpSmall)
-                                    .foregroundStyle(Color.primary)
-                            }
-                            Spacer(minLength: 0)
-                        }
-                        .padding(Spacing.s)
-                        .background(Color.kpWindow, in: RoundedRectangle(cornerRadius: Radius.control))
-                        .overlay(RoundedRectangle(cornerRadius: Radius.control).stroke(Color.kpSeparator, lineWidth: 1))
-                    }
-                }
-                .padding(.horizontal, Spacing.l)
-                .padding(.vertical, Spacing.s)
-            }
-            .frame(maxHeight: 280)
-
-            Divider()
-
-            HStack {
-                Spacer()
-                Button("完成") {
-                    onDismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-                .accessibilityLabel("完成并关闭报告")
-            }
-            .padding(Spacing.l)
-        }
-        .frame(width: 600)
+    init(report: BatchReport, onDismiss: @escaping () -> Void) {
+        self.report = report
+        self.onDismiss = onDismiss
+        _filter = State(initialValue: report.items.count > report.succeededCount ? .attention : .all)
     }
 
-    private func statBadge(title: String, count: Int, color: Color) -> some View {
-        HStack(spacing: Spacing.xs) {
-            Circle()
-                .fill(color)
-                .frame(width: 8, height: 8)
-                .accessibilityHidden(true)
-            Text(title)
-                .font(.kpSmall)
-                .foregroundStyle(Color.kpSecondary)
-            Text("\(count)")
-                .font(.kpBody.weight(.semibold))
-                .foregroundStyle(Color.primary)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, Spacing.xs)
-        .background(Color.kpControl, in: RoundedRectangle(cornerRadius: 4))
+    var body: some View {
+        let attention = report.items.count - report.succeededCount
+        let visible = report.items.filter { filter == .all || $0.outcome.isSucceeded == (filter == .succeeded) }
+        VStack(spacing: 0) {
+            SettingsSheetHeader(title: "批量\(report.action.verb)结果", icon: "list.bullet.clipboard",
+                                scope: "共 \(report.items.count) 项，成功 \(report.succeededCount) 项。")
+            Picker("筛选结果", selection: $filter) {
+                Text("全部 \(report.items.count)").tag(Filter.all)
+                Text("需查看 \(attention)").tag(Filter.attention)
+                Text("成功 \(report.succeededCount)").tag(Filter.succeeded)
+            }.pickerStyle(.segmented).labelsHidden().padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.m)
+            ScrollView {
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    if let message = report.refreshFailedMessage {
+                        Label("列表刷新失败 · \(message)", systemImage: "arrow.clockwise.circle")
+                            .font(.kpLabel).foregroundStyle(Color.kpOrange).textSelection(.enabled)
+                    }
+                    BatchRows(items: visible, emptyText: "此分类下没有结果") { item in
+                        Label {
+                            VStack(alignment: .leading, spacing: Spacing.xs) {
+                                Text(item.title).font(.kpBody.weight(.medium))
+                                Text(item.outcome.displayText).font(.kpLabel).foregroundStyle(.secondary).textSelection(.enabled)
+                            }
+                        } icon: { statusIcon(for: item.outcome) }
+                    }
+                }.padding(.horizontal, Spacing.xl).padding(.bottom, Spacing.m)
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button("完成", action: onDismiss).keyboardShortcut(.defaultAction)
+                    .accessibilityLabel("完成并关闭报告")
+            }.padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.m)
+        }.frame(width: 580, height: 440)
     }
 
     @ViewBuilder
@@ -1583,6 +1415,26 @@ struct BatchReportSheet: View {
             Image(systemName: "questionmark.circle.fill").foregroundStyle(Color.kpGray)
         case .unexecuted:
             Image(systemName: "minus.circle.fill").foregroundStyle(Color.kpGray)
+        }
+    }
+}
+
+private struct BatchRows<Item: Identifiable, Row: View>: View {
+    let items: [Item]
+    let emptyText: String
+    @ViewBuilder let row: (Item) -> Row
+
+    var body: some View {
+        GroupPanel {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if items.isEmpty {
+                    Text(emptyText).font(.kpBody).foregroundStyle(.secondary).padding(Spacing.m)
+                }
+                ForEach(items) { item in
+                    if item.id != items.first?.id { ListRule() }
+                    row(item).padding(Spacing.m)
+                }
+            }
         }
     }
 }
