@@ -175,6 +175,9 @@ def test_run_stage_records_cost_before_settlement(runner_scene, tmp_path, monkey
     assert conn.execute('SELECT state FROM worktree_slots WHERE path=?',
                         (str(seen[0][1]),)).fetchone()['state'] == 'free'
     assert 'kp_task' not in seen[0][2]
+    # CLI 后端只下发 JSON 契约，不能同时要求「不要输出 JSON」的分段文本。
+    assert '<<<KANPILOT_REVIEW_V1>>>' not in seen[0][2]
+    assert '"conclusion"' in seen[0][2]
     commands = [cmd for cmd, _ in calls]
     assert commands.index('record-cost') < commands.index('report')
     cost = next(p for c, p in calls if c == 'record-cost')
@@ -362,3 +365,148 @@ def test_codex_error_events_never_accept_success_json(tmp_path, event):
                                   timeout=2, log_path=tmp_path / 'raw.jsonl', out_path=output)
     assert result['is_error']
     assert result['structured_output'] is None
+
+
+TEXT_FRAME = ('<<<KANPILOT_REVIEW_V1>>>\nconclusion: pass\npriority: no-priority\n'
+              '<<<REPORT>>>\n通过；已核对证据\n<<<FIX_TITLE>>>\n<<<FIX_DESCRIPTION>>>\n'
+              '<<<END_KANPILOT_REVIEW_V1>>>')
+
+
+def _run_codex_with_final(tmp_path, text, name='final.py'):
+    output = tmp_path / 'out.txt'
+    script = tmp_path / name
+    script.write_text('import json\nfrom pathlib import Path\n'
+                      f'Path({str(output)!r}).write_text({text!r})\n'
+                      'print(json.dumps({"type": "turn.completed"}), flush=True)\n')
+    return cli_review.run_codex([sys.executable, str(script)], prompt='', cwd=tmp_path, env={},
+                                timeout=5, log_path=tmp_path / 'raw.jsonl', out_path=output)
+
+
+def test_codex_accepts_review_text_frame_when_schema_not_enforced(tmp_path):
+    """第三方服务商不执行 --output-schema 时，合法 review_text_v1 帧仍可结算。
+
+    真实案例：Magpie 网关下的 deepseek-v4.1-flash 给出结论 pass 的分段文本，
+    last-message.txt 不是 JSON，被判「缺少有效最终 JSON」→ review_blocked。
+    """
+    result = _run_codex_with_final(tmp_path, TEXT_FRAME)
+    assert result['is_error'] is False
+    assert result['result_format'] == 'review_text_v1'
+    assert review_settle.validate_result(result['structured_output']) == RESULT
+
+
+def test_codex_unframed_prose_still_blocks(tmp_path):
+    result = _run_codex_with_final(tmp_path, '结论：通过。未发现代码缺陷。')
+    assert result['is_error'] is True
+    assert '缺少有效最终 JSON' in result['error']
+
+
+def _run_codex_without_final(tmp_path, name='nofinal.py'):
+    script = tmp_path / name
+    script.write_text('import json\n'
+                      'print(json.dumps({"type": "turn.completed"}), flush=True)\n')
+    return cli_review.run_codex([sys.executable, str(script)], prompt='', cwd=tmp_path, env={},
+                                timeout=5, log_path=tmp_path / 'raw.jsonl',
+                                out_path=tmp_path / 'missing.txt')
+
+
+def test_codex_missing_final_message_has_distinct_reason(tmp_path):
+    """退出码 0 且没写出最终消息：报「未写出最终消息」，不再只丢 json char 0。"""
+    result = _run_codex_without_final(tmp_path)
+    assert result['is_error'] is True
+    assert '未写出最终消息' in result['error']
+    assert 'char 0' not in result['error']
+
+
+def test_codex_empty_final_message_has_distinct_reason(tmp_path):
+    """最终消息为空文件：明确「最终消息为空」，与格式不符分开诊断。"""
+    result = _run_codex_with_final(tmp_path, '  \n', name='empty.py')
+    assert result['is_error'] is True
+    assert '最终消息为空' in result['error']
+
+
+def test_codex_unframed_prose_reports_message_head(tmp_path):
+    """非 JSON 也非合法分段：保留阻塞文案，并附最终消息开头便于定位。"""
+    result = _run_codex_with_final(tmp_path, '结论：通过。未发现代码缺陷。', name='prose.py')
+    assert result['is_error'] is True
+    assert '缺少有效最终 JSON' in result['error']
+    assert '最终消息开头：结论：通过' in result['error']
+
+
+def test_codex_misspelled_text_frame_still_blocks_with_head(tmp_path):
+    """首尾标记错拼（KANEPILOT）不得猜改接收，但摘要要让错拼一眼可见。
+
+    真实案例：job 934cf0ec 的分段结果把 KANPILOT 写成 KANEPILOT，结论虽为 pass
+    仍必须拒收；旧文案只有 char 0，看不出是标记错拼。
+    """
+    typo = TEXT_FRAME.replace('KANPILOT', 'KANEPILOT')
+    result = _run_codex_with_final(tmp_path, typo, name='typo.py')
+    assert result['is_error'] is True
+    assert '缺少有效最终 JSON' in result['error']
+    assert '最终消息开头：<<<KANEPILOT_REVIEW_V1>>>' in result['error']
+
+
+def test_codex_non_utf8_final_message_blocks_instead_of_crashing(tmp_path):
+    """半截写入或异常编码：按失败归档，不让 UnicodeDecodeError 变成 internal。"""
+    output = tmp_path / 'binary.txt'
+    script = tmp_path / 'binary.py'
+    script.write_text('import json\nfrom pathlib import Path\n'
+                      f'Path({str(output)!r}).write_bytes(b"\\xff\\xfe\\x00bad bytes")\n'
+                      'print(json.dumps({"type": "turn.completed"}), flush=True)\n')
+    result = cli_review.run_codex([sys.executable, str(script)], prompt='', cwd=tmp_path,
+                                  env={}, timeout=5, log_path=tmp_path / 'raw.jsonl',
+                                  out_path=output)
+    assert result['is_error'] is True
+    assert '不是 UTF-8 文本' in result['error']
+
+
+def test_codex_prose_head_is_redacted_and_bounded(tmp_path):
+    """摘要不得泄露凭据或把整段答复写进失败原因。"""
+    script = tmp_path / 'secret.py'
+    output = tmp_path / 'secret.txt'
+    secret = 'sk-live-0123456789abcdef'
+    prose = '结论：通过 Authorization: Bearer ' + secret + ' ' + ('细节 ' * 200)
+    script.write_text('import json\nfrom pathlib import Path\n'
+                      f'Path({str(output)!r}).write_text({prose!r})\n'
+                      'print(json.dumps({"type": "turn.completed"}), flush=True)\n')
+    result = cli_review.run_codex([sys.executable, str(script)], prompt='', cwd=tmp_path,
+                                  env={'KANPILOT_TEST_TOKEN': secret}, timeout=5,
+                                  log_path=tmp_path / 'raw.jsonl', out_path=output)
+    assert result['is_error'] is True
+    assert secret not in result['error']
+    assert '最终消息开头' in result['error']
+    assert len(result['error']) < 700
+
+
+def test_cli_instruction_sends_json_frame_only():
+    facts = {'task': {'project_name': 'fixture'}}
+    job = {'task_id': 't1', 'request_id': 'r1', 'run_id': 'rv1', 'execution_run_id': 'e1'}
+    kwargs = dict(job=job, review_root=Path('/review'), materials={'files': {}}, facts=facts)
+    text = review.review_instruction('prompt', output_format=review.OUTPUT_FORMAT_JSON, **kwargs)
+    assert '<<<KANPILOT_REVIEW_V1>>>' not in text
+    assert '不要输出 JSON' not in text
+    assert '"conclusion"' in text
+    plus = review.review_instruction('prompt', **kwargs)
+    assert '<<<KANPILOT_REVIEW_V1>>>' in plus
+    with pytest.raises(ValueError):
+        review.review_instruction('prompt', output_format='yaml', **kwargs)
+
+
+def test_run_stage_keeps_text_frame_source_in_job(runner_scene, tmp_path, monkeypatch):
+    conn, task, calls = runner_scene
+    monkeypatch.setattr(review_config, 'snapshot',
+                        lambda _conn: {'backend': 'codex', 'model': 'm', 'reasoning_effort': 'high'})
+
+    def process(argv, **kwargs):
+        return {'is_error': False, 'structured_output': RESULT, 'total_cost_usd': None,
+                'result_format': 'review_text_v1',
+                'result_normalizations': ['removed_text_frame_commentary']}
+
+    monkeypatch.setattr(cli_review, 'run_codex', process)
+    code = cli_review.run_stage('review', conn=conn, db_path=tmp_path / 'isolated.db', timeout=3,
+                                log_path=tmp_path / 'review.log', record_run=lambda **kwargs: None)
+    assert code == 0
+    jobs = list((tmp_path / 'support' / 'executor-sessions' / 'review').glob('*/job.json'))
+    assert len(jobs) == 1
+    job = json.loads(jobs[0].read_text())
+    assert job['result_format'] == 'review_text_v1'
+    assert job['result_normalizations'] == ['removed_text_frame_commentary']

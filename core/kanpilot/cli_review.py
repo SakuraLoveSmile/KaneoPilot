@@ -34,6 +34,12 @@ def launcher_argv(backend, config, directory, snapshot, materials, *, budget=5, 
         schema, directory / "last-message.txt", [], provider=provider)
 
 
+def excerpt(text, limit=240):
+    """最终消息开头摘要：折叠空白并截断，只用于失败原因，不复制正文结构。"""
+    compact = " ".join(str(text).split())
+    return compact if len(compact) <= limit else compact[:limit] + "…"
+
+
 def run_codex(argv, *, prompt, cwd, env, timeout, log_path, out_path, on_event=None):
     """Stream events while renewing the lease, including silent process intervals."""
     deadline = time.monotonic() + timeout
@@ -109,10 +115,41 @@ def run_codex(argv, *, prompt, cwd, env, timeout, log_path, out_path, on_event=N
         recovered_final = completed_after_failure and result["exit_code"] == 0
         if result["error"] is None and result["exit_code"] == 0 and (not failed or recovered_final):
             try:
-                result["structured_output"] = json.loads(Path(out_path).read_text(encoding="utf-8"))
-                result["is_error"] = False
-            except (OSError, ValueError) as exc:
-                result["error"] = f"Codex Review 缺少有效最终 JSON：{exc}"
+                payload = Path(out_path).read_bytes()
+            except OSError as exc:
+                # 退出码 0 但没有最终消息：与「有内容但格式不对」区分，避免把
+                # json.loads 的 "char 0" 误读成空文件。
+                result["error"] = f"Codex Review 未写出最终消息：{exc}"
+            else:
+                try:
+                    raw = payload.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    # 半截写入/异常编码也按失败归档，不能让解码异常抛成 internal。
+                    result["error"] = f"Codex Review 最终消息不是 UTF-8 文本：{exc}"
+                else:
+                    if not raw.strip():
+                        result["error"] = "Codex Review 最终消息为空（退出码 0，没有产出最终答复）"
+                    else:
+                        try:
+                            result["structured_output"] = json.loads(raw)
+                            result["is_error"] = False
+                            result["result_format"] = "json"
+                        except ValueError as exc:
+                            # --output-schema 只在原生 Codex/OpenAI 路径被保证执行；经第三方
+                            # 服务商（如 Magpie 网关）接入的模型可能改写文风，按历史
+                            # review_text_v1 契约作答。分段帧交给 Plus 同一严格解析器接收；
+                            # 非合法分段仍 fail-closed，不猜改、不从旧消息取结论。
+                            normalizations = []
+                            framed, frame_error = review._text_result(raw, normalizations=normalizations)
+                            if framed is None:
+                                result["error"] = (
+                                    f"Codex Review 缺少有效最终 JSON：{exc}；{frame_error}；"
+                                    f"最终消息开头：{excerpt(util.redact(raw, secrets))}")
+                            else:
+                                result["structured_output"] = framed
+                                result["result_format"] = "review_text_v1"
+                                result["result_normalizations"] = normalizations
+                                result["is_error"] = False
         elif result["error"] is None:
             result["error"] = f"Codex Review 失败（退出码 {result['exit_code']}）"
         return result
@@ -272,7 +309,11 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
     except (util.KanpilotError, OSError) as exc:
         return blocked(exc.message if isinstance(exc, util.KanpilotError) else str(exc))
     prompt = (Path(__file__).resolve().parents[1] / "executor_prompts" / "review_cli.md").read_text(encoding="utf-8")
-    instruction = review.review_instruction(prompt, job=job, review_root=snapshot, materials=materials, facts=facts)
+    # CLI 后端只下发 JSON 帧（review_cli.md 的契约）；不能同时追加 Plus 的
+    # review_text_v1「不要输出 JSON」，否则不强制 schema 的模型会照后者作答。
+    instruction = review.review_instruction(
+        prompt, job=job, review_root=snapshot, materials=materials, facts=facts,
+        output_format=review.OUTPUT_FORMAT_JSON)
     job.update(review_root=str(snapshot), materials=materials["files"])
     try:
         review_settle.freeze_stage_contract(job, task)
@@ -357,6 +398,12 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
             return review._stop_no_write(job=job, job_path=job_path, log=log,
                 record_run=record, detail=exc.message)
         return blocked(f"review_result_invalid: {exc.message}")
+    # 传输帧来源留证：JSON 为契约；分段帧仅在 Codex 兼容回落时出现。
+    if result.get("result_format") and result["result_format"] != "json":
+        job["result_format"] = result["result_format"]
+        if result.get("result_normalizations"):
+            job["result_normalizations"] = result["result_normalizations"]
+        log.emit("system", util.now_iso(), content="Review 结果格式：" + result["result_format"])
     job.update(validated, send_state="sent", cost_usd=result.get("total_cost_usd") if backend in ("claude", "qoder") else None)
     save()
     return review._settle(db_path=db_path, job=job, job_path=job_path, log=log, record_run=record)
