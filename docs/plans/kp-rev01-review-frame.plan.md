@@ -35,7 +35,7 @@ Codex CLI Review 在第三方服务商（Magpie 网关模型，不执行 `--outp
 | T5 | 测试版可安装 | 推送分支 → `channel=test` 触发 `Packages` → 核对 `vX.Y.Z-test.<run>` 与资产 | run 45128936493 → `v0.5.10-test.424`：checks 5×2 全成功，预发布、四项资产齐全、指向 `d698422` | 待体验 |
 | T6 | 工作树收尾 | 合入 `main` 后清理本任务 worktree 与已合并本地分支 | 未合入前保留 | 未开始 |
 | T7 | 失败原因按实际情形分档 | 缺文件报「未写出最终消息」、空文件报「最终消息为空」、格式不符报「缺少有效最终 JSON」并附脱敏截断摘要；非 UTF-8 也归档为 blocked | `test_codex_missing_final_message_has_distinct_reason`、`test_codex_empty_final_message_has_distinct_reason`、`test_codex_unframed_prose_reports_message_head`、`test_codex_misspelled_text_frame_still_blocks_with_head`、`test_codex_non_utf8_final_message_blocks_instead_of_crashing`、`test_codex_prose_head_is_redacted_and_bounded` | 实现中 |
-| T8 | 以本分支重建测试版 | 推送分支 → `channel=test` 触发 `Packages` → 核对预发布资产与 commit | 待执行 | 实现中 |
+| T8 | 以本分支重建测试版 | 推送分支 → `channel=test` 触发 `Packages` → 核对预发布资产与 commit | run 45531845814 → `v0.5.10-test.449`：checks 10 分片、fixtures、macos-package、android、codex-platforms 全 success；publish 首次因 `actions/download-artifact` 下载超时失败，`gh run rerun --failed` 后 success；预发布非 draft，assets apk/dmg/manifest/SHA256SUMS，commit `9dd8024` | 待体验 |
 
 ## 执行与验证记录
 
@@ -50,6 +50,7 @@ Codex CLI Review 在第三方服务商（Magpie 网关模型，不执行 `--outp
 | 2026-11-25 | 本分支工作树（7f5c1ed 前身） | 本地 Python 3.11.4，`-I` 隔离，临时目录 | `python3 -I -m pytest tests/test_cli_review.py tests/test_plus_review.py tests/test_plus_review_text.py tests/test_review_settle.py tests/test_review_stage_recovery.py -q` | 171 passed, 22 subtests passed（248.65s），退出 0 |
 | 2026-11-25 | `7f5c1ed` | 同上 | `python3 -I -m pytest tests/test_cli_review.py -q`（含第 5 个新增用例） | 31 passed（29.54s），退出 0 |
 | 2026-11-25 | `a14b4b8` | 同上 | `python3 -I -m pytest tests/test_cli_review.py -q`（非 UTF-8 修复后） | 32 passed（30.27s），退出 0 |
+| 2026-11-25 | `9dd8024` | GitHub Actions `Packages`（run 45531845814，channel=test） | 推送分支后取消推送触发的预览 run 45530676399（其 checks 10 分片已全 success，避免占用 macOS 并发）；`gh workflow run packages.yml --ref fix/20261123-kp-rev01-review-frame -f channel=test -f notes=…` | 全部构建 job success；`publish` 首次因 `actions/download-artifact` 取 tarball 超时失败（基础设施问题，非代码），单次 `gh run rerun --failed` 后 success → `v0.5.10-test.449` |
 | 2026-11-25 | `7f5c1ed` | 只读回放真实失败产物 | 本工作树 `_text_result` 解析 `review/5558afe2`、`3ee52587`、`e70f1c1e`、`934cf0ec` 的 `last-message.txt` | 前三个 ACCEPT（conclusion=pass），`934cf0ec` REJECT（`KANEPILOT` 错拼），如 §5.24.5 要求不猜改 |
 
 ## 提交与集成
@@ -58,12 +59,13 @@ Codex CLI Review 在第三方服务商（Magpie 网关模型，不执行 `--outp
 | --- | --- | --- | --- |
 | `d698422`（2026-11-23） | CLI Review 只下发 JSON 帧；Codex 合法分段帧按兼容解析并记 `result_format` | CI checks 全分片通过；本地 review 相关 133 项 + 4 个新用例 | 已推送；测试版 `v0.5.10-test.424`；未合入 `main` |
 | `7f5c1ed`（2026-11-25） | 失败原因分档并带脱敏摘要；错拼标记仍在摘要里一眼可见 | 本地 cli_review 31 passed；五个 review 套件 171 passed + 22 subtests；独立复核确认 CLI 只收 JSON 契约、新增用例在旧实现上全红 | 已推送；未合入 `main` |
-| `a14b4b8`（2026-11-25） | 非 UTF-8 最终消息按失败归档，不再抛 `internal`（复核发现的回归） | 本地 cli_review 32 passed；新增 1 个用例 | 待推送 |
+| `a14b4b8`（2026-11-25） | 非 UTF-8 最终消息按失败归档，不再抛 `internal`（复核发现的回归） | 本地 cli_review 32 passed；新增 1 个用例 | 已推送；测试版 `v0.5.10-test.449` 含此提交 |
+| `9dd8024`（2026-11-25） | 记录 T7/T8、独立复核结论与真实回放归因 | 文档 diff | 已推送；docs/plans 变更不触发构建 |
 
 ## 交付与恢复
 
-- 体验入口和操作步骤：重启到测试版后，对同一任务点「重新 Review」；Codex 后端即使给出分段文本也能结算。
-- 尚未完成 / 尚未验证：最新测试版安装后的真实 Review 复跑（需要用户对受阻任务点「重新 Review」）；`main` 尚未合入，故工作树暂不清理。
+- 体验入口和操作步骤：安装 `v0.5.10-test.449`（或更新）后，对受阻任务点「重新 Review」；CLI 评审指令已是纯 JSON 契约，Codex 即使仍返回合法分段文本也能结算。
+- 尚未完成 / 尚未验证：`v0.5.10-test.449` 安装后的真实 Review 复跑（需要用户对受阻任务点「重新 Review」）；`main` 尚未合入，故工作树暂不清理。`934cf0ec` 那次是标记错拼，即使装了新版本也需新一次 Review 才能解除（不会自动放行）。
 - 用户确认：未确认。
 - 下一步和恢复任务时首先核对的内容：本文件「执行与验证记录」、`git -C <worktree> status`、`core/tests/test_cli_review.py` 新增用例。
 - 需要时的回退 / 数据保留方式：回滚本分支提交即恢复旧行为；失败评审的 `executor-sessions/review/<id>/` 证据不删除。
