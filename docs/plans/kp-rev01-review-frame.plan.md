@@ -34,6 +34,8 @@ Codex CLI Review 在第三方服务商（Magpie 网关模型，不执行 `--outp
 | T4 | 规格与代码一致 | protocol §5.24.5、automation-contract 写明帧契约与兼容边界 | 文档 diff | 待体验 |
 | T5 | 测试版可安装 | 推送分支 → `channel=test` 触发 `Packages` → 核对 `vX.Y.Z-test.<run>` 与资产 | run 45128936493 → `v0.5.10-test.424`：checks 5×2 全成功，预发布、四项资产齐全、指向 `d698422` | 待体验 |
 | T6 | 工作树收尾 | 合入 `main` 后清理本任务 worktree 与已合并本地分支 | 未合入前保留 | 未开始 |
+| T7 | 失败原因按实际情形分档 | 缺文件报「未写出最终消息」、空文件报「最终消息为空」、格式不符报「缺少有效最终 JSON」并附脱敏截断摘要；非 UTF-8 也归档为 blocked | `test_codex_missing_final_message_has_distinct_reason`、`test_codex_empty_final_message_has_distinct_reason`、`test_codex_unframed_prose_reports_message_head`、`test_codex_misspelled_text_frame_still_blocks_with_head`、`test_codex_non_utf8_final_message_blocks_instead_of_crashing`、`test_codex_prose_head_is_redacted_and_bounded` | 实现中 |
+| T8 | 以本分支重建测试版 | 推送分支 → `channel=test` 触发 `Packages` → 核对预发布资产与 commit | 待执行 | 实现中 |
 
 ## 执行与验证记录
 
@@ -45,15 +47,18 @@ Codex CLI Review 在第三方服务商（Magpie 网关模型，不执行 `--outp
 | 2026-11-23 | 同上 | 本地 | `python3 -m compileall -q kanpilot` | EXIT=0 |
 | 2026-11-23 | `d698422` | GitHub Actions `Packages`（run 45128936493，channel=test） | `gh workflow run packages.yml --ref fix/20261123-kp-rev01-review-frame -f channel=test -f notes=…`；`gh run watch --exit-status` | success；`gh release view v0.5.10-test.424` 为预发布、非 draft，资产 apk/dmg/manifest/SHA256SUMS，commit=`d698422` |
 | 2026-11-23 | `d698422` | 同上（推送触发的预览 run 45127696854） | 已取消，避免占用 macOS 并发；其 `checks` 十个分片此前已全 success | checks 全部 success 后才取消 |
-| 2026-11-25 | 本分支工作树（d956561 前身） | 本地 Python 3.11.4，`-I` 隔离，临时目录 | `python3 -I -m pytest tests/test_cli_review.py tests/test_plus_review.py tests/test_plus_review_text.py tests/test_review_settle.py tests/test_review_stage_recovery.py -q` | 171 passed, 22 subtests passed（248.65s），退出 0 |
-| 2026-11-25 | `844ac59` | 同上 | `python3 -I -m pytest tests/test_cli_review.py -q`（含第 5 个新增用例） | 31 passed（29.54s），退出 0 |
-| 2026-11-25 | `844ac59` | 只读回放真实失败产物 | 本工作树 `_text_result` 解析 `review/5558afe2`、`3ee52587`、`e70f1c1e`、`934cf0ec` 的 `last-message.txt` | 前三个 ACCEPT（conclusion=pass），`934cf0ec` REJECT（`KANEPILOT` 错拼），如 §5.24.5 要求不猜改 |
+| 2026-11-25 | 本分支工作树（7f5c1ed 前身） | 本地 Python 3.11.4，`-I` 隔离，临时目录 | `python3 -I -m pytest tests/test_cli_review.py tests/test_plus_review.py tests/test_plus_review_text.py tests/test_review_settle.py tests/test_review_stage_recovery.py -q` | 171 passed, 22 subtests passed（248.65s），退出 0 |
+| 2026-11-25 | `7f5c1ed` | 同上 | `python3 -I -m pytest tests/test_cli_review.py -q`（含第 5 个新增用例） | 31 passed（29.54s），退出 0 |
+| 2026-11-25 | `a14b4b8` | 同上 | `python3 -I -m pytest tests/test_cli_review.py -q`（非 UTF-8 修复后） | 32 passed（30.27s），退出 0 |
+| 2026-11-25 | `7f5c1ed` | 只读回放真实失败产物 | 本工作树 `_text_result` 解析 `review/5558afe2`、`3ee52587`、`e70f1c1e`、`934cf0ec` 的 `last-message.txt` | 前三个 ACCEPT（conclusion=pass），`934cf0ec` REJECT（`KANEPILOT` 错拼），如 §5.24.5 要求不猜改 |
 
 ## 提交与集成
 
 | 提交 | 行为变化与原因 | 验证 | 合并 / 发布情况 |
 | --- | --- | --- | --- |
-| `d698422`（2026-11-23） | CLI Review 只下发 JSON 帧；Codex 合法分段帧按兼容解析并记 `result_format` | CI checks 全分片通过；本地 review 相关 133 项 + 4 个新用例 | 已推送 `origin/fix/20261123-kp-rev01-review-frame`；测试版 `v0.5.10-test.424`；未合入 `main` |
+| `d698422`（2026-11-23） | CLI Review 只下发 JSON 帧；Codex 合法分段帧按兼容解析并记 `result_format` | CI checks 全分片通过；本地 review 相关 133 项 + 4 个新用例 | 已推送；测试版 `v0.5.10-test.424`；未合入 `main` |
+| `7f5c1ed`（2026-11-25） | 失败原因分档并带脱敏摘要；错拼标记仍在摘要里一眼可见 | 本地 cli_review 31 passed；五个 review 套件 171 passed + 22 subtests；独立复核确认 CLI 只收 JSON 契约、新增用例在旧实现上全红 | 已推送；未合入 `main` |
+| `a14b4b8`（2026-11-25） | 非 UTF-8 最终消息按失败归档，不再抛 `internal`（复核发现的回归） | 本地 cli_review 32 passed；新增 1 个用例 | 待推送 |
 
 ## 交付与恢复
 
@@ -67,7 +72,7 @@ Codex CLI Review 在第三方服务商（Magpie 网关模型，不执行 `--outp
 ## 2026-11-25 续修：回归归因、T7/T8
 
 - 回归事实：`v0.5.10-test.424` 之后的测试版 `v0.5.10-test.446` 由 `fix/20261124-kp-rel15-abandon-next-step`（`d0dbec7`）构建，本分支从未合入 `main`，该构建因此不含本修复；2026-11-24 两次 MediaPlayer Review（job `5558afe2`、`934cf0ec`）再次以「Codex Review 缺少有效最终 JSON：Expecting value: line 1 column 1 (char 0)」受阻。
-- 结论不变：`934cf0ec` 的 `last-message.txt` 是完整的分段结果（结论 pass），但首尾标记被写成 `<<<KANEPILOT_REVIEW_V1>>>`/`<<<END_KANEPILOT_REVIEW_V1>>>`（`KANPILOT` 错拼为 `KANEPILOT`），严格分段解析器必须拒收（§5.24.5 不猜改）。同批 `5558afe2`、`3ee52587`、`e70f1c1e` 标记正确，用 d698422 的兼容解析可各得 `conclusion=pass`。因此本轮的实际修复是 T1（只下发 JSON 契约，彻底消除标记错拼风险），而不是试图接收错拼帧。修复不进入构建线就会随每个新分支构建再丢一次。
+- 结论不变：`934cf0ec` 的 `last-message.txt` 是完整的分段结果（结论 pass），但首尾标记被写成 `<<<KANEPILOT_REVIEW_V1>>>`/`<<<END_KANEPILOT_REVIEW_V1>>>`（`KANPILOT` 错拼为 `KANEPILOT`），严格分段解析器必须拒收（§5.24.5 不猜改）。同批 `5558afe2`、`3ee52587`、`e70f1c1e` 标记正确，用 d698422 的兼容解析可各得 `conclusion=pass`。因此本轮的实际修复是 T1（只下发 JSON 契约，不再诱导模型抄写标记，也就不会因标记错拼而失败），而不是试图接收错拼帧；模型仍可能自行拼错，T7 的摘要让这种情况一眼可见。修复不进入构建线就会随每个新分支构建再丢一次。
 - 真实产物只读回放（2026-11-25，本工作树 `_text_result`）：`5558afe2`/ACCEPT pass、`3ee52587`/ACCEPT pass、`e70f1c1e`/ACCEPT pass、`934cf0ec`/REJECT（标记错拼）。`934cf0ec` 需要新一次 Review 才能解除，不能靠解析器补救；T7 的「最终消息开头」摘要让这类错拼第一眼可见。
 - T7（本轮新增）：失败原因区分「未写出最终消息」（退出码 0 但没有 `last-message.txt`）、「最终消息为空」（只有空白）、「缺少有效最终 JSON」（有内容但既非 JSON 也非合法分段，附格式错误、分段校验原因与脱敏后截断 240 字符的消息开头）；不再把 `json.loads` 的 `char 0` 当作唯一诊断。
 - T8：以本分支重建测试版并核对预发布资产；安装后对两个受阻任务点「重新 Review」验证真实结算（需用户操作）。
