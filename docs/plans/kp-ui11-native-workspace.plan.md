@@ -1,6 +1,6 @@
 # KP-UI11 · macOS 工作台视觉优化
 
-状态为待体验，用户已于 2026-11-25 授权构建并发布测试版。基线为 main 的 `28ba4e0`，分支为 `feat/20261124-kp-ui11-native-workspace`，工作树目录为项目登记根下的 `20261124-feat-kp-ui11-native-workspace`。组合目标是 main。安装版 `0.5.10-test.436` 的深色任务详情及背景总览供视觉对照，其来源与 main 有别。
+状态为待体验。2026-11-25 已按用户指定发布 0.6.0 正式版，UI 成果已合入 main。基线为 main 的 `28ba4e0`，分支为 `feat/20261124-kp-ui11-native-workspace`，工作树目录为项目登记根下的 `20261124-feat-kp-ui11-native-workspace`。组合目标是 main。安装版 `0.5.10-test.436` 的深色任务详情及背景总览供视觉对照，其来源与 main 有别。
 
 - T1 使用系统侧栏计数徽标。总览沿用复盘页的分组指标布局，把五个阶段改成可点击的等宽格。阶段名称、真实数量和缺失值都可辨认。
 - T2 将紧凑任务列表的六个筛选项改为原生分段选择器，按可用宽度切换菜单；筛选后的空列表显示系统空态。
@@ -251,3 +251,14 @@ PR 卡内用状态分布条和数量展示当前轮检查，按工作流列出�
 - T29.4 记录实际 PR、源码和构建。清理本轮临时下载及挂载。确认 UI11 独有成果已在 main、无活动引用和未保存文件后清理本任务工作树及已合入的本地分支。
 
 本次没有新增 schema 迁移。1 MiB 全文压力探针的性能问题沿 T28 作为已知问题记录。曾尝试启动独立只读核查 agent，实际运行环境报告指定模型不可用，主 agent 负责串行核查、集成与最终产物验证。
+
+
+2026-11-25，T29 正式发布与适用核验完成，状态为待体验。
+
+- [PR #29](https://github.com/SakuraLoveSmile/KaneoPilot/pull/29) 已合入 main。正式源码为 `bc842adf5f28b3e7704dd54a2cfd06bcc96d503d`，31 个受影响的 macOS 文件与 test.451 逐字节一致，保留 test.449 的评审修复及 main 的更新日志摘要修复。
+- [main Packages #459](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/45569415788) 完整组合检查成功后创建 annotated `v0.6.0`，标签对象为 `683a4e9ceefbb809413d7d573c9036fa156fc537`，直接指向该源码。随后 [正式 Packages #460](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/45571852036) 的 17 个必需 job 全部成功。按工作流默认配置，非门禁全文探针为 skipped；此前性能问题已写入公开发布说明。
+- [v0.6.0 正式发布](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.6.0) 已公开，latest=true、prerelease=false、draft=false。四项资产的大小、GitHub digest、manifest 与 SHA256SUMS 已逐项核验，版本为 0.6.0，构建号为 460，源码 SHA 与标签一致。
+- macOS DMG 为 45,989,243 字节，SHA-256 为 `d930017c48e9d128cfe5037d00e095833c7e36d32199111c062f08391ca765ef`。Android APK 为 8,557,684 字节，SHA-256 为 `f38174184844515df6d6f2775107c3f9dc10581f4f9fffb4769bac92efb73e03`。
+- 只读挂载验证 DMG 完整性及签名、App 深层签名、bundle ID local.kaneopilot、0.6.0/build 460 和 arm64。正式二进制含 ReleasePRChecksView，包内 delivery_status.py、cli_review.py、pi_desktop_review.py、release_delivery.py 与发布源码逐字节一致。核查期间已安装包从 test.454 更新至 test.456，后一次只读核验确认该旧包缺少上述新 UI 组件及交付状态后端；正式包已核对包含它们。
+- 本地共享版本向量 7 项通过，另以正式构建号 460 验证 test.451、test.454、test.456 及 0.5.9 均会获准更新到 0.6.0。真实客户端安装及整套界面体验由用户验收，本轮为云端构建与下载包核验。
+- 本轮临时下载、核验脚本、日志和挂载均已清理。重复分支/PR 构建 #457/#458 已取消，保留 main 与正式标签的完整检查。当前任务工作树在本记录推送后按 T29.4 收尾，删除前核对 main 包含全部独有成果、工作区无未保存文件且无活动引用。
