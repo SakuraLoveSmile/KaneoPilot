@@ -202,7 +202,7 @@ struct AutomationDashboardView: View {
         if !engine.attentionLoaded, let error = engine.error {
             panelMessage {
                 errorLine(error)
-                Button("重试读取") { Task { await model.refreshAll() } }
+                Button("重试读取") { Task { await model.refreshCurrentPage() } }
             }
         } else if !engine.attentionLoaded {
             panelMessage {

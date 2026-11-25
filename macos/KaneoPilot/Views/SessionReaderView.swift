@@ -136,6 +136,7 @@ struct SessionReaderView: View {
         .background(GeometryReader { geometry in Color.clear.onAppear { availableWidth = geometry.size.width }.onChange(of: geometry.size.width) { _, width in availableWidth = width } })
         .onAppear { SessionReaderPerformance.shared.record("reader_view_appeared", ["width": availableWidth]) }
         .task { await store.start(client: model.client) }
+        .task(id: model.requestRevision) { await model.readRelatedRequests() }
         .onDisappear { store.stop() }
         .onAppear { onDigestChange?(executionDigest) }
         .onChange(of: executionDigest) { _, digest in onDigestChange?(digest) }
@@ -145,7 +146,7 @@ struct SessionReaderView: View {
                 Task {
                     if await store.forcePurgeSelectedSession() == nil {
                         model.showToast("已删除残留会话")
-                        await model.loadSaved()
+                        model.dataDidChange([.sessions, .trashedSessions, .events])
                     }
                 }
             }
@@ -164,7 +165,7 @@ struct SessionReaderView: View {
                 Task {
                     if await store.retryExecution(expectedRunID: runID) {
                         model.showToast("重新执行已排队，等待执行端领取")
-                        await model.refreshAll()
+                        model.dataDidChange([.overview, .tasks, .requests, .sessions, .events])
                     }
                 }
             }.disabled(store.acting)
@@ -183,7 +184,7 @@ struct SessionReaderView: View {
                     if await store.requestSessionStart(expected: expected) {
                         model.kickPlanner()
                         model.showToast("开始请求已排队")
-                        await model.refreshAll()
+                        model.dataDidChange([.overview, .tasks, .requests, .sessions, .events])
                     }
                 }
             }

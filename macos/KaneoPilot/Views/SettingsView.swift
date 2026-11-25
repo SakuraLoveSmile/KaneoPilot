@@ -361,19 +361,13 @@ struct SettingsView: View {
             if !execLoaded && !execLoading && !savingExec { await loadExecConfig() }
             if !plannerLoaded && !model.plannerLoading { await loadPlanner() }
             if !reviewLoaded && !reviewLoading { await loadReview() }
-            if executorStatus == nil { await refreshExecutorStatus() }
             if model.desktopQueueStatus == nil { await model.refreshDesktopQueue() }
             if model.reviewCapabilities == nil {
                 await model.refreshReviewCapabilities()
             }
         }
         // §4.10：切运行端**只**刷新只读能力/候选，绝不重载配置覆盖草稿。
-        .onChange(of: model.lastRefreshAt) { _, _ in
-            Task {
-                await refreshExecutorStatus()
-                await model.refreshDesktopQueue()
-            }
-        }
+        .onReceive(AppRuntime.shared.scheduler.$status) { applyExecutorStatus($0) }
         .onChange(of: plannerBackend) { _, backend in
             guard backend == "pi_desktop" else { return }
             Task { await model.refreshPlannerConfig() }
@@ -3151,7 +3145,7 @@ struct SettingsView: View {
             // 状态行：状态词与侧栏、菜单栏同源；说明是最近一次接收的摘要，「检查状态」在右。
             SettingsRow(headline?.text ?? "尚未读取引擎状态", detail: intakeSummaryText,
                         status: headline?.tone.color ?? Color.kpGray) {
-                Button("检查状态") { model.runIntakeNow(); Task { await refreshExecutorStatus() } }
+                Button("检查状态") { model.runIntakeNow() }
                     .disabled(!model.coreFound)
             }
             if let intake = executorStatus?.automation?.lastIntake {
@@ -3232,6 +3226,10 @@ struct SettingsView: View {
         let generation = executorGeneration
         let status = try? await model.client.run("executor-status", as: ExecutorStatusResponse.self)
         guard generation == executorGeneration else { return }
+        if let status { applyExecutorStatus(status) }
+    }
+
+    private func applyExecutorStatus(_ status: ExecutorStatusResponse?) {
         let hadIntakeIssues = intakeIssueCount > 0
         executorStatus = status
         if !hadIntakeIssues && intakeIssueCount > 0 { intakeDetailOpen = true }

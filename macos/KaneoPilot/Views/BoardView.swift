@@ -178,7 +178,7 @@ struct BoardView: View {
                 }
 
                 Group {
-                    if model.isLoading && model.tasks.isEmpty {
+                    if model.isLoading(.tasks) && model.tasks.isEmpty {
                         LoadingView()
                     } else {
                         board

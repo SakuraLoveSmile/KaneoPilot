@@ -4,18 +4,18 @@ import SwiftUI
 /// 由核心在全部历史上执行（不只当前页），输入防抖后重新查询并清空游标。
 struct RunsView: View {
     @EnvironmentObject private var model: AppViewModel
-    @State private var search = ""
-    @State private var stageFilter: String?
-    @State private var resultFilter: String?
     private let rowInsets = EdgeInsets(top: 0, leading: Spacing.xl, bottom: 0, trailing: Spacing.xl)
 
-    /// 筛选组合：变化 → 防抖 300ms → reloadEvents（重置游标取第一页）。
-    private var filters: EventFilters {
-        EventFilters(query: search, stage: stageFilter, result: resultFilter)
+    private var hasFilters: Bool {
+        model.eventFilters != AppViewModel.EventFilters()
     }
 
-    private var hasFilters: Bool {
-        !search.isEmpty || stageFilter != nil || resultFilter != nil
+    private func filter<Value>(_ key: WritableKeyPath<AppViewModel.EventFilters, Value>) -> Binding<Value> {
+        Binding(get: { model.eventFilters[keyPath: key] }, set: { value in
+            var filters = model.eventFilters
+            filters[keyPath: key] = value
+            model.setEventFilters(filters)
+        })
     }
 
     var body: some View {
@@ -29,7 +29,7 @@ struct RunsView: View {
                     }
                 }
                 Group {
-                    if model.isLoading && model.events.isEmpty {
+                    if model.isLoading(.events) && model.events.isEmpty {
                         LoadingView()
                     } else if model.events.isEmpty {
                         emptyState
@@ -63,25 +63,17 @@ struct RunsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.kpControl)
             .navigationTitle("运行记录")
-            .searchable(text: $search, placement: .toolbar,
+            .searchable(text: filter(\.query), placement: .toolbar,
                         prompt: "搜索事件（全部历史）")
             .toolbar { toolbar }
             .navigationDestination(for: String.self) { taskID in
                 TaskDetailContainer(taskID: taskID)
             }
         }
-        .task(id: filters) {
-            // 防抖：输入 300ms 内继续变化则由新 task 取代本次查询。
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
-            await model.reloadEvents(query: search.isEmpty ? nil : search,
-                                     stage: stageFilter,
-                                     result: resultFilter)
-        }
     }
 
     private var resultBinding: Binding<String> {
-        Binding(get: { resultFilter ?? "all" }, set: { resultFilter = $0 == "all" ? nil : $0 })
+        Binding(get: { model.eventFilters.result ?? "all" }, set: { filter(\.result).wrappedValue = $0 == "all" ? nil : $0 })
     }
 
     private let results = [
@@ -91,7 +83,7 @@ struct RunsView: View {
     ]
 
     private var stagePicker: some View {
-        Picker("阶段", selection: $stageFilter) {
+        Picker("阶段", selection: filter(\.stage)) {
             Text("全部阶段").tag(nil as String?)
             ForEach(["plan", "dispatch", "monitor", "review"], id: \.self) { stage in
                 Text(Labels.stage(stage)).tag(Optional(stage))
@@ -136,6 +128,7 @@ struct RunsView: View {
                     Label("加载更多", systemImage: "chevron.down.circle")
                 }
                 .accessibilityLabel("加载更多历史事件")
+                .disabled(!model.canLoadMoreEvents)
             }
             Spacer()
         }
@@ -151,15 +144,10 @@ struct RunsView: View {
         } actions: {
             if hasFilters {
                 Button("重置筛选") {
-                    search = ""
-                    stageFilter = nil
-                    resultFilter = nil
+                    model.setEventFilters(.init())
                 }
             }
-            Button("刷新") {
-                Task { await model.reloadEvents(query: search.isEmpty ? nil : search,
-                                                stage: stageFilter, result: resultFilter) }
-            }
+            Button("刷新") { Task { await model.refreshCurrentPage() } }
         }
     }
 
@@ -167,9 +155,7 @@ struct RunsView: View {
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             Button {
-                Task { await model.reloadEvents(query: search.isEmpty ? nil : search,
-                                                stage: stageFilter,
-                                                result: resultFilter) }
+                Task { await model.refreshCurrentPage() }
             } label: {
                 Label("刷新", systemImage: "arrow.clockwise")
             }
@@ -178,13 +164,6 @@ struct RunsView: View {
             .accessibilityLabel("刷新运行记录")
         }
     }
-}
-
-/// 筛选组合（Equatable → .task(id:) 防抖触发）。
-private struct EventFilters: Equatable {
-    let query: String
-    let stage: String?
-    let result: String?
 }
 
 /// §4.3 留白事件行：结果图标 / 完整标题与元信息 / 时间；点击展开详情。

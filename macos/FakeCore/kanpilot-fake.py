@@ -4819,6 +4819,8 @@ COMMANDS = {
     "mobile-serve": lambda s, p: fail("FakeCore 禁止启动真实手机监听服务", "forbidden"),
     "prepare-task-ai-action": lambda s, p: cmd_task_ai_action_fixture(s, p),
     "start-task-ai-action": lambda s, p: cmd_task_ai_action_fixture(s, p, start=True),
+    "desktop-status": lambda s, p: {"engine": cmd_engine_status(s, {}), "attention": cmd_attention_list(s, {}),
+                                    "executor": cmd_executor_status(s, {})},
     "engine-status": cmd_engine_status,
     "engine-run": cmd_engine_run,
     "attention-list": cmd_attention_list,
@@ -4921,6 +4923,31 @@ COMMANDS = {
 }
 
 
+def page_read_fixture(command, payload, result):
+    rules = os.environ.get("KANPILOT_FAKE_PAGE_READ_RULES")
+    if not rules or "KANPILOT_FAKE_STATE" not in os.environ:
+        return result
+    if command not in {"overview", "list-tasks", "list-events", "get-task", "get-request", "desktop-status"}:
+        return result
+    for rule in json.loads(rules):
+        if rule["command"] != command or rule["payload"] != payload:
+            continue
+        gate = rule.get("gate")
+        if gate and gate.isidentifier():
+            prefix = STATE_PATH + "." + gate
+            with open(prefix + ".ready", "w", encoding="utf-8"):
+                pass
+            deadline = time.monotonic() + 15
+            while not os.path.exists(prefix + ".release"):
+                if time.monotonic() >= deadline:
+                    return fail("fixture gate timed out", "fixture_timeout")
+                time.sleep(0.01)
+        if rule.get("fail"):
+            return fail("injected page read failure", "fixture_failure")
+        break
+    return result
+
+
 def main(argv):
     if len(argv) < 2:
         sys.stderr.write("usage: kanpilot-fake <command> [--json '<payload>']\n")
@@ -4955,7 +4982,7 @@ def main(argv):
         with open(command_log, "a", encoding="utf-8") as log:
             log.write(json.dumps({"command": command, "payload": payload}) + "\n")
     state = load_state()
-    result = handler(state, payload)
+    result = page_read_fixture(command, payload, handler(state, payload))
     if isinstance(result, dict) and "__error__" in result:
         print(json.dumps({"error": result["__error__"], "code": result["__code__"]},
                          ensure_ascii=False))

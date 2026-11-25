@@ -9,9 +9,10 @@ import os
 import sqlite3
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from helpers import KanpilotTestCase  # noqa: E402
-from kanpilot import cli, constants, db, util  # noqa: E402
+from kanpilot import cli, constants, db, derive, util  # noqa: E402
 
 
 class TestPurge(KanpilotTestCase):
@@ -135,6 +136,78 @@ class TestRequestDetail(KanpilotTestCase):
         # 事件视图携带任务/项目标题字段（§5.21.3）。
         self.assertIn("task_title", all_events[0])
         self.assertIn("summary", all_events[0])
+
+
+class TestEventPagination(KanpilotTestCase):
+    def seed_events(self, markers, task_id=None):
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                conn.executemany(
+                    "INSERT INTO events(at, task_id, kind, detail_json) VALUES (?,?,?,?)",
+                    [("2026-01-01T00:00:00Z", task_id, "plan_answers_submitted",
+                      util.jdump({"outcome": "succeeded", "note": marker})) for marker in markers],
+                )
+        finally:
+            conn.close()
+
+    def test_unfiltered_page_only_derives_visible_rows(self):
+        self.seed_events(["first", "second", "third"])
+        with patch.object(derive, "event_view", wraps=derive.event_view) as event_view:
+            first = self.call("list-events", {"limit": 2, "query": " "})
+        self.assertEqual(event_view.call_count, 2)
+        self.assertEqual(first["next_before_id"], first["events"][-1]["id"])
+        self.assertIsNone(first["events"][0]["task_title"])
+        self.seed_events(["new insertion"])
+        second = self.call("list-events", {"limit": 2, "before_id": first["next_before_id"]})
+        self.assertEqual([event["detail"]["note"] for event in second["events"]], ["first"])
+        self.assertIsNone(second["next_before_id"])
+
+    def test_sparse_matches_page_by_last_returned_match(self):
+        self.seed_events(["needle"] + ["filler"] * 300 + ["needle", "needle"])
+        filters = {"query": " NEEdle ", "result": "succeeded", "stage": "plan", "limit": 2}
+        first = self.call("list-events", filters)
+        self.assertEqual(len(first["events"]), 2)
+        self.assertEqual(first["next_before_id"], first["events"][-1]["id"])
+        second = self.call("list-events", dict(filters, before_id=first["next_before_id"]))
+        self.assertEqual([event["id"] for event in second["events"]], [1])
+        self.assertIsNone(second["next_before_id"])
+        full = self.call("list-events", dict(filters, limit=3))
+        self.assertEqual(full["events"], first["events"] + second["events"])
+        self.assertIsNone(full["next_before_id"])
+        self.assertEqual(self.call("list-events", dict(filters, stage="review")),
+                         {"events": [], "next_before_id": None})
+
+    def test_purged_task_reads_snapshot_once_per_page(self):
+        fixture = self.make_ready_task()
+        task_id = fixture["remote"]["id"]
+        snapshot = self.db_path.parent / "event-source.json"
+        snapshot.write_text(util.jdump({"task": {"title": "Old title", "projectName": "Old project"}}),
+                            encoding="utf-8")
+        conn = db.connect(self.db_path)
+        try:
+            with db.write_txn(conn):
+                conn.execute("UPDATE tasks SET save_state='purged', source_path=? WHERE task_id=?",
+                             (str(snapshot), task_id))
+        finally:
+            conn.close()
+        self.seed_events(["first", "second"], task_id)
+        read_text = Path.read_text
+        snapshot_reads = []
+
+        def track_snapshot(path, *args, **kwargs):
+            if path == snapshot:
+                snapshot_reads.append(path)
+            return read_text(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", track_snapshot):
+            page = self.call("list-events", {"task_id": task_id, "limit": 2})
+        self.assertEqual(snapshot_reads, [snapshot])
+        self.assertEqual([(event["task_title"], event["project_name"]) for event in page["events"]],
+                         [("Old title", "Old project")] * 2)
+        snapshot.unlink()
+        next_read = self.call("list-events", {"task_id": task_id, "limit": 1})
+        self.assertTrue(next_read["events"][0]["task_title"].startswith("未保留标题"))
 
 
 class TestPlanningChain(KanpilotTestCase):

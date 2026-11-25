@@ -8,7 +8,7 @@ struct MenuBarView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var pauseInFlight = false
 
-    private var paused: Bool { scheduler.status?.paused?.global == true }
+    private var paused: Bool { model.globalPaused }
     private var pending: Int { scheduler.attentionItems.count }
     private var heartbeat: String {
         scheduler.engineStatus?.instances.contains(where: { $0.active == true }) == true
@@ -57,11 +57,11 @@ struct MenuBarView: View {
                 Button(paused ? "恢复自动推进" : "暂停自动推进") {
                     pauseInFlight = true
                     Task {
-                        await scheduler.setPaused(!paused)
+                        await model.toggleGlobalPause()
                         pauseInFlight = false
                     }
                 }
-                .disabled(pauseInFlight || scheduler.status == nil || scheduler.isSchedulingStopped)
+                .disabled(pauseInFlight || model.busy || !model.pauseStatusKnown || scheduler.isSchedulingStopped)
                 Button { scheduler.checkNow() } label: {
                     Label("刷新引擎状态", systemImage: "arrow.clockwise")
                 }.labelStyle(.iconOnly).help("刷新引擎状态").disabled(scheduler.isSchedulingStopped)
@@ -130,7 +130,7 @@ extension EngineSupervisor {
         if isSchedulingStopped { return ("调度已停止", .red) }
         if !EngineSupervisor.isEnabled { return ("本机引擎已停用", .gray) }
         guard status != nil else { return ("正在读取运行状态", .gray) }
-        if status?.paused?.global == true { return ("已暂停", .orange) }
+        if globalPaused == true { return ("已暂停", .orange) }
         let heartbeat = engineStatus?.instances.contains(where: { $0.active == true }) == true
         return heartbeat ? ("运行中", .green) : ("引擎心跳未确认", .red)
     }

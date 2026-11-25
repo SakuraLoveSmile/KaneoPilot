@@ -22,6 +22,11 @@ struct TaskDetailContentView: View {
     @State private var taskPath: [String] = []
     private var currentTaskID: String { taskPath.last ?? taskID }
 
+    private struct ReadIdentity: Equatable {
+        let taskID: String
+        let revision: Int
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if showsHeader {
@@ -47,13 +52,14 @@ struct TaskDetailContentView: View {
             guard !isEditingText else { return .ignored }
             moveTab(1); return .handled
         }
-        .task {
-            tab = initialTab
-            await load()
+        .task(id: ReadIdentity(taskID: currentTaskID, revision: model.detailRevision)) {
+            while !Task.isCancelled {
+                await load()
+                try? await Task.sleep(for: .seconds(30))
+            }
         }
-        .onChange(of: model.lastRefreshAt) {
-            Task { await load() }
-        }
+        .onAppear { tab = initialTab }
+        .onDisappear { loadGeneration += 1 }
         .onChange(of: taskID) {
             taskPath = []
         }
@@ -64,7 +70,6 @@ struct TaskDetailContentView: View {
             events = []
             eventReadError = nil
             tab = taskPath.isEmpty ? initialTab : .overview
-            Task { await load() }
         }
     }
 
@@ -273,12 +278,18 @@ struct TaskDetailContentView: View {
     private func load() async {
         loadGeneration += 1
         let generation = loadGeneration
+        let requestedTaskID = currentTaskID
+        let revision = model.detailRevision
+        func ownsRead() -> Bool {
+            !Task.isCancelled && generation == loadGeneration
+                && requestedTaskID == currentTaskID && revision == model.detailRevision
+        }
         loading = true
         error = nil
-        defer { if generation == loadGeneration { loading = false } }
+        defer { if ownsRead() { loading = false } }
         do {
-            let (task, eventResult) = try await model.fetchDetailWithEventResult(taskID: currentTaskID)
-            guard generation == loadGeneration else { return }
+            let (task, eventResult) = try await model.fetchDetailWithEventResult(taskID: requestedTaskID)
+            guard ownsRead() else { return }
             detail = task
             switch eventResult {
             case .success(let latest):
@@ -287,7 +298,7 @@ struct TaskDetailContentView: View {
             case .failure(let failure):
                 eventReadError = failure.coreMessage
             }
-            await goalBlockerStore.observe(taskID: currentTaskID, runID: task.runId,
+            await goalBlockerStore.observe(taskID: requestedTaskID, runID: task.runId,
                 eligible: task.readOnly != true && task.executionRound?.backend == "pi_desktop"
                     && ["running", "finished", "failed"].contains(task.executionRound?.runStatus ?? "")
                     && task.status != "done" && task.currentInputQuestion?.state != "open",
@@ -295,7 +306,7 @@ struct TaskDetailContentView: View {
                     try await model.client.run(command, payload: payload, timeout: 120)
                 })
         } catch {
-            guard generation == loadGeneration else { return }
+            guard ownsRead() else { return }
             self.error = error.coreMessage
         }
     }
@@ -485,8 +496,7 @@ struct TaskExecutionTabView: View {
             VStack(alignment: .leading, spacing: Spacing.l) {
                 if goalBlockerStore.showsCard {
                     GoalBlockerCard(store: goalBlockerStore, sessionID: detail?.sessionId) {
-                        onRefreshDetail?()
-                        await model.refreshAll()
+                        model.dataDidChange()
                     }
                 } else {
                     // KP-GB02：只读失败只作提示，不遮挡继续执行条。
@@ -548,8 +558,7 @@ private struct ReviewResolutionCard: View {
                     Task {
                         if await store.prepareRepair() {
                             onPreparePlanning()
-                            onRefreshDetail?()
-                            await model.refreshAll()
+                            model.dataDidChange()
                         }
                     }
                 }
@@ -1082,8 +1091,7 @@ struct TaskOverviewTabView: View {
                     .id("review-resolution")
             } else if goalBlockerStore.showsCard {
                 GoalBlockerCard(store: goalBlockerStore, sessionID: detail.sessionId) {
-                    onRefreshDetail?()
-                    await model.refreshAll()
+                    model.dataDidChange()
                 }
             }
 
@@ -1864,6 +1872,7 @@ struct TaskOverviewTabView: View {
             }
             .disabled(model.busy || queuedPriorityRequest == nil)
             .help(queuedPriorityRequest == nil ? "当前没有可调整顺序的排队请求" : "调整本任务排队请求的优先级")
+            .task(id: model.requestRevision) { await model.readRelatedRequests() }
         case "resume-auto":
             Button(detail.status == "in_review" ? "开始评审" : "恢复自动推进") {
                 Task { await model.resumeAuto(taskID: detail.taskId) }

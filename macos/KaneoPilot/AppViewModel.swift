@@ -71,16 +71,57 @@ final class AppViewModel: ObservableObject {
 
     // 仅供隔离验收：与外观、视口覆盖一样，预览启动时直接打开指定任务的详情；正常启动为空。
     @Published var attentionTaskToOpen: String? = ProcessInfo.processInfo.environment["KANPILOT_PREVIEW_OPEN_TASK"]
-    @Published var selectedTaskID: String?
-    @Published var detail: TaskDetail?
-    @Published var detailEvents: [EventItem] = []
-    @Published var detailLoading = false
-    @Published var detailError: String?
 
     // MARK: - 反馈
 
-    @Published var isLoading = false
-    @Published var banner: Banner?
+    enum ReadDomain: Hashable, CaseIterable {
+        case overview, tasks, requests, sessions, archive, trashedTasks, trashedSessions, events
+    }
+
+    struct EventFilters: Hashable {
+        var query = ""
+        var stage: String?
+        var result: String?
+    }
+
+    private struct ReadKey: Hashable {
+        let domain: ReadDomain
+        let filters: EventFilters?
+    }
+
+    private struct ReadFlight {
+        let revision: Int
+        let task: Task<Void, Never>
+    }
+
+    @Published private var loadingDomains: Set<ReadDomain> = []
+    @Published private var readErrors: [ReadDomain: Banner] = [:]
+    @Published private(set) var showsTrashedSessions = false
+    @Published private(set) var eventFilters = EventFilters()
+    @Published private(set) var detailRevision = 0
+    @Published private(set) var requestRevision = 0
+    private var visibleSection: Section?
+    private var visibleWindow: UUID?
+    private var pageOwner = 0
+    private var readRevisions: [ReadDomain: Int] = [:]
+    private var readFlights: [ReadKey: ReadFlight] = [:]
+    private var eventDebounce: Task<Void, Never>?
+    private var eventReloadPending = false
+    private var loadedEventFilters: EventFilters?
+    private var eventPageVersion = 0
+    private var eventsPaged = false
+    private var taskWriteRevision = 0
+    private var requestWriteRevision = 0
+    private var taskDetailReads: [DetailReadKey: Task<(TaskDetail, Result<[EventItem], Error>), Error>] = [:]
+    private var requestDetailReads: [DetailReadKey: Task<GetRequestResponse, Error>] = [:]
+
+    private struct DetailReadKey: Hashable {
+        let id: String
+        let revision: Int
+    }
+
+    func isLoading(_ domain: ReadDomain) -> Bool { loadingDomains.contains(domain) }
+    var banner: Banner? { visibleDomains.compactMap { readErrors[$0] }.first }
     @Published var toast: String?
     @Published var alertMessage: String?
     @Published var actionInFlight: String?
@@ -104,11 +145,6 @@ final class AppViewModel: ObservableObject {
     @Published var eventsNextBeforeID: Int? = nil
     /// 「加载更多」在途标记（按钮 spinner + 防重入）。
     @Published var eventsLoadingMore = false
-    /// 列表已被用户翻页/筛选定制：周期刷新不得重置其状态（§4.3）。
-    @Published var eventsCustomized = false
-    private var eventQuery: String? = nil
-    private var eventStage: String? = nil
-    private var eventResult: String? = nil
     private var executionAnswerDrafts: [[String]: ExecutionAnswerStore] = [:]
     private var executionStopOperations: [[String]: String] = [:]
     private var planAnswerDrafts: [String: PlanAnswerStore] = [:]
@@ -120,10 +156,13 @@ final class AppViewModel: ObservableObject {
     private(set) var executorScheduler: EngineSupervisor?
     @Published var attentionItems: [AttentionItem] = []
     private var attentionSubscription: AnyCancellable?
+    private var pausedSubscription: AnyCancellable?
+    @Published private var supervisorPaused: Bool?
 
     init() {
         executorScheduler = AppRuntime.shared.scheduler
         attentionSubscription = AppRuntime.shared.scheduler.$attentionItems.sink { [weak self] in self?.attentionItems = $0 }
+        pausedSubscription = AppRuntime.shared.scheduler.$globalPaused.removeDuplicates().sink { [weak self] in self?.supervisorPaused = $0 }
     }
 
     @Published var loginItemEnabled = LoginItem.isEnabled
@@ -148,6 +187,7 @@ final class AppViewModel: ObservableObject {
             var payload: [String: Any] = ["project_id": projectID, "automation": automation]
             if let expectedPolicyRevision { payload["expected_policy_revision"] = expectedPolicyRevision }
             let response = try await client.run("set-project-automation", payload: payload)
+            dataDidChange([.overview, .tasks, .requests, .events])
             onSavedCheck?(response["delivery_base_check"] as? String)
             showToast("已保存自动处理设置")
             return true
@@ -169,8 +209,22 @@ final class AppViewModel: ObservableObject {
         client.location?.displayString ?? "未找到核心（KANPILOT_CORE / Resources/core / ../core）"
     }
     var busy: Bool { actionInFlight != nil }
-    var globalPaused: Bool { overview?.paused?.global ?? false }
-    var hasData: Bool { !tasks.isEmpty || !requests.isEmpty || overview != nil }
+    var globalPaused: Bool { supervisorPaused ?? overview?.paused?.global ?? false }
+    var pauseStatusKnown: Bool { supervisorPaused != nil || overview?.paused?.global != nil }
+    var hasData: Bool {
+        visibleDomains.contains { domain in
+            switch domain {
+            case .overview: return overview != nil
+            case .tasks: return !tasks.isEmpty
+            case .requests: return !requests.isEmpty
+            case .sessions: return !sessions.isEmpty
+            case .archive: return !archivedTasks.isEmpty
+            case .trashedTasks: return !trashedTasks.isEmpty
+            case .trashedSessions: return !trashedSessions.isEmpty
+            case .events: return !events.isEmpty
+            }
+        }
+    }
     var attentionCount: Int { attentionItems.count }
 
     private var toastTask: Task<Void, Never>?
@@ -181,93 +235,206 @@ final class AppViewModel: ObservableObject {
         do { return .success(try await work()) } catch { return .failure(error) }
     }
 
-    /// list-events payload（v2 §5.21.2）：固定 limit=100，筛选条件由
-    /// reloadEvents 维护；before_id 仅供翻页。
-    private func eventsPayload(beforeID: Int? = nil) -> [String: Any] {
+    private func eventsPayload(_ filters: EventFilters, beforeID: Int? = nil) -> [String: Any] {
         var payload: [String: Any] = ["limit": 100]
         if let beforeID { payload["before_id"] = beforeID }
-        if let q = eventQuery, !q.isEmpty { payload["query"] = q }
-        if let eventStage { payload["stage"] = eventStage }
-        if let eventResult { payload["result"] = eventResult }
+        if !filters.query.isEmpty { payload["query"] = filters.query }
+        if let stage = filters.stage { payload["stage"] = stage }
+        if let result = filters.result { payload["result"] = result }
         return payload
     }
 
-    /// 全量刷新：overview + list-tasks + list-requests + list-events 并发。
-    /// 全部失败 → 离线/错误横幅并保留旧数据；部分失败 → 错误横幅；全成功 → 清横幅。
-    /// v2 §4.3：用户已翻页/筛选过运行记录时不再回灌第一页（游标与顺序由
-    /// reloadEvents/loadMoreEvents 独占管理）。
-    func refreshAll() async {
-        await AppRuntime.shared.scheduler.refresh()
-        isLoading = !hasData
-        defer { isLoading = false }
-
-        let skipEvents = eventsCustomized
-        async let o = attempt { try await self.client.run("overview", as: Overview.self) }
-        async let t = attempt { try await self.client.run("list-tasks", as: ListTasksResponse.self) }
-        async let r = attempt { try await self.client.run("list-requests", payload: ["limit": 200], as: ListRequestsResponse.self) }
-        async let e = attempt { () throws -> ListEventsResponse? in
-            if skipEvents { return nil }
-            return try await self.client.run("list-events",
-                                             payload: self.eventsPayload(),
-                                             as: ListEventsResponse.self)
-        }
-        let (ro, rt, rr, re) = await (o, t, r, e)
-
-        var failures: [Error] = []
-        if case .success(let v) = ro { overview = v } else if case .failure(let f) = ro { failures.append(f) }
-        if case .success(let v) = rt { tasks = v.tasks ?? [] } else if case .failure(let f) = rt { failures.append(f) }
-        if case .success(let v) = rr { requests = v.requests ?? [] } else if case .failure(let f) = rr { failures.append(f) }
-        if case .success(let v) = re {
-            if let v {
-                events = v.events ?? []
-                eventsNextBeforeID = v.nextBeforeId
-            }
-        } else if case .failure(let f) = re { failures.append(f) }
-
-
-        if failures.isEmpty {
-            banner = nil
-            lastRefreshAt = Date()
-        } else if failures.count == 4 {
-            let first = failures[0]
-            if (first as? CoreError)?.isConnectivity == true {
-                banner = .offline(first.coreMessage)
-            } else {
-                banner = .failure(first.coreMessage)
-            }
-        } else {
-            banner = .failure("部分读取失败：\(failures[0].coreMessage)")
-            lastRefreshAt = Date()
+    private var visibleDomains: [ReadDomain] {
+        switch visibleSection {
+        case .dashboard, .tasks: return [.overview, .tasks]
+        case .pending: return [.overview, .tasks, .requests]
+        case .settings: return [.overview]
+        case .sessions: return [.sessions]
+        case .archive: return [.archive]
+        case .trash: return [showsTrashedSessions ? .trashedSessions : .trashedTasks]
+        case .runs: return [.events]
+        case nil: return []
         }
     }
 
-    /// 归档/回收站列表 + 会话列表（§5.15.3 / §5.15.5 / v2 §4.6）。
-    /// 与看板刷新解耦：切节、动作后按需加载，避免周期刷新放大进程开销。
-    /// v2：回收站会话段（save_state=trashed）一并拉取。
-    func loadSaved() async {
-        async let archived = attempt {
-            try await self.client.run("list-tasks",
-                                      payload: ["save_state": "archived"],
-                                      as: ListTasksResponse.self)
+    func showPage(_ section: Section?, windowID: UUID? = nil) {
+        if section == nil && visibleWindow != windowID { return }
+        guard section != visibleSection || visibleWindow != windowID else { return }
+        let previous = visibleDomains
+        visibleSection = section
+        visibleWindow = windowID
+        if section != .trash { showsTrashedSessions = false }
+        changePage(leaving: previous)
+    }
+
+    func showTrashedSessions(_ show: Bool) {
+        guard visibleSection == .trash, show != showsTrashedSessions else { return }
+        let previous = visibleDomains
+        showsTrashedSessions = show
+        changePage(leaving: previous)
+    }
+
+    private func changePage(leaving previous: [ReadDomain]) {
+        pageOwner += 1
+        for domain in Set(previous).union(loadingDomains) where !visibleDomains.contains(domain) {
+            invalidateRead(domain)
         }
-        async let trashed = attempt {
-            try await self.client.run("list-tasks",
-                                      payload: ["save_state": "trashed"],
-                                      as: ListTasksResponse.self)
+        if visibleSection != .runs {
+            eventDebounce?.cancel()
+            eventReloadPending = false
         }
-        async let sessions = attempt {
-            try await self.client.run("list-sessions", as: ListSessionsResponse.self)
+        scheduleVisibleReads(visibleDomains)
+    }
+
+    private func scheduleVisibleReads(_ domains: [ReadDomain]) {
+        guard !domains.isEmpty else { return }
+        let owner = pageOwner
+        Task { await readPage(domains, owner: owner) }
+    }
+
+    func refreshPeriodically(windowID: UUID? = nil) async {
+        guard !Task.isCancelled, visibleWindow == windowID else { return }
+        switch visibleSection {
+        case .runs:
+            guard eventFilters == EventFilters(), !eventsPaged, !eventsLoadingMore,
+                  !eventReloadPending else { return }
+        case .dashboard, .tasks, .pending: break
+        default: return
         }
-        async let trashedSessions = attempt {
-            try await self.client.run("list-sessions",
-                                      payload: ["save_state": "trashed"],
-                                      as: ListSessionsResponse.self)
+        await readPage(visibleDomains, owner: pageOwner)
+    }
+
+    func refreshEverythingVisible() async {
+        let owner = pageOwner
+        guard visibleSection != nil else { return }
+        if visibleSection == .runs { cancelEventDebounce() }
+        async let status: Void = AppRuntime.shared.scheduler.refresh()
+        async let page: Void = refreshVisiblePage(owner: owner)
+        _ = await (status, page)
+    }
+
+    func refreshCurrentPage() async {
+        if visibleSection == .runs { cancelEventDebounce() }
+        await refreshVisiblePage(owner: pageOwner)
+    }
+
+    private func refreshVisiblePage(owner: Int) async {
+        guard owner == pageOwner, visibleSection != nil else { return }
+        detailRevision += 1
+        requestRevision += 1
+        await readPage(visibleDomains, owner: owner)
+    }
+
+    private func readPage(_ domains: [ReadDomain], owner: Int) async {
+        guard owner == pageOwner else { return }
+        await withTaskGroup(of: Void.self) { group in
+            for domain in domains {
+                group.addTask { await self.readDomain(domain, owner: owner) }
+            }
         }
-        let (a, t, s, ts) = await (archived, trashed, sessions, trashedSessions)
-        if case .success(let v) = a { archivedTasks = v.tasks ?? [] }
-        if case .success(let v) = t { trashedTasks = v.tasks ?? [] }
-        if case .success(let v) = s { self.sessions = v.sessions ?? [] }
-        if case .success(let v) = ts { self.trashedSessions = v.sessions ?? [] }
+    }
+
+    func readRelatedRequests() async {
+        await readDomain(.requests, owner: pageOwner, contextual: true)
+    }
+
+    func readPlanningTasks() async {
+        await readDomain(.tasks, owner: pageOwner, contextual: true)
+    }
+
+    private func invalidateRead(_ domain: ReadDomain) {
+        readRevisions[domain, default: 0] += 1
+        loadingDomains.remove(domain)
+        readErrors[domain] = nil
+        if domain == .events { invalidateEventPage() }
+    }
+
+    @discardableResult
+    func dataDidChange(_ domains: Set<ReadDomain> = [.overview, .tasks, .requests, .events],
+                       refresh: Bool = true) -> [ReadDomain] {
+        for domain in domains { invalidateRead(domain) }
+        if domains.contains(.tasks) { taskWriteRevision += 1; detailRevision += 1 }
+        if domains.contains(.requests) { requestWriteRevision += 1; requestRevision += 1 }
+        let visible = visibleDomains.filter { domains.contains($0) && !($0 == .events && eventReloadPending) }
+        if refresh { scheduleVisibleReads(visible) }
+        return visible
+    }
+
+    private func readDomain(_ domain: ReadDomain, owner: Int, contextual: Bool = false) async {
+        let filters = domain == .events ? eventFilters : nil
+        let key = ReadKey(domain: domain, filters: filters)
+        while !Task.isCancelled, owner == pageOwner, visibleSection != nil,
+              contextual || visibleDomains.contains(domain) {
+            if let filters, filters != eventFilters || eventReloadPending { return }
+            let revision = readRevisions[domain, default: 0]
+            if let flight = readFlights[key] {
+                await flight.task.value
+                if flight.revision == revision { return }
+                continue
+            }
+            if domain == .events { invalidateEventPage() }
+            loadingDomains.insert(domain)
+            let task = Task { await applyRead(key, revision: revision, owner: owner) }
+            readFlights[key] = ReadFlight(revision: revision, task: task)
+            await task.value
+            return
+        }
+    }
+
+    private func applyRead(_ key: ReadKey, revision: Int, owner: Int) async {
+        let domain = key.domain
+        func ownsResult() -> Bool {
+            readRevisions[domain, default: 0] == revision
+                && (visibleDomains.contains(domain) || owner == pageOwner)
+        }
+        defer {
+            readFlights[key] = nil
+            if ownsResult() { loadingDomains.remove(domain) }
+        }
+        guard ownsResult() else { return }
+        do {
+            switch domain {
+            case .overview:
+                let response = try await client.run("overview", as: Overview.self)
+                if ownsResult() { overview = response }
+            case .tasks, .archive, .trashedTasks:
+                let payload = domain == .tasks ? [:] : ["save_state": domain == .archive ? "archived" : "trashed"]
+                let response = try await client.run("list-tasks", payload: payload, as: ListTasksResponse.self)
+                if ownsResult() {
+                    switch domain {
+                    case .tasks: tasks = response.tasks ?? []
+                    case .archive: archivedTasks = response.tasks ?? []
+                    default: trashedTasks = response.tasks ?? []
+                    }
+                }
+            case .requests:
+                let response = try await client.run("list-requests", payload: ["limit": 200], as: ListRequestsResponse.self)
+                if ownsResult() { requests = response.requests ?? [] }
+            case .sessions, .trashedSessions:
+                let payload = domain == .sessions ? [:] : ["save_state": "trashed"]
+                let response = try await client.run("list-sessions", payload: payload, as: ListSessionsResponse.self)
+                if ownsResult() {
+                    if domain == .sessions { sessions = response.sessions ?? [] }
+                    else { trashedSessions = response.sessions ?? [] }
+                }
+            case .events:
+                let filters = key.filters ?? EventFilters()
+                let response = try await client.run("list-events", payload: eventsPayload(filters), as: ListEventsResponse.self)
+                if ownsResult() {
+                    events = response.events ?? []
+                    eventsNextBeforeID = response.nextBeforeId
+                    loadedEventFilters = filters
+                    eventsPaged = false
+                }
+            }
+            guard ownsResult(), visibleDomains.contains(domain) else { return }
+            readErrors[domain] = nil
+            lastRefreshAt = Date()
+        } catch {
+            guard ownsResult(), visibleDomains.contains(domain) else { return }
+            readErrors[domain] = (error as? CoreError)?.isConnectivity == true
+                ? .offline(error.coreMessage) : .failure(error.coreMessage)
+        }
     }
 
     /// get-task + list-events(task_id)，供任务详情列与 push 页共用。
@@ -277,6 +444,17 @@ final class AppViewModel: ObservableObject {
     }
 
     func fetchDetailWithEventResult(taskID: String) async throws -> (TaskDetail, Result<[EventItem], Error>) {
+        let key = DetailReadKey(id: taskID, revision: taskWriteRevision)
+        if let current = taskDetailReads[key] { return try await current.value }
+        let read = Task {
+            defer { taskDetailReads[key] = nil }
+            return try await readDetail(taskID: taskID, revision: key.revision)
+        }
+        taskDetailReads[key] = read
+        return try await read.value
+    }
+
+    private func readDetail(taskID: String, revision: Int) async throws -> (TaskDetail, Result<[EventItem], Error>) {
         let executionVersions = executionAnswerDrafts.values.filter { $0.taskID == taskID }
             .map { ($0, $0.beginObservation()) }
         async let taskResult = attempt {
@@ -286,6 +464,7 @@ final class AppViewModel: ObservableObject {
             try await self.client.run("list-events", payload: ["task_id": taskID, "limit": 200], as: ListEventsResponse.self)
         }
         let (t, e) = await (taskResult, eventsResult)
+        guard revision == taskWriteRevision else { throw CancellationError() }
         guard case .success(let taskResp) = t else {
             if case .failure(let error) = t {
                 for (store, version) in executionVersions where store.generation == version { store.loadingFailed(error) }
@@ -309,23 +488,6 @@ final class AppViewModel: ObservableObject {
                           readOnly: taskResp.task.readOnly == true)
         }
         return (taskResp.task, e.map { $0.events ?? [] })
-    }
-
-    /// 任务列选中 → 详情列。
-    func loadDetail(taskID: String) async {
-        detailLoading = true
-        detailError = nil
-        defer { detailLoading = false }
-        do {
-            let (task, evs) = try await fetchDetail(taskID: taskID)
-            detail = task
-            detailEvents = evs
-        } catch {
-            detailError = error.coreMessage
-            if (error as? CoreError)?.isConnectivity == true {
-                banner = .offline(error.coreMessage)
-            }
-        }
     }
 
     /// v3 §5.23.1（T1）：get-plan 计划正文核验读取（只读；调用方传当前
@@ -379,6 +541,7 @@ final class AppViewModel: ObservableObject {
     private func perform(_ label: String,
                          successToast: String? = nil,
                          refreshSaved: Bool = false,
+                         affected: Set<ReadDomain> = [.overview, .tasks, .requests, .events],
                          onError: ((String) -> Void)? = nil,
                          _ work: @escaping () async throws -> String?) async {
         guard actionInFlight == nil else { return }
@@ -387,9 +550,7 @@ final class AppViewModel: ObservableObject {
         do {
             let message = try await work() ?? successToast ?? "已执行：\(label)"
             showToast(message)
-            await refreshAll()
-            if refreshSaved { await loadSaved() }
-            if let selected = selectedTaskID { await loadDetail(taskID: selected) }
+            dataDidChange(refreshSaved ? affected.union([.archive, .trashedTasks, .sessions, .trashedSessions]) : affected)
         } catch {
             if let onError { onError(error.coreMessage) }
             else { alertMessage = error.coreMessage }
@@ -524,8 +685,10 @@ final class AppViewModel: ObservableObject {
             }
             await resolve(taskID: taskID, action: "revert_engine_fix",
                           expectedExecutionRunID: candidate.executionRunId, expectedPlanSHA256: candidate.planSha256)
-        } catch { alertMessage = error.coreMessage }
-        await refreshAll()
+        } catch {
+            alertMessage = error.coreMessage
+            await refreshCurrentPage()
+        }
     }
 
     func currentReviewRepair(taskID: String) async throws -> ReviewRepair {
@@ -815,8 +978,7 @@ final class AppViewModel: ObservableObject {
             }, didFinish: { [weak self] passed in
                 guard let self else { return }
                 self.showToast(passed ? "验证检查已通过，继续推进" : "验证检查未通过，请查看具体结果")
-                if self.selectedTaskID == taskID { await self.loadDetail(taskID: taskID) }
-                await self.refreshAll()
+                self.dataDidChange()
             })
         verificationCheckOperations[key] = store
         return store
@@ -841,7 +1003,7 @@ final class AppViewModel: ObservableObject {
         _ = try await fetchDetail(taskID: taskID)
         reviewResolutionDrafts = reviewResolutionDrafts.filter { $0.value !== store }
         objectWillChange.send()
-        lastRefreshAt = Date()
+        detailRevision += 1
     }
 
     func reviewResolutionStore(taskID: String, resolution: ReviewResolution) -> ReviewResolutionStore {
@@ -873,15 +1035,14 @@ final class AppViewModel: ObservableObject {
         }, didSubmit: { [weak self] in
             guard let self else { return }
             self.showToast("补充证据已保存，新一轮评审已排队")
-            if self.selectedTaskID == taskID { await self.loadDetail(taskID: taskID) }
-            await self.refreshAll()
+            self.dataDidChange()
         }, didPrepare: { [weak self] in
             guard let self else { return }
             self.showToast("已准备修复规划，请核对材料后继续")
         }, refresh: { [weak self] in
             guard let self else { return }
             _ = try? await self.fetchDetail(taskID: taskID)
-            await self.refreshAll()
+            self.detailRevision += 1
         })
         reviewResolutionDrafts[key] = store
         return store
@@ -920,10 +1081,11 @@ final class AppViewModel: ObservableObject {
 
     func setPaused(stage: String?, paused: Bool) async {
         let label = paused ? "暂停自动推进" : "恢复自动推进"
-        await perform(label) {
-            _ = try await self.client.run("set-paused",
+        await perform(label, affected: [.overview, .events]) {
+            let response = try await self.client.run("set-paused",
                                           payload: ["stage": stage ?? NSNull(), "paused": paused],
                                           as: SetPausedResponse.self)
+            self.executorScheduler?.recordPauseReceipt(response.paused?.global)
             return paused ? "已暂停自动推进" : "已恢复自动推进"
         }
     }
@@ -1017,7 +1179,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func cancelPlan(requestID: String, taskID: String) async {
-        await perform("终止排队计划", refreshSaved: true) {
+        await perform("终止排队计划") {
             _ = try await self.client.run(
                 "cancel-request", payload: ["request_id": requestID, "task_id": taskID],
                 as: OkResponse.self)
@@ -1067,8 +1229,7 @@ final class AppViewModel: ObservableObject {
                 failed.append("\(task.title ?? task.taskId)：\(error.coreMessage)")
             }
         }
-        await refreshAll()
-        await loadSaved()
+        if failed.count < snapshot.count { dataDidChange(Set(ReadDomain.allCases)) }
         if failed.isEmpty {
             showToast("已永久移除 \(snapshot.count) 项")
         } else {
@@ -1096,8 +1257,7 @@ final class AppViewModel: ObservableObject {
                 failed.append("\(session.markerLabel)：\(error.coreMessage)")
             }
         }
-        await refreshAll()
-        await loadSaved()
+        if failed.count < snapshot.count { dataDidChange([.sessions, .trashedSessions, .events]) }
         if failed.isEmpty {
             showToast("已永久移除 \(snapshot.count) 项")
         } else {
@@ -1109,49 +1269,77 @@ final class AppViewModel: ObservableObject {
 
     /// get-request {request_id} → 请求详情（attempts/allowed_actions/attention_state）。
     func fetchRequestDetail(requestID: String) async throws -> GetRequestResponse {
-        try await client.run("get-request", payload: ["request_id": requestID],
-                             as: GetRequestResponse.self)
+        let key = DetailReadKey(id: requestID, revision: requestWriteRevision)
+        if let current = requestDetailReads[key] { return try await current.value }
+        let read = Task {
+            defer { requestDetailReads[key] = nil }
+            let response = await attempt {
+                try await self.client.run("get-request", payload: ["request_id": requestID], as: GetRequestResponse.self)
+            }
+            guard key.revision == requestWriteRevision else { throw CancellationError() }
+            return try response.get()
+        }
+        requestDetailReads[key] = read
+        return try await read.value
     }
 
     // MARK: - v2 §4.3 运行记录分页/搜索
 
-    /// 重置游标并按筛选条件重查第一页（搜索/筛选由核心在全部历史上执行）。
-    func reloadEvents(query: String? = nil,
-                      stage: String? = nil,
-                      result: String? = nil) async {
-        eventQuery = query
-        eventStage = stage
-        eventResult = result
-        do {
-            let response = try await client.run(
-                "list-events", payload: eventsPayload(),
-                as: ListEventsResponse.self)
-            events = response.events ?? []
-            eventsNextBeforeID = response.nextBeforeId
-            eventsCustomized = (query?.isEmpty == false)
-                || stage != nil || result != nil
-        } catch {
-            banner = .failure(error.coreMessage)
+    func setEventFilters(_ filters: EventFilters) {
+        guard filters != eventFilters else { return }
+        eventFilters = filters
+        invalidateRead(.events)
+        cancelEventDebounce()
+        guard visibleSection == .runs else { return }
+        eventReloadPending = true
+        let owner = pageOwner
+        eventDebounce = Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, owner == pageOwner else { return }
+            eventReloadPending = false
+            await readDomain(.events, owner: owner)
         }
+    }
+
+    private func cancelEventDebounce() {
+        eventDebounce?.cancel()
+        eventDebounce = nil
+        eventReloadPending = false
+    }
+
+    private func invalidateEventPage() {
+        eventPageVersion += 1
+        eventsLoadingMore = false
+    }
+
+    var canLoadMoreEvents: Bool {
+        visibleSection == .runs && loadedEventFilters == eventFilters
+            && !eventReloadPending && !isLoading(.events) && eventsNextBeforeID != nil
     }
 
     /// 「加载更多」：before_id 游标追加下一页（id DESC 顺序不变）。
     func loadMoreEvents() async {
-        guard let cursor = eventsNextBeforeID, !eventsLoadingMore else { return }
+        guard canLoadMoreEvents, let cursor = eventsNextBeforeID, !eventsLoadingMore else { return }
+        let filters = eventFilters
+        let version = eventPageVersion
+        func ownsPage() -> Bool {
+            visibleSection == .runs && filters == eventFilters && version == eventPageVersion
+        }
         eventsLoadingMore = true
-        defer { eventsLoadingMore = false }
+        defer { if ownsPage() { eventsLoadingMore = false } }
         do {
             let response = try await client.run(
                 "list-events",
-                payload: eventsPayload(beforeID: cursor),
+                payload: eventsPayload(filters, beforeID: cursor),
                 as: ListEventsResponse.self)
+            guard ownsPage(), eventsNextBeforeID == cursor else { return }
             let incoming = response.events ?? []
             let known = Set(events.map(\.listID))
             events.append(contentsOf: incoming.filter { !known.contains($0.listID) })
             eventsNextBeforeID = response.nextBeforeId
-            eventsCustomized = true
+            eventsPaged = true
         } catch {
-            alertMessage = error.coreMessage
+            if ownsPage(), eventsNextBeforeID == cursor { alertMessage = error.coreMessage }
         }
     }
 
@@ -1169,7 +1357,7 @@ final class AppViewModel: ObservableObject {
                                  payload: ["task_id": taskID,
                                            "expected_save_state": expectedSaveState],
                                  timeout: 120, as: OkResponse.self)
-        await refreshAll()
+        dataDidChange(Set(ReadDomain.allCases))
     }
 
     /// prepare-plan-input：重新获取任务核验需求哈希 → 建不可变材料目录。
@@ -1205,7 +1393,7 @@ final class AppViewModel: ObservableObject {
             if items.contains(where: { ($0["planner_backend"] as? String) != "codex_desktop" }) {
                 kickPlanner()
             }
-            await refreshAll()
+            dataDidChange()
         }
         return response
     }
@@ -1256,8 +1444,8 @@ final class AppViewModel: ObservableObject {
                 }
             }, refresh: { [weak self] in
                 guard let self else { return nil }
+                self.dataDidChange()
                 let (detail, _) = try await self.fetchDetail(taskID: taskID)
-                await self.refreshAll()
                 return question.isReleaseVerification ? detail.releaseVerificationQuestion : detail.executionQuestion
             })
         executionAnswerDrafts[key] = store
@@ -1288,8 +1476,8 @@ final class AppViewModel: ObservableObject {
             guard let self else { return }
             self.showToast("答案已保存，等待继续规划")
             self.kickPlanner()
-            await self.refreshAll()
-        }, refresh: { [weak self] in await self?.refreshAll() })
+            self.dataDidChange()
+        }, refresh: { [weak self] in await self?.refreshCurrentPage() })
         planAnswerDrafts[key] = store
         return store
     }
@@ -1307,7 +1495,7 @@ final class AppViewModel: ObservableObject {
         store.discardExpiredDraft()
         planAnswerDrafts = planAnswerDrafts.filter { $0.value !== store }
         objectWillChange.send()
-        lastRefreshAt = Date()
+        detailRevision += 1
     }
 
     /// Called before application termination; a failed save keeps the app open.
@@ -1735,9 +1923,10 @@ final class AppViewModel: ObservableObject {
 
         batchProgressText = "正在刷新看板与列表..."
         let previousBanner = banner
-        await refreshAll()
-        await loadSaved()
-        if let selected = selectedTaskID { await loadDetail(taskID: selected) }
+        if !successfulTaskIds.isEmpty {
+            let domains = dataDidChange(Set(ReadDomain.allCases), refresh: false)
+            await readPage(domains, owner: pageOwner)
+        }
 
         var refreshFailedMsg: String? = nil
         if banner != nil && banner != previousBanner {

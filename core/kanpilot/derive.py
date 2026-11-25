@@ -148,7 +148,7 @@ def task_display_status(
         if queued:
             return "已排队"
         # v2（§5.22.4）：publish-plan 成功后待人工确认执行。
-        if db.task_extra(task).get("plan_execution_hold"):
+        if db.task_extra_view(task).get("plan_execution_hold"):
             return "待确认执行"
         return "就绪"
     if status in constants.DISPATCH_MID_STATUSES:
@@ -263,7 +263,7 @@ def task_board_column(
         return "in_review"
     if (
         status == "in_review"
-        and db.task_extra(task).get("review_conclusion") == "changes_requested"
+        and db.task_extra_view(task).get("review_conclusion") == "changes_requested"
     ):
         return "failed"
     if (
@@ -302,7 +302,7 @@ def task_exception_kind(
             return None
     if (
         status == "in_review"
-        and db.task_extra(task).get("review_conclusion") == "changes_requested"
+        and db.task_extra_view(task).get("review_conclusion") == "changes_requested"
     ):
         return "review_rejected"
     if status == "needs_user":
@@ -369,7 +369,8 @@ def task_exception(
 def _completed_pr_review(conn, task) -> bool:
     """SQL-only proof that in_review now means delivery, not an active review."""
     from . import core, review_delivery
-    extra, delivery = db.task_extra(task), core.delivery_of(task)
+    extra = db.task_extra_view(task)
+    delivery = extra.get("delivery") or {}
     history = extra.get("review_history") or []
     review = history[-1] if history else {}
     identity = extra.get("registered_review_identity") or {}
@@ -515,7 +516,7 @@ def task_last_checked_at(
 def task_review_summary(task: sqlite3.Row) -> Optional[dict]:
     """当前周期已登记的评审结论（protocol.md §2）；新一轮 in_review
     起始由 advance-task/sync-tasks 清空 review_conclusion。"""
-    extra = db.task_extra(task)
+    extra = db.task_extra_view(task)
     if extra.get("review_conclusion") is None:
         return None
     return {
@@ -604,6 +605,7 @@ def task_delivery_view(task) -> Optional[dict]:
 
 
 def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
+    extra = db.task_extra_view(task)
     active = active_request_for_task(conn, task["task_id"])
     queued = queued_request_for_task(conn, task["task_id"])
     queued_plan = queued_plan_request_for_task(conn, task["task_id"])
@@ -627,7 +629,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
     exception = task_exception(conn, task, now)
     blocked_reason = exception["detail"] if exception is not None else None
     from . import core, automation_policy, review_repair, review_risk, task_ai_action
-    automation = core.automation_of(task)
+    automation = dict(extra.get("automation") or {})
     policy = automation_policy.policy_for(conn, task["project_id"]) or {}
     automation.update({k: policy.get(k) for k in ("max_fix_rounds", "max_task_minutes", "max_task_cost_usd")}) if automation else None
     from .execution_questions import view as question_view, preview as question_preview
@@ -644,7 +646,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         "task_ai_action": task_ai_action.projection(conn, task, now),
         "delivery": task_delivery_view(task),
         "release": _release(conn, task),
-        "review_history": db.task_extra(task).get("review_history") or [],
+        "review_history": extra.get("review_history") or [],
         "parent_closeout": _parent_closeout(conn, task, now),
         "task_relations": task_relations(conn, task, now),
         "task_id": task["task_id"],
@@ -678,12 +680,12 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         "move_out_eligibility": move_out_eligibility(conn, task, now),
         # v2 §5.22.4：计划已发布但未授权执行（就绪待确认闸）。
         "plan_execution_hold": bool(
-            db.task_extra(task).get("plan_execution_hold")
+            extra.get("plan_execution_hold")
         ),
         # 计划里人工验收段的条目（待体验清单，不参与完成门禁）。
-        "plan_manual_acceptance": db.task_extra(task).get("plan_manual_acceptance") or [],
+        "plan_manual_acceptance": extra.get("plan_manual_acceptance") or [],
         # 本轮交付类型：source（默认）或 evidence_only（证据/记录收尾轮）。
-        "plan_delivery_kind": db.task_extra(task).get("plan_delivery_kind") or "source",
+        "plan_delivery_kind": extra.get("plan_delivery_kind") or "source",
         # v2 §5.20.1：purged 任务只读审计详情。
         "read_only": db.task_is_purged(task),
     }
@@ -710,10 +712,10 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
             phase, condition = "dispatch", "submitting" if task["status"] in ("prepared", "submitting") else "confirmed"
     elif _repair_status(task):
         phase, condition = "review", "reviewing" if repair_state == "awaiting_review" else "repairing"
-    elif task["status"] == "in_review" and db.task_extra(task).get("review_conclusion") != "changes_requested" and (
-            db.task_extra(task).get("review_conclusion") == "pass"
-            or core.delivery_of(task).get("pr_number")
-            or core.delivery_of(task).get("pushed_sha")):
+    elif task["status"] == "in_review" and extra.get("review_conclusion") != "changes_requested" and (
+            extra.get("review_conclusion") == "pass"
+            or (extra.get("delivery") or {}).get("pr_number")
+            or (extra.get("delivery") or {}).get("pushed_sha")):
         phase, condition = "delivery", "syncing"
     view.update(phase=phase, condition=condition, attention=None)
     if (task["status"] == "needs_user" or verification_question and verification_question['state'] == 'open') and db.task_is_active(task):
@@ -796,7 +798,7 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
         # 可移出看板时才提供归档/回收站（§5.15.6）。
         if archive_blocked_reason(conn, task, now) is None:
             actions.extend(["archive", "trash"])
-        hold = bool(db.task_extra(task).get("plan_execution_hold"))
+        hold = bool(db.task_extra_view(task).get("plan_execution_hold"))
         dispatch_sent = bool(task["sent"]) or send_state not in (None, "not_sent")
         if status == "ready" and hold and not dispatch_sent:
             # v2 §5.22.4：待确认执行——以 confirm_dispatch 替代普通排队。
@@ -1370,11 +1372,13 @@ def event_view(
     *,
     task_cache: Optional[dict] = None,
     request_cache: Optional[dict] = None,
+    snapshot_cache: Optional[dict] = None,
 ) -> dict:
     """list-events 扩展视图（§5.21.2）：原字段 + task_title/project_name/
     stage/result/summary。标题回填：任务实体优先 → 来源快照 → 占位。"""
     task_cache = task_cache if task_cache is not None else {}
     request_cache = request_cache if request_cache is not None else {}
+    snapshot_cache = snapshot_cache if snapshot_cache is not None else {}
     task_id = row["task_id"]
     request_id = row["request_id"]
 
@@ -1396,35 +1400,18 @@ def event_view(
     if task is not None and not db.task_is_purged(task):
         task_title = task["title"]
         project_name = task["project_name"]
-    if not task_title and task is not None and task["source_path"]:
-        try:
-            snapshot = util.jload(
-                __import__("pathlib").Path(task["source_path"]).read_text(
-                    encoding="utf-8"
-                )
-            )
-            if isinstance(snapshot, dict):
-                snap_task = snapshot.get("task")
-                if isinstance(snap_task, dict):
-                    task_title = snap_task.get("title")
-        except Exception:
-            pass
-    if not project_name and task is not None and task["source_path"]:
-        try:
-            snapshot = util.jload(
-                __import__("pathlib").Path(task["source_path"]).read_text(
-                    encoding="utf-8"
-                )
-            )
-            if isinstance(snapshot, dict):
-                snap_task = snapshot.get("task")
-                if isinstance(snap_task, dict):
-                    project_name = (
-                        snap_task.get("project_name")
-                        or snap_task.get("projectName")
-                    )
-        except Exception:
-            pass
+    if task is not None and task["source_path"] and (not task_title or not project_name):
+        source_path = task["source_path"]
+        if source_path not in snapshot_cache:
+            try:
+                snapshot = util.jload(Path(source_path).read_text(encoding="utf-8"))
+                snap_task = snapshot.get("task") if isinstance(snapshot, dict) else None
+            except (OSError, ValueError):
+                snap_task = None
+            snapshot_cache[source_path] = snap_task if isinstance(snap_task, dict) else {}
+        snap_task = snapshot_cache[source_path]
+        task_title = task_title or snap_task.get("title")
+        project_name = project_name or snap_task.get("project_name") or snap_task.get("projectName")
     if not task_title and task_id:
         task_title = f"未保留标题 · {str(task_id)[:8]}"
     if not project_name and task is not None and task["project_id"]:

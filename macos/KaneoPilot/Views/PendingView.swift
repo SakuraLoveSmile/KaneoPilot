@@ -86,7 +86,7 @@ struct PendingView: View {
                     StatusFilterBar(selection: $statusFilter, options: statusOptions)
                 }
                 Group {
-                    if model.isLoading && model.requests.isEmpty {
+                    if model.isLoading(.requests) && model.requests.isEmpty {
                         LoadingView()
                     } else if statusFilter != "all" && filteredIsEmpty {
                         filteredEmptyState
@@ -265,7 +265,7 @@ struct PendingView: View {
             Text("当前没有“\(statusOptions.first { $0.id == statusFilter }?.title ?? "")”事项。")
         } actions: {
             Button("查看全部") { statusFilter = "all" }
-            Button("刷新") { Task { await model.refreshAll() } }
+            Button("刷新") { Task { await model.refreshCurrentPage() } }
         }
     }
 
@@ -275,7 +275,7 @@ struct PendingView: View {
         } description: {
             Text("没有排队、进行中、失联或阻塞的任务。")
         } actions: {
-            Button("刷新") { Task { await model.refreshAll() } }
+            Button("刷新") { Task { await model.refreshCurrentPage() } }
         }
     }
 
@@ -651,7 +651,12 @@ struct RequestDetailView: View {
             }
             Button("取消", role: .cancel) {}
         } message: { Text(AutomationPresentation.replanMessage) }
-        .onChange(of: requestID) { revertConfirmation = nil; generation += 1 }
+        .onChange(of: requestID) {
+            revertConfirmation = nil
+            generation += 1
+            detail = nil
+        }
+        .onDisappear { generation += 1 }
         .confirmationDialog("终止排队计划？", isPresented: $confirmCancelPlan,
                             titleVisibility: .visible) {
             Button("终止计划", role: .destructive) {
@@ -663,9 +668,11 @@ struct RequestDetailView: View {
         } message: {
             Text("撤销尚未领取的规划请求，保留规划材料与历史，等待你手动重新规划。若已被领取，本操作会拒绝终止。")
         }
-        .task(id: requestID) { await load() }
-        .onChange(of: model.lastRefreshAt) {
-            Task { await load() }
+        .task(id: RequestReadIdentity(id: requestID, revision: model.requestRevision)) {
+            while !Task.isCancelled {
+                await load()
+                try? await Task.sleep(for: .seconds(30))
+            }
         }
         .confirmationDialog(
             "释放失联请求",
@@ -749,18 +756,29 @@ struct RequestDetailView: View {
         }
     }
 
+    private struct RequestReadIdentity: Equatable {
+        let id: String
+        let revision: Int
+    }
+
     private func load() async {
         generation += 1
         let currentGeneration = generation
+        let requestedID = requestID
+        let revision = model.requestRevision
+        func ownsRead() -> Bool {
+            !Task.isCancelled && currentGeneration == generation && requestedID == requestID
+                && revision == model.requestRevision
+        }
         if detail == nil { loading = true }
         error = nil
-        defer { if currentGeneration == generation { loading = false } }
+        defer { if ownsRead() { loading = false } }
         do {
-            let response = try await model.fetchRequestDetail(requestID: requestID)
-            guard currentGeneration == generation else { return }
+            let response = try await model.fetchRequestDetail(requestID: requestedID)
+            guard ownsRead() else { return }
             detail = response
         } catch {
-            guard currentGeneration == generation else { return }
+            guard ownsRead() else { return }
             self.error = error.coreMessage
         }
     }
