@@ -21,16 +21,13 @@ struct RunsView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                StatusFilterBar(selection: Binding(
-                    get: { resultFilter ?? "all" },
-                    set: { resultFilter = $0 == "all" ? nil : $0 }
-                ), options: [
-                    StatusFilterOption(id: "all", title: "全部"),
-                    StatusFilterOption(id: "succeeded", title: "成功"),
-                    StatusFilterOption(id: "failed", title: "失败"),
-                    StatusFilterOption(id: "needs_user", title: "需人工"),
-                    StatusFilterOption(id: "cancelled", title: "已取消")
-                ])
+                WorkspaceListHeader(title: "事件时间线", icon: "clock.arrow.circlepath",
+                                    summary: "已加载 \(model.events.count) 条") {
+                    HStack(spacing: Spacing.m) {
+                        StatusFilterBar(selection: resultBinding, options: results)
+                        stagePicker.fixedSize()
+                    }
+                }
                 Group {
                     if model.isLoading && model.events.isEmpty {
                         LoadingView()
@@ -38,26 +35,18 @@ struct RunsView: View {
                         emptyState
                     } else {
                         List {
-                            Section {
-                                HStack(alignment: .firstTextBaseline, spacing: Spacing.l) {
-                                    Spacer(minLength: 0)
-                                    Text("已加载 \(model.events.count) 条")
-                                        .font(.kpSmall)
-                                        .monospacedDigit()
-                                }
-                                .foregroundStyle(Color.kpSecondary)
-                                .padding(.bottom, Spacing.s)
-                                .listRowInsets(rowInsets)
-                                .listRowSeparator(.hidden)
-                                ForEach(model.events, id: \.listID) { event in
-                                    EventRow(event: event)
-                                        .listRowInsets(rowInsets)
-                                        .listRowSeparatorTint(Color.kpSeparator.opacity(0.5))
+                            ForEach(eventDays) { day in
+                                Section(day.title) {
+                                    ForEach(day.events, id: \.listID) { event in
+                                        EventRow(event: event)
+                                            .listRowInsets(rowInsets)
+                                            .listRowSeparatorTint(Color.kpSeparator.opacity(0.5))
+                                    }
                                 }
                             }
                             .listRowBackground(Color.clear)
                         }
-                        .listStyle(.plain)
+                        .listStyle(.inset)
                         .scrollContentBackground(.hidden)
                         .contentMargins(.top, Spacing.l, for: .scrollContent)
                         .contentMargins(.horizontal, 0, for: .scrollContent)
@@ -89,6 +78,46 @@ struct RunsView: View {
                                      stage: stageFilter,
                                      result: resultFilter)
         }
+    }
+
+    private var resultBinding: Binding<String> {
+        Binding(get: { resultFilter ?? "all" }, set: { resultFilter = $0 == "all" ? nil : $0 })
+    }
+
+    private let results = [
+        StatusFilterOption(id: "all", title: "全部"), StatusFilterOption(id: "succeeded", title: "成功"),
+        StatusFilterOption(id: "failed", title: "失败"), StatusFilterOption(id: "needs_user", title: "需人工"),
+        StatusFilterOption(id: "cancelled", title: "已取消")
+    ]
+
+    private var stagePicker: some View {
+        Picker("阶段", selection: $stageFilter) {
+            Text("全部阶段").tag(nil as String?)
+            ForEach(["plan", "dispatch", "monitor", "review"], id: \.self) { stage in
+                Text(Labels.stage(stage)).tag(Optional(stage))
+            }
+        }.pickerStyle(.menu).labelsHidden().accessibilityLabel("按阶段过滤")
+    }
+
+    private struct EventDay: Identifiable {
+        let id: String
+        let date: Date?
+        var events: [EventItem]
+        var title: String { date?.formatted(.dateTime.year().month().day()) ?? "日期未知" }
+    }
+
+    /// 连续的同日事件共用标题，跨页追加时仍保持核心返回的 ID 顺序。
+    private var eventDays: [EventDay] {
+        var days: [EventDay] = []
+        for event in model.events {
+            let date = TimeFormat.parse(event.at).map { Calendar.current.startOfDay(for: $0) }
+            if let last = days.indices.last, days[last].date == date {
+                days[last].events.append(event)
+            } else {
+                days.append(EventDay(id: event.listID, date: date, events: [event]))
+            }
+        }
+        return days
     }
 
     private var loadMoreBar: some View {
@@ -127,42 +156,15 @@ struct RunsView: View {
                     resultFilter = nil
                 }
             }
-            Button("刷新") { Task { await model.refreshAll() } }
+            Button("刷新") {
+                Task { await model.reloadEvents(query: search.isEmpty ? nil : search,
+                                                stage: stageFilter, result: resultFilter) }
+            }
         }
     }
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
-            Menu {
-                Button {
-                    stageFilter = nil
-                } label: {
-                    if stageFilter == nil {
-                        Label("全部阶段", systemImage: "checkmark")
-                    } else {
-                        Text("全部阶段")
-                    }
-                }
-                Divider()
-                ForEach(["plan", "dispatch", "monitor", "review"], id: \.self) { stage in
-                    Button {
-                        stageFilter = stage
-                    } label: {
-                        if stageFilter == stage {
-                            Label(Labels.stage(stage), systemImage: "checkmark")
-                        } else {
-                            Text(Labels.stage(stage))
-                        }
-                    }
-                }
-            } label: {
-                Label("按阶段过滤", systemImage: "line.3.horizontal.decrease.circle")
-            }
-            .labelStyle(.iconOnly)
-            .help("按阶段过滤")
-            .accessibilityLabel("按阶段过滤")
-        }
         ToolbarItem(placement: .primaryAction) {
             Button {
                 Task { await model.reloadEvents(query: search.isEmpty ? nil : search,
@@ -275,7 +277,7 @@ private struct EventRow: View {
 
             if expanded { detail }
         }
-        .padding(.vertical, Spacing.l)
+        .padding(.vertical, Spacing.m)
         .frame(minHeight: RowHeight.preferredTwoLine)
     }
 
@@ -329,6 +331,8 @@ private struct EventRow: View {
                 }
             }
         }
+        .padding(Spacing.m)
+        .background(Color.kpWindow, in: RoundedRectangle(cornerRadius: Radius.group))
         .padding(.leading, 32 + Spacing.m)
         .padding(.top, Spacing.xs)
     }

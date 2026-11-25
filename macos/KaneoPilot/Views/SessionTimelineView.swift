@@ -6,6 +6,7 @@ import SwiftUI
 /// 不在此渲染完整消息列表。
 struct SessionTimelineView: View {
     let rounds: [SessionTimelineRound]
+    let isInTaskSheet: Bool
     let onShowRaw: () -> Void
     @State private var collapsedRounds: Set<String> = []
     @State private var expandedActions: Set<String> = []
@@ -14,14 +15,16 @@ struct SessionTimelineView: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Spacing.l) {
-                HStack(spacing: Spacing.s) {
-                    Text("按轮次与关键动作折叠；逐字内容保留在「原文」")
-                        .font(.kpSmall)
-                        .foregroundStyle(Color.kpSecondary)
-                    Spacer(minLength: 0)
-                    Button("查看原文", action: onShowRaw)
-                        .font(.kpSmall)
-                        .controlSize(.small)
+                if !isInTaskSheet {
+                    HStack(spacing: Spacing.s) {
+                        Text("按轮次与关键动作折叠；逐字内容保留在「原文」")
+                            .font(.kpSmall)
+                            .foregroundStyle(Color.kpSecondary)
+                        Spacer(minLength: 0)
+                        Button("查看原文", action: onShowRaw)
+                            .font(.kpSmall)
+                            .controlSize(.small)
+                    }
                 }
                 if rounds.isEmpty {
                     Text("没有可折叠的关键动作。")
@@ -165,46 +168,20 @@ struct SessionTimelineView: View {
     private func actionRow(_ action: SessionTimelineAction) -> some View {
         let expanded = expandedActions.contains(action.id)
         return VStack(spacing: 0) {
-            Button {
-                guard action.expandable else { return }
-                if expanded { expandedActions.remove(action.id) } else { expandedActions.insert(action.id) }
-            } label: {
-                HStack(alignment: .top, spacing: Spacing.s) {
-                    Image(systemName: icon(action.kind))
-                        .font(.kpSmall)
-                        .foregroundStyle(color(action.tone))
-                        .frame(width: 16, alignment: .center)
-                        .padding(.top, 2)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(action.title)
-                            .font(action.kind == .progress ? .kpSmall : .kpBody)
-                            .foregroundStyle(action.kind == .progress ? Color.kpSecondary : Color.primary)
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .multilineTextAlignment(.leading)
-                        if let status = action.status, !status.isEmpty {
-                            Text(status).font(.kpSmall).foregroundStyle(color(action.tone))
-                        }
-                    }
-                    Spacer(minLength: 0)
-                    if let at = action.at {
-                        Text(TimeFormat.short(at))
-                            .font(.kpSmall).monospacedDigit()
-                            .foregroundStyle(Color.kpSecondary)
-                    }
-                    if action.expandable {
-                        Image(systemName: "chevron.right")
-                            .font(.caption2)
-                            .foregroundStyle(Color.kpSecondary)
-                            .rotationEffect(.degrees(expanded ? 90 : 0))
-                    }
+            if action.expandable {
+                Button {
+                    if expanded { expandedActions.remove(action.id) } else { expandedActions.insert(action.id) }
+                } label: {
+                    actionLabel(action, expanded: expanded)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .accessibilityLabel(a11yLabel(action))
+                .accessibilityValue(expanded ? "已展开" : "已收起")
+            } else {
+                actionLabel(action, expanded: false)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(a11yLabel(action))
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(a11yLabel(action))
             if expanded {
                 VStack(alignment: .leading, spacing: Spacing.s) {
                     if let detail = action.detail, !detail.isEmpty {
@@ -231,6 +208,45 @@ struct SessionTimelineView: View {
                 .padding(.bottom, 10)
             }
         }
+    }
+
+    private func actionLabel(_ action: SessionTimelineAction, expanded: Bool) -> some View {
+        let secondaryProgress = !isInTaskSheet && action.kind == .progress
+        return HStack(alignment: .top, spacing: Spacing.s) {
+            Image(systemName: isInTaskSheet && action.tone == .failure ? "exclamationmark.circle.fill" : icon(action.kind))
+                .font(.kpSmall)
+                .foregroundStyle(color(action.tone))
+                .frame(width: 16, alignment: .center)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(action.title)
+                    .font(secondaryProgress ? .kpSmall : .kpBody)
+                    .foregroundStyle(secondaryProgress ? Color.kpSecondary : Color.primary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
+                if let status = action.status, !status.isEmpty,
+                   !isInTaskSheet || !action.title.hasSuffix(" " + status) {
+                    Text(status).font(.kpSmall).foregroundStyle(color(action.tone))
+                }
+            }
+            Spacer(minLength: 0)
+            if let at = action.at {
+                Text(TimeFormat.short(at))
+                    .font(.kpSmall).monospacedDigit()
+                    .foregroundStyle(Color.kpSecondary)
+            }
+            if isInTaskSheet || action.expandable {
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(Color.kpSecondary)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                    .opacity(action.expandable ? 1 : 0).accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .contentShape(Rectangle())
     }
 
     private func timeRange(_ round: SessionTimelineRound) -> String {
@@ -277,7 +293,8 @@ struct SessionTimelineView: View {
 
     private func a11yLabel(_ action: SessionTimelineAction) -> String {
         var parts = [action.title]
-        if let status = action.status, !status.isEmpty { parts.append(status) }
+        if let status = action.status, !status.isEmpty, !action.title.hasSuffix(" " + status) { parts.append(status) }
+        if let at = action.at { parts.append(TimeFormat.short(at)) }
         if let detail = action.detail, !detail.isEmpty { parts.append(detail) }
         return parts.joined(separator: "，")
     }

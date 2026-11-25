@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-/// 统一五段任务详情组件（T2，ui-spec §4.12）。
+/// 共用任务详情组件（T2，ui-spec §4.12）。
 /// 供看板 Sheet、待处理 Push 详情、运行记录关联任务与归档共用相同结构。
 struct TaskDetailContentView: View {
     let taskID: String
@@ -14,6 +14,7 @@ struct TaskDetailContentView: View {
     @State private var tab: TaskDetailTab = .overview
     @State private var detail: TaskDetail?
     @State private var events: [EventItem] = []
+    @State private var eventReadError: String?
     @State private var loading = true
     @State private var error: String?
     @State private var loadGeneration = 0
@@ -26,6 +27,8 @@ struct TaskDetailContentView: View {
             if showsHeader {
                 headerBar
                 Rectangle().fill(Color.kpSeparator.opacity(0.5)).frame(height: 1)
+            } else {
+                headerNavigation.padding(.vertical, Spacing.s)
             }
             content.id(currentTaskID)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -59,6 +62,7 @@ struct TaskDetailContentView: View {
             goalBlockerStore.clear()
             detail = nil
             events = []
+            eventReadError = nil
             tab = taskPath.isEmpty ? initialTab : .overview
             Task { await load() }
         }
@@ -66,7 +70,7 @@ struct TaskDetailContentView: View {
 
     // MARK: - 顶栏
 
-    /// 五段共用顶栏；元信息与导航放不下时分行，切段不改变导航位置。
+    /// 共用顶栏；元信息与导航放不下时分行，切段不改变导航位置。
     private var headerBar: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             HStack(alignment: .top, spacing: Spacing.s) {
@@ -172,12 +176,12 @@ struct TaskDetailContentView: View {
         return question
     }
 
-    /// 五段原生分段控件保持 280pt，宽度不足时由顶栏移到下一行。
+    /// 六段原生分段控件保持 336pt，宽度不足时由顶栏移到下一行。
     private var headerNavigation: some View {
         Picker("详情分段", selection: $tab) {
             ForEach(TaskDetailTab.allCases) { t in Text(t.title).tag(t) }
         }
-        .pickerStyle(.segmented).labelsHidden().frame(width: 280)
+        .pickerStyle(.segmented).labelsHidden().frame(width: 336)
         .fixedSize(horizontal: true, vertical: false).accessibilityLabel("详情分段切换")
     }
 
@@ -210,15 +214,25 @@ struct TaskDetailContentView: View {
         case .review:
             if let detail {
                 TaskReviewTabView(detail: detail, onOpenTask: openRelatedTask,
-                                  onOpenSession: { tab = .execution })
+                                  onOpenSession: { tab = .execution }, onOpenOverview: { tab = .overview })
             } else if loading {
                 LoadingView()
             } else {
                 errorStateView
             }
+        case .release:
+            if error != nil {
+                errorStateView
+            } else if let detail {
+                TaskReleaseTabView(detail: detail, onOpenSession: { tab = .execution },
+                                   onRefreshDetail: { Task { await load() } })
+            } else {
+                LoadingView()
+            }
         case .log:
             if let detail {
-                TaskLogTabView(detail: detail, events: events)
+                TaskLogTabView(detail: detail, events: events, readError: error ?? eventReadError,
+                               loading: loading, onRetry: { Task { await load() } })
             } else if loading {
                 LoadingView()
             } else {
@@ -263,10 +277,16 @@ struct TaskDetailContentView: View {
         error = nil
         defer { if generation == loadGeneration { loading = false } }
         do {
-            let (task, evs) = try await model.fetchDetail(taskID: currentTaskID)
+            let (task, eventResult) = try await model.fetchDetailWithEventResult(taskID: currentTaskID)
             guard generation == loadGeneration else { return }
             detail = task
-            events = evs
+            switch eventResult {
+            case .success(let latest):
+                events = latest
+                eventReadError = nil
+            case .failure(let failure):
+                eventReadError = failure.coreMessage
+            }
             await goalBlockerStore.observe(taskID: currentTaskID, runID: task.runId,
                 eligible: task.readOnly != true && task.executionRound?.backend == "pi_desktop"
                     && ["running", "finished", "failed"].contains(task.executionRound?.runStatus ?? "")
@@ -456,52 +476,42 @@ struct TaskExecutionTabView: View {
     @ObservedObject var goalBlockerStore: GoalBlockerStore
     var onRefreshDetail: (() -> Void)? = nil
     @EnvironmentObject private var model: AppViewModel
-    @State private var retrospectiveExpanded = false
-    @State private var retrospectiveHeight: CGFloat = 0
     @State private var sessionDigest: ExecutionSessionDigest?
     @State private var showingSession = false
 
     var body: some View {
-        // KP-EP01 / ui-spec §4.18：复盘摘要 + 最新进展；完整会话按需在浮层打开，
-        // 执行页不再内嵌阅读器，也不轮询消息正文。
+        // 先处理受阻操作，再读本轮进展、目标与复盘。会话正文在浮层按需读取。
         ScrollView {
-            VStack(alignment: .leading, spacing: Spacing.s) {
+            VStack(alignment: .leading, spacing: Spacing.l) {
                 if goalBlockerStore.showsCard {
                     GoalBlockerCard(store: goalBlockerStore, sessionID: detail?.sessionId) {
                         onRefreshDetail?()
                         await model.refreshAll()
                     }
-                    .padding(.horizontal, Spacing.l)
                 } else {
                     // KP-GB02：只读失败只作提示，不遮挡继续执行条。
                     GoalBlockerUnavailableNote(store: goalBlockerStore, sessionID: detail?.sessionId)
-                        .padding(.horizontal, Spacing.l)
                     if let continuation = detail?.continueExecution,
                        continuation.eligible || continuation.state == "sent" || continuation.state == "observing"
                         || continuation.reconcile?.available == true {
                         ContinueExecutionBar(taskID: taskID,
                                              runID: detail?.runId ?? continuation.runId,
                                              view: continuation)
-                            .padding(.horizontal, Spacing.l)
                     }
                 }
-                ExecutionRetrospectiveView(
-                    detail: detail, digest: sessionDigest,
-                    isExpanded: $retrospectiveExpanded, measuredHeight: $retrospectiveHeight,
-                    onOpenSession: { showingSession = true })
                 ExecutionProgressView(
                     taskID: taskID, runID: detail?.runId,
                     onDigestChange: { sessionDigest = $0 },
                     onOpenSession: { showingSession = true })
                     // Detail arrives asynchronously; initialize the card for its actual preferred round.
                     .id("\(taskID)/\(detail?.runId ?? "pending")")
-                    .padding(.horizontal, Spacing.l)
+                ExecutionRetrospectiveView(detail: detail, digest: sessionDigest)
             }
-            .padding(.horizontal, Spacing.s)
-            .padding(.vertical, Spacing.m)
+            .padding(.horizontal, Spacing.xl)
+            .padding(.vertical, Spacing.l)
         }
         .sheet(isPresented: $showingSession) {
-            ExecutionSessionSheet(taskID: taskID, runID: detail?.runId)
+            ExecutionSessionSheet(taskID: taskID, runID: detail?.runId, taskTitle: detail?.title)
         }
     }
 }
@@ -622,74 +632,73 @@ private struct ReviewResolutionCard: View {
     }
 }
 
-private struct ReviewEvidenceSheet: View {
+struct ReviewEvidenceSheet: View {
     @ObservedObject var store: ReviewResolutionStore
     var onSubmitted: (() -> Void)?
     @EnvironmentObject private var model: AppViewModel
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.m) {
-            Text("补充证据并重新评审").font(.kpTitle)
-            Text("填写说明或选择本地文件。按当前评审配置发起新一轮；用户材料需经评审核验，原报告保留。")
-                .font(.kpBody).fixedSize(horizontal: false, vertical: true)
-            Text("补充说明").font(.kpSmall).foregroundStyle(Color.kpSecondary)
-            TextEditor(text: Binding(get: { store.snapshot.text }, set: { store.setText($0) }))
-                .font(.kpBody).frame(height: 140)
-                .border(Color.kpSecondary.opacity(0.3))
-                .accessibilityLabel("评审补充说明")
-                .disabled(store.inputsLocked)
-            HStack {
-                Text("本地文件（\(store.snapshot.localPaths.count)）").font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                Spacer()
-                Button("选择文件…") { pickFiles() }.disabled(store.inputsLocked)
-            }
-            if !store.snapshot.localPaths.isEmpty {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: Spacing.s) {
-                        ForEach(store.snapshot.localPaths, id: \.self) { path in
-                            HStack(alignment: .top, spacing: Spacing.s) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(URL(fileURLWithPath: path).lastPathComponent).font(.kpBody)
-                                    Text(path).font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                                        .textSelection(.enabled)
-                                }.frame(maxWidth: .infinity, alignment: .leading)
-                                Button("移除") { store.removePath(path) }
-                                    .disabled(store.inputsLocked)
-                                    .accessibilityLabel("移除 \(URL(fileURLWithPath: path).lastPathComponent)")
-                            }.fixedSize(horizontal: false, vertical: true)
+        VStack(spacing: 0) {
+            SettingsSheetHeader(title: "补充证据并重新评审", icon: "paperclip",
+                                scope: "填写说明或添加文件即可提交。新一轮评审将核验材料，原报告会保留。")
+            ScrollView {
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    Text("补充说明").font(.kpSection)
+                    TextEditor(text: Binding(get: { store.snapshot.text }, set: { store.setText($0) }))
+                        .font(.kpBody).frame(height: 108)
+                        .overlay(RoundedRectangle(cornerRadius: Radius.control).stroke(Color.kpSeparator))
+                        .accessibilityLabel("评审补充说明").disabled(store.inputsLocked)
+                    HStack {
+                        Text("本地文件 · \(store.snapshot.localPaths.count)").font(.kpSection)
+                        Spacer()
+                        Button("选择文件…") { pickFiles() }.disabled(store.inputsLocked)
+                    }
+                    if !store.snapshot.localPaths.isEmpty {
+                        GroupPanel {
+                            ForEach(store.snapshot.localPaths, id: \.self) { path in
+                                if path != store.snapshot.localPaths.first { ListRule() }
+                                HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                                    DisclosureGroup {
+                                        Text(path).font(.kpSmall).foregroundStyle(.secondary).textSelection(.enabled)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    } label: {
+                                        Text(URL(fileURLWithPath: path).lastPathComponent).font(.kpBody)
+                                    }
+                                    Spacer(minLength: 0)
+                                    Button("移除") { store.removePath(path) }
+                                        .buttonStyle(.borderless).disabled(store.inputsLocked)
+                                        .accessibilityLabel("移除 \(URL(fileURLWithPath: path).lastPathComponent)")
+                                }.padding(Spacing.m)
+                            }
                         }
                     }
-                }.frame(maxHeight: 140)
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(Spacing.l)
             }
-            if let error = store.error {
-                Label {
-                    Text(error)
-                        .foregroundStyle(Color.primary)
-                } icon: {
-                    Image(systemName: "exclamationmark.circle.fill")
-                        .foregroundStyle(Color.kpRed)
-                }
-                .font(.kpSmall)
-                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                if store.isStale && !store.awaitingReceipt {
-                    Text("此报告已失效，原输入保留。关闭并刷新任务，查看当前报告后再处理。")
-                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                }
+            if store.error != nil || store.feedback != nil {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        if let error = store.error {
+                            Label(error, systemImage: "exclamationmark.circle").font(.kpLabel).textSelection(.enabled)
+                        }
+                        if let feedback = store.feedback {
+                            Text(feedback).font(.kpLabel).textSelection(.enabled)
+                        }
+                        if store.isStale && !store.awaitingReceipt {
+                            Text("此报告已失效，原输入已保留。请关闭窗口并刷新任务。").font(.kpSmall)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(idealHeight: 40, maxHeight: 72).padding(.horizontal, Spacing.l).padding(.bottom, Spacing.s)
             }
-            if let feedback = store.feedback {
-                Text(feedback).font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Divider()
             HStack(spacing: Spacing.m) {
-                Button("稍后处理") { dismiss() }
+                Button("稍后处理") { dismiss() }.keyboardShortcut(.cancelAction)
                 Spacer()
                 if store.submitting { ProgressView().controlSize(.small) }
                 Button(store.awaitingReceipt ? "重试确认提交结果" : "提交并重新评审") { store.submit() }
                     .buttonStyle(.borderedProminent).disabled(model.busy || !store.canSubmit)
-            }
-        }
-        .padding(Spacing.l).frame(width: 580)
+            }.padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
+        }.frame(width: 560, height: 452)
         .onChange(of: store.submitted) {
             if store.submitted {
                 onSubmitted?()
@@ -709,6 +718,46 @@ private struct ReviewEvidenceSheet: View {
     }
 }
 
+private struct BlockEvidenceRow: View {
+    let item: JSONValue
+    private static let labels = ["at": "时间", "kind": "类型", "id": "标识"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            if case .object(let fields) = item, !fields.isEmpty {
+                if let detail = fields["detail"] {
+                    Text(detail.isNull ? "—" : detail.text)
+                }
+                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: Spacing.m, verticalSpacing: Spacing.xs) {
+                    ForEach(fields.keys.filter { $0 != "detail" }.sorted(), id: \.self) { key in
+                        if let value = fields[key] {
+                            GridRow {
+                                Text(Self.labels[key] ?? key)
+                                    .foregroundStyle(Color.kpSecondary)
+                                Text(displayValue(value, key: key)).help(value.text)
+                            }
+                        }
+                    }
+                }
+                .font(.kpLabel)
+            } else {
+                Text(item.text)
+            }
+        }
+        .font(.kpBody)
+        .fixedSize(horizontal: false, vertical: true)
+        .textSelection(.enabled)
+    }
+
+    private func displayValue(_ value: JSONValue, key: String) -> String {
+        if value.isNull { return "—" }
+        if key == "at" { return TimeFormat.fullString(value.text) }
+        if key == "kind", value.text == "event" { return "事件" }
+        if key == "kind", value.text == "request" { return "请求" }
+        return value.text
+    }
+}
+
 struct TaskOverviewTabView: View {
     let detail: TaskDetail
     let events: [EventItem]
@@ -723,7 +772,6 @@ struct TaskOverviewTabView: View {
     @State private var confirmingPurge = false
     @State private var revertConfirmation: (taskID: String, candidate: EngineFixRevert)?
     @State private var revertPreparationID: UUID?
-    @State private var technicalExpanded = false
     @State private var reverifyError: String?
     private struct VerificationRetryConfirmation {
         let taskID: String
@@ -747,6 +795,8 @@ struct TaskOverviewTabView: View {
     @State private var executionStopOperation: (runID: String, operationID: String)?
     @State private var deliveryConfirmation: (taskID: String, executionRunID: String, reviewKey: String)?
     @State private var executionStatusTarget: ExecutionStatusCheckTarget?
+    @State private var recheckResult: RecheckResponse?
+    @State private var recheckOwnerID: String?
 
     private var reviewStore: ReviewResolutionStore? {
         guard detail.parentCloseout == nil else { return nil }
@@ -826,21 +876,6 @@ struct TaskOverviewTabView: View {
             .controlSize(.small)
             .help("核对本轮执行记录与当前运行状态，保留原报错，不会重新执行。")
         }
-    }
-
-    private var hasPlan: Bool {
-        detail.planPath != nil || detail.planKind != nil || detail.planSha256 != nil
-    }
-
-    private var hasExecution: Bool {
-        detail.runId != nil || detail.sessionId != nil || detail.sessionMarker != nil
-            || detail.sessionTitle != nil || detail.sendState != nil
-    }
-
-    private var hasReview: Bool {
-        detail.reviewReportPath != nil || detail.fixTaskId != nil || detail.reviewKey != nil
-            || detail.reviewConclusion != nil || detail.reviewSummary != nil
-            || !(detail.reviewHistory?.isEmpty ?? true)
     }
 
     private var hasKaneo: Bool {
@@ -937,7 +972,7 @@ struct TaskOverviewTabView: View {
         }
     }
 
-    private var nextStepExplanation: String {
+    private var nextStepExplanation: String? {
         if goalBlockerStore.blocker?.needsReconciliation == true {
             return "请在上方核对已发生的目标决定并接续 Pilot；不会重复发送原操作。"
         }
@@ -956,20 +991,23 @@ struct TaskOverviewTabView: View {
         }
         if let question = detail.releaseVerificationQuestion, question.state == "open" {
             return question.answerable
-                ? "在上方回答补验证问题，用底栏「提交答案」继续本次验证；保存草稿不会发送。"
+                ? "回答下方问题后，点底栏「提交答案」继续验证。保存草稿不会发送。"
                 : "这道补验证提问需要在 Plus 中回答，回答后会继续原验证。"
         }
-        if let release = detail.release, release.showsTaskStatus, detail.status != "done" { return release.reason }
-        if let closeout = detail.parentCloseout { return closeout.reason }
-        if let repair = detail.reviewRepair { return repair.reason }
+        if detail.release?.showsTaskStatus == true, detail.status != "done" { return nil }
+        if detail.parentCloseout != nil { return nil }
+        if detail.reviewRepair != nil { return nil }
         if executionAwaitingPlus { return "这道执行提问只能在 Plus 中回答，本机不提供回答入口；可在「更多操作」中停止本轮。" }
         if detail.activeRequest?.status == "queued" && primaryAction != "confirm_dispatch" {
             return "\(queuedKindTitle)已排队，尚未开始；执行端领取后才会推进。"
         }
         if reviewPassedAwaitingDelivery {
-            if let notice = detail.delivery?.autoMergeNotice { return notice.reason }
-            if detail.delivery?.mode == "pr" {
-                return detail.delivery?.prState?.uppercased() == "MERGED"
+            if detail.delivery?.currentPullRequestNotice != nil { return nil }
+            if let delivery = detail.delivery, delivery.mode == "pr" {
+                if delivery.prState?.uppercased() == "CLOSED", !delivery.hasRecordedPRMerge {
+                    return "PR 已关闭，可在发布页查看交付记录。"
+                }
+                return delivery.hasRecordedPRMerge
                     ? "评审已通过，PR 已合并，等待交付状态同步完成。"
                     : "评审已通过，等待 PR 合并后同步完成；可打开 PR 查看交付结果。"
             }
@@ -1000,14 +1038,16 @@ struct TaskOverviewTabView: View {
         case "reverify": return "重新读取当前执行记录；全部验证通过才继续推进，不会调用模型，也不作人工认可。"
         case "accept_verification": return "核对执行与验证证据后，接受验证结果以继续推进。"
         case "revert_engine_fix": return AutomationPresentation.revertMessage
-        case "resume", "retry": return "按当前允许的恢复方式重新推进；已有记录与证据保留。"
+        case "resume", "retry":
+            if showsBlockedBanner, AutomationPresentation.explanation(detail.failureCode) != nil { return nil }
+            return "恢复后将继续推进任务，已有记录与证据保留。"
         case "resume-auto": return "此任务已暂停，恢复后会按当前配置继续自动推进。"
         case "prepare_plan": return "打开规划页面，核对任务材料后开始规划。"
         case "enqueue", "plan", "start_plan", "dispatch", "monitor", "review":
             return "为当前阶段安排请求；排队后等待执行端领取。"
         case "restore": return "恢复到任务列表，默认暂停自动推进，可在恢复时选择继续。"
         case "recheck": return "重新核验计划、来源和远端状态，再查看下一步允许的操作。"
-        default: return "查看当前阶段的记录与证据，自动化进度会随刷新更新。"
+        default: return nil
         }
     }
 
@@ -1028,86 +1068,89 @@ struct TaskOverviewTabView: View {
     }
 
     private var overviewContent: some View {
-            VStack(alignment: .leading, spacing: Spacing.xl) {
-                // 1. 需要你处理：阻塞、待答与待评审，仅在出现时显示
-                if let store = answerStore {
-                    PlanAnswerCard(taskID: detail.taskId, store: store)
-                        .id("plan-answers")
-                } else if let store = reviewStore {
-                    ReviewResolutionCard(taskID: detail.taskId, store: store,
-                        onViewReport: onSwitchTab.map { callback in { callback(.review) } },
-                        onPreparePlanning: {
-                            if let onPreparePlanning { onPreparePlanning(detail.taskId) }
-                            else { model.openPlanning(focusTaskID: detail.taskId) }
-                        }, onRefreshDetail: onRefreshDetail)
-                        .id("review-resolution")
-                } else if goalBlockerStore.showsCard {
-                    GoalBlockerCard(store: goalBlockerStore, sessionID: detail.sessionId) {
-                        onRefreshDetail?()
-                        await model.refreshAll()
-                    }
-                } else if showsBlockedBanner {
-                    // 执行期提问的阻塞由下方问答区说明，不再另起一条通用橙色横幅。
-                    blockedBanner
+        VStack(alignment: .leading, spacing: Spacing.l) {
+            if let store = answerStore {
+                PlanAnswerCard(taskID: detail.taskId, store: store)
+                    .id("plan-answers")
+            } else if let store = reviewStore {
+                ReviewResolutionCard(taskID: detail.taskId, store: store,
+                    onViewReport: onSwitchTab.map { callback in { callback(.review) } },
+                    onPreparePlanning: {
+                        if let onPreparePlanning { onPreparePlanning(detail.taskId) }
+                        else { model.openPlanning(focusTaskID: detail.taskId) }
+                    }, onRefreshDetail: onRefreshDetail)
+                    .id("review-resolution")
+            } else if goalBlockerStore.showsCard {
+                GoalBlockerCard(store: goalBlockerStore, sessionID: detail.sessionId) {
+                    onRefreshDetail?()
+                    await model.refreshAll()
                 }
-                // KP-GB02：目标状态读取失败/不可用只作紧凑提示，不替换上面的失败横幅与核验入口。
-                GoalBlockerUnavailableNote(store: goalBlockerStore, sessionID: detail.sessionId)
-
-                // 开放的执行提问：下一步说明在前，随后是问答表单；阻塞证据与其余内容顺延。
-                if executionQuestionsOpen {
-                    nextStepSection
-                    if let store = executionStore { executionAnswerCard(store) }
-                }
-
-                if detail.parentCloseout == nil, let evidence = detail.attention?.evidence, !evidence.isEmpty {
-                    DisclosureGroup("阻塞证据") {
-                        VStack(alignment: .leading, spacing: Spacing.s) {
-                            ForEach(Array(evidence.enumerated()), id: \.offset) { _, item in
-                                Text(item.text).font(.kpSmall).textSelection(.enabled)
-                            }
-                            Button("查看相关记录") { onSwitchTab?(.log) }
-                        }
-                    }
-                }
-
-                ForEach(model.retainedExecutionAnswerStores(taskID: detail.taskId, excluding: detail.currentInputQuestion?.identity), id: \.formIdentity) { store in
-                    ExecutionAnswerCard(store: store, onRefreshDetail: onRefreshDetail)
-                }
-
-                // 2. 状态与下一步安全动作（开放的执行提问时已在上方）
-                if !executionQuestionsOpen {
-                    nextStepSection
-                }
-
-                if let closeout = detail.parentCloseout {
-                    ParentCloseoutSection(closeout: closeout, onOpenTask: onOpenTask)
-                } else if let repair = detail.reviewRepair {
-                    ReviewRepairSection(taskID: detail.taskId, repair: repair,
-                                        readOnly: detail.readOnly == true,
-                                        onOpenSession: onSwitchTab.map { callback in { callback(.execution) } })
-                }
-
-                // 3. 进展：阶段步进、已结束的问答与直达入口
-                VStack(alignment: .leading, spacing: Spacing.m) {
-                    PhaseStepperView(phase: detail.phase, condition: detail.condition, showsCaption: false, failureStage: detail.failureStage)
-                    if let condition = conditionDifferingFromStatus {
-                        Text("条件：\(condition)").font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                    }
-                    if let store = executionStore, !executionNeedsAttention(store) {
-                        executionAnswerCard(store)
-                    }
-                    stageShortcutsSection
-                    if !showsBlockedBanner { executionStatusCheckButton }
-                }
-
-                // 4. 任务信息：字段行并入一个分组容器，含按钮的操作区留在容器之外
-                taskInfoSection
-
-                // 5. 技术详情与长路径（可折叠）
-                technicalDetailsSection
             }
-            .padding(.horizontal, Spacing.xl)
-            .padding(.vertical, Spacing.l)
+
+            if presentsBlockedSummary {
+                blockedBanner
+            } else if showsProgressSummary {
+                progressSummary
+            } else {
+                nextStepText
+            }
+
+            if let store = executionStore, executionNeedsAttention(store) {
+                executionAnswerCard(store)
+            }
+            ForEach(model.retainedExecutionAnswerStores(taskID: detail.taskId, excluding: detail.currentInputQuestion?.identity), id: \.formIdentity) { store in
+                ExecutionAnswerCard(store: store, onRefreshDetail: onRefreshDetail)
+            }
+            GoalBlockerUnavailableNote(store: goalBlockerStore, sessionID: detail.sessionId)
+
+            if let closeout = detail.parentCloseout {
+                ParentCloseoutSection(closeout: closeout, onOpenTask: onOpenTask)
+            } else if let repair = detail.reviewRepair {
+                ReviewRepairSection(taskID: detail.taskId, repair: repair,
+                                    readOnly: detail.readOnly == true,
+                                    onOpenSession: onSwitchTab.map { callback in { callback(.execution) } })
+            }
+            TaskAutomationSections(detail: detail,
+                onOpenRelease: { onSwitchTab?(.release) },
+                onOpenSession: onSwitchTab.map { callback in { callback(.execution) } },
+                onRefreshDetail: onRefreshDetail)
+            if !presentsBlockedSummary && !showsProgressSummary { executionStatusCheckButton }
+            if detail.autoAdvancePaused == 1 {
+                Label("自动推进已暂停", systemImage: "pause.circle").font(.kpLabel)
+            }
+            if let saveState = detail.saveState, saveState != "active" {
+                Text(Labels.saveState(saveState)).font(.kpLabel)
+            }
+
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                evidenceSection
+                taskInfoSection
+            }
+        }
+        .padding(.horizontal, Spacing.xl)
+        .padding(.vertical, Spacing.l)
+    }
+
+    @ViewBuilder private var evidenceSection: some View {
+        if detail.parentCloseout == nil, let evidence = detail.attention?.evidence, !evidence.isEmpty {
+            DisclosureGroup("阻塞证据") {
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    ForEach(Array(evidence.enumerated()), id: \.offset) { index, item in
+                        if index > 0 { ListRule() }
+                        BlockEvidenceRow(item: item)
+                    }
+                    HStack(spacing: Spacing.s) {
+                        Button("查看相关记录") { onSwitchTab?(.log) }
+                            .disabled(onSwitchTab == nil)
+                        Button("复制证据") { Workspace.copy(evidence.map(\.text).joined(separator: "\n")) }
+                    }
+                    .controlSize(.small)
+                }
+            }
+            .disclosureGroupStyle(DetailDisclosureStyle(systemImage: "doc.text.magnifyingglass",
+                                                        itemCount: evidence.count))
+            .id(detail.taskId)
+        }
     }
 
     private func overviewScrollView(_ proxy: ScrollViewProxy) -> some View {
@@ -1284,9 +1327,14 @@ struct TaskOverviewTabView: View {
         } message: {
             Text(PurgeText.confirmMessage)
         }
-        .sheet(isPresented: Binding(get: { model.recheckResult != nil },
-                                    set: { if !$0 { model.recheckResult = nil } })) {
-            RecheckResultView(result: model.recheckResult)
+        .sheet(isPresented: Binding(get: { recheckResult != nil && recheckOwnerID == detail.taskId },
+                                    set: { if !$0 { recheckResult = nil } })) {
+            if let recheckResult {
+                RecheckResultView(result: recheckResult, taskTitle: detail.title ?? detail.taskId,
+                                  onViewRelease: onSwitchTab.map { callback in
+                    { self.recheckResult = nil; callback(.release) }
+                })
+            }
         }
         .sheet(item: $executionStatusTarget) { target in
             ExecutionStatusCheckView(target: target, onViewSession: onSwitchTab.map { callback in
@@ -1296,7 +1344,11 @@ struct TaskOverviewTabView: View {
                 onRefreshDetail?()
             })
         }
-        .onChange(of: detail.taskId) { executionStatusTarget = nil }
+        .onChange(of: detail.taskId) {
+            executionStatusTarget = nil
+            recheckOwnerID = nil
+            recheckResult = nil
+        }
         .onChange(of: detail.runId) { executionStatusTarget = nil }
     }
 
@@ -1312,85 +1364,74 @@ struct TaskOverviewTabView: View {
 
     // MARK: - 阻塞警告条
 
+    private var presentsBlockedSummary: Bool {
+        guard showsBlockedBanner, !goalBlockerStore.showsCard else { return false }
+        // 发布摘要展示同一原因，并可直接打开发布页。
+        if let release = detail.release, release.showsTaskStatus, detail.blockedReason == release.reason,
+           detail.failureCode == nil { return false }
+        return true
+    }
+
+    private var showsProgressSummary: Bool {
+        answerStore == nil && reviewStore == nil && !goalBlockerStore.showsCard && !executionQuestionsOpen
+            && detail.parentCloseout == nil && detail.reviewRepair == nil && detail.release?.showsTaskStatus != true
+    }
+
+    private var stageTitle: String? {
+        if let step = PhaseStepperView.currentStep(phase: detail.phase, failureStage: detail.failureStage) {
+            return PhaseStepperView.title(step)
+        }
+        return detail.stage.map(Labels.stage)
+    }
+
     private var blockedBanner: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
-            HStack(spacing: Spacing.s) {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
                 Image(systemName: detail.exception?.isFailed == true ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
                     .foregroundStyle(detail.exception?.isFailed == true ? Color.kpRed : Color.kpOrange)
                 Text(detail.exception?.isFailed == true ? (detail.exception?.label ?? "任务失败") : (AutomationPresentation.title(detail.failureCode) ?? detail.exception?.label ?? "任务当前处于阻塞状态"))
                     .font(.kpBody.weight(.semibold))
-                    .foregroundStyle(Color.primary)
+                Spacer()
+                if let stageTitle {
+                    Text(stageTitle + "阶段").font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                }
             }
             if let reason = detail.blockedReason {
-                Text(reason)
-                    .font(.kpSmall)
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
+                Text(reason).font(.kpBody).textSelection(.enabled)
             }
-            if let explanation = AutomationPresentation.explanation(detail.failureCode) {
-                Text(explanation)
-                    .font(.kpSmall)
-                    .foregroundStyle(Color.kpSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            if let explanation = AutomationPresentation.explanation(detail.failureCode), explanation != detail.blockedReason {
+                Text(explanation).font(.kpSmall).foregroundStyle(Color.kpSecondary)
             }
+            nextStepText
             executionStatusCheckButton
         }
-        .padding(Spacing.m)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(Spacing.l)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background((detail.exception?.isFailed == true ? Color.kpRed : Color.kpOrange).opacity(0.12), in: RoundedRectangle(cornerRadius: Radius.control))
     }
 
-    // MARK: - 下一步安全动作与状态
-
-    /// 下一步说明与最近更新。头部已有状态与阶段，这里不重复，也不另设区段标题。
-    private var nextStepSection: some View {
+    private var progressSummary: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
-            if detail.parentCloseout == nil && !(detail.release?.showsTaskStatus == true && detail.status != "done") {
-                HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
-                    Image(systemName: "arrow.right.circle").foregroundStyle(Color.kpBlue).accessibilityHidden(true)
-                    Text(nextStepExplanation)
-                        .font(.kpBody)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+            Label(stageTitle.map { $0 + "阶段" } ?? "任务进展", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                .labelStyle(.titleAndIcon)
+                .font(.kpLabel.weight(.semibold))
+                .foregroundStyle(Color.kpSecondary)
+            if let progress = detail.lastProgress?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !progress.isEmpty, progress != display, progress != nextStepExplanation {
+                Text(progress).font(.kpBody.weight(.medium))
+                    .lineLimit(3).help(progress).textSelection(.enabled)
             }
-            if !statusFacts.isEmpty {
-                Text(statusFacts.joined(separator: " · "))
-                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
-            }
+            nextStepText
+            executionStatusCheckButton
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// 最后更新，以及仅在有值时出现的自动推进暂停与保存状态，合并为一行辅助信息。
-    /// 核心未给出 phase（未识别的状态）时，生命周期阶段作为唯一的阶段信息保留。
-    private var statusFacts: [String] {
-        var facts: [String] = []
-        if detail.phase == nil { facts.append("生命周期阶段 \(Labels.stage(detail.stage))") }
-        if let at = detail.updatedAt { facts.append("最后更新 \(TimeFormat.fullString(at))") }
-        if detail.autoAdvancePaused == 1 { facts.append("自动推进已暂停") }
-        if let saveState = detail.saveState, saveState != "active" { facts.append("保存状态：\(Labels.saveState(saveState))") }
-        return facts
-    }
-
-    // MARK: - 阶段快捷直达
-
-    /// 直达入口与顶部页签去向相同，收成一行内联链接，不另设区段标题与图标按钮。
-    private var stageShortcutsSection: some View {
-        HStack(spacing: Spacing.m) {
-            if hasPlan {
-                Button("查看计划正文") { onSwitchTab?(.plan) }
-            }
-            if hasExecution {
-                Button(detail.reviewRepair?.repairExecutionRunId != nil ? "查看修复会话" : "查看执行会话") { onSwitchTab?(.execution) }
-            }
-            if hasReview {
-                Button("查看评审报告") { onSwitchTab?(.review) }
-            }
-            Button("查看记录与时间线") { onSwitchTab?(.log) }
+    @ViewBuilder private var nextStepText: some View {
+        if let explanation = nextStepExplanation {
+            Text(explanation).font(.kpBody)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .buttonStyle(.link)
-        .font(.kpSmall)
-        .disabled(onSwitchTab == nil)
     }
 
     // MARK: - Kaneo 关联
@@ -1406,33 +1447,35 @@ struct TaskOverviewTabView: View {
         }
     }
 
-    /// 概览的「任务信息」：字段行并入一个分组容器，含按钮的操作区留在容器之外。
     private var taskInfoSection: some View {
-        DetailSection(title: "任务信息") {
-            GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
-                VStack(alignment: .leading, spacing: Spacing.m) {
-                    FieldRow("项目", detail.projectName?.isEmpty == false ? detail.projectName : detail.projectId)
-                    if let relations = detail.taskRelations {
-                        FieldRow("层级", TaskRelationsView.levelText(relations))
+        DisclosureGroup("任务资料") {
+            VStack(alignment: .leading, spacing: Spacing.m) {
+                PhaseStepperView(phase: detail.phase, condition: detail.condition, showsCaption: false, failureStage: detail.failureStage)
+                if let condition = conditionDifferingFromStatus { FieldRow("当前条件", condition) }
+                if detail.phase == nil { FieldRow("生命周期阶段", Labels.stage(detail.stage)) }
+                if let at = detail.updatedAt { FieldRow("最后更新", TimeFormat.fullString(at)) }
+                ListRule()
+                FieldRow("项目", detail.projectName?.isEmpty == false ? detail.projectName : detail.projectId)
+                if let relations = detail.taskRelations {
+                    FieldRow("层级", TaskRelationsView.levelText(relations))
+                    if relations.parent != nil || !relations.children.isEmpty {
+                        TaskRelationsView(relations: relations, onOpenTask: onOpenTask, inTaskInfo: true)
                     }
-                    if hasKaneo {
-                        kaneoFieldRows
-                    }
-                    TaskAutomationFieldRows(detail: detail)
                 }
-                .padding(Spacing.l)
+                if hasKaneo { kaneoFieldRows }
+                if let url = detail.links?.kaneoTaskUrl, !url.isEmpty {
+                    Button("打开 Kaneo 任务页面") { Workspace.open(url) }
+                }
+                TaskAutomationFieldRows(detail: detail)
+                if let store = executionStore, !executionNeedsAttention(store) {
+                    executionAnswerCard(store)
+                }
+                TaskAutomationRecords(detail: detail)
+                technicalDetailsSection
             }
-            if let relations = detail.taskRelations {
-                TaskRelationsView(relations: relations, onOpenTask: onOpenTask, inTaskInfo: true)
-            }
-            if let url = detail.links?.kaneoTaskUrl, !url.isEmpty {
-                Button("打开 Kaneo 任务页面") { Workspace.open(url) }
-                    .font(.kpSmall)
-            }
-            TaskAutomationSections(detail: detail,
-                onOpenSession: onSwitchTab.map { callback in { callback(.execution) } },
-                onRefreshDetail: onRefreshDetail)
+            .disclosureGroupStyle(.automatic)
         }
+        .disclosureGroupStyle(DetailDisclosureStyle(systemImage: "folder"))
     }
 
     /// 任务信息分组里的 Kaneo 字段行；「打开 Kaneo 任务页面」按钮留在分组之外（见 `taskInfoSection`）。
@@ -1444,7 +1487,7 @@ struct TaskOverviewTabView: View {
     // MARK: - 技术详情（折叠区）
 
     private var technicalDetailsSection: some View {
-        DisclosureGroup(isExpanded: $technicalExpanded) {
+        DisclosureGroup {
             VStack(alignment: .leading, spacing: Spacing.s) {
                 FieldRow("Task ID", detail.taskId)
                 if let pid = detail.projectId {
@@ -1478,18 +1521,10 @@ struct TaskOverviewTabView: View {
                     FieldRow("评审报告路径", rep)
                 }
             }
-            .padding(Spacing.l)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.kpWindow.opacity(0.5), in: RoundedRectangle(cornerRadius: Radius.group))
-            .overlay {
-                RoundedRectangle(cornerRadius: Radius.group)
-                    .strokeBorder(Color.kpSeparator.opacity(0.5), lineWidth: 1)
-            }
         } label: {
             Text("技术详情与路径")
-                .font(.kpSmall)
-                .foregroundStyle(Color.kpSecondary)
         }
+        .disclosureGroupStyle(DetailDisclosureStyle(systemImage: "folder"))
     }
 
     // MARK: - 底部操作栏
@@ -1759,7 +1794,13 @@ struct TaskOverviewTabView: View {
             .help("只重跑失败 Job；检查会重新排队，结果以 GitHub 为准")
         case "recheck":
             Button("重新校验") {
-                Task { await model.recheck(taskID: detail.taskId) }
+                let taskID = detail.taskId
+                recheckOwnerID = taskID
+                Task {
+                    await model.recheck(taskID: taskID) { result in
+                        if recheckOwnerID == taskID { recheckResult = result }
+                    }
+                }
             }
             .disabled(model.busy)
         case "restore":

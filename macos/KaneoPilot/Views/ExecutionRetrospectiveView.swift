@@ -7,10 +7,21 @@ struct ExecutionSessionDigest: Equatable {
     /// 1 起的轮次序号，按开始时间升序。
     let roundIndex: Int
     let roundCount: Int
-    /// 「进行中」或「已结束」；运行状态未知时为 nil。
+    /// 来自核心的轮次状态展示文字；未提供状态时为 nil。
     let roundState: String?
     let messageCount: Int?
     let lastCheckedAt: String?
+
+    static func statusLabel(_ value: String) -> String {
+        switch value {
+        case "running": return "运行中"
+        case "finished": return "已结束"
+        case "failed": return "失败"
+        case "pending": return "等待开始"
+        case "unknown": return "状态未知"
+        default: return value
+        }
+    }
 }
 
 /// 复盘泳道的固定顺序、中文名与类别色（§4.18「类别色」）。「其他」不占泳道。
@@ -39,15 +50,12 @@ enum RetrospectiveLane: String, CaseIterable {
     }
 }
 
-/// 执行页顶部的复盘摘要：折叠为一行 44pt 面板行；展开后依次为指标面板、时间轴面板、重点与验证面板
+/// 执行进展下方的复盘摘要。展开后依次显示指标、时间轴、重点与验证面板
 /// （ui-spec §4.18，对齐画板 exec-compare）。区段标题在面板外面，面板内行间一条 1pt 细线。
 struct ExecutionRetrospectiveView: View {
     let detail: TaskDetail?
     let digest: ExecutionSessionDigest?
-    @Binding var isExpanded: Bool
-    /// 摘要自身高度回报给执行页，用于让阅读器填满剩余空间。
-    @Binding var measuredHeight: CGFloat
-    let onOpenSession: () -> Void
+    @State private var isExpanded = false
     @State private var availableWidth: CGFloat = 900
     @State private var segmentsExpanded = false
     @State private var moreMetricsExpanded = false
@@ -63,88 +71,49 @@ struct ExecutionRetrospectiveView: View {
     private static let listRowHeight: CGFloat = 36
     private static let foldRowHeight: CGFloat = 32
 
-    init(detail: TaskDetail?, digest: ExecutionSessionDigest?, isExpanded: Binding<Bool>,
-         measuredHeight: Binding<CGFloat>, onOpenSession: @escaping () -> Void) {
-        self.detail = detail
-        self.digest = digest
-        _isExpanded = isExpanded
-        _measuredHeight = measuredHeight
-        self.onOpenSession = onOpenSession
-    }
-
     private var retrospective: TaskRetrospective? { detail?.retrospective }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.l) {
-            titleRow
-            if isExpanded { expandedContent }
-        }
-        .padding(Spacing.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(GeometryReader { proxy in
-            Color.clear
-                .onAppear { measure(proxy.size) }
-                .onChange(of: proxy.size) { _, size in measure(size) }
-        })
-    }
-
-    private func measure(_ size: CGSize) {
-        availableWidth = size.width
-        measuredHeight = size.height
-    }
-
-    // MARK: 标题行：展开控件 + 已用时 + 打开会话
-
-    /// 收起态是 44pt 的面板行（摘要与「打开会话」同一行）；展开态只保留 28pt 的头部一行，摘要隐去。
-    private var titleRow: some View {
-        HStack(spacing: Spacing.m) {
+        VStack(alignment: .leading, spacing: Spacing.m) {
             Button {
                 isExpanded.toggle()
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.kpSmall)
-                        .foregroundStyle(Color.kpSecondary)
-                        .accessibilityHidden(true)
-                    Text("复盘").font(.kpSection)
-                    Text("已用时 \(elapsedText)")
-                        .font(.kpLabel).monospacedDigit().foregroundStyle(Color.kpSecondary)
+                    Image(systemName: "clock.arrow.circlepath").foregroundStyle(Color.kpSecondary)
+                    Text("执行复盘").font(.kpBody.weight(.semibold))
                     if !isExpanded, !collapsedSummary.isEmpty {
-                        Text(collapsedSummary)
-                            .font(.kpLabel).foregroundStyle(Color.kpSecondary).lineLimit(1)
+                        Text(collapsedSummary).font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                            .lineLimit(1).help(collapsedSummary)
                     }
+                    Spacer(minLength: Spacing.s)
+                    Text(elapsedText).font(.kpLabel.monospacedDigit()).foregroundStyle(Color.kpSecondary)
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.kpSmall.weight(.semibold)).foregroundStyle(Color.kpSecondary)
+                        .accessibilityHidden(true)
                 }
+                .padding(.horizontal, Spacing.l)
+                .frame(minHeight: RowHeight.interactive)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("复盘，已用时 \(elapsedText)")
+            .background(Color.kpSecondary.opacity(0.06), in: RoundedRectangle(cornerRadius: Radius.group))
+            .overlay { RoundedRectangle(cornerRadius: Radius.group).strokeBorder(Color.kpSeparator.opacity(0.6)) }
+            .accessibilityLabel(["执行复盘", isExpanded ? "" : collapsedSummary, elapsedText]
+                .filter { !$0.isEmpty }.joined(separator: "，"))
             .accessibilityValue(isExpanded ? "已展开" : "已收起")
-            .help(isExpanded ? "收起复盘" : "展开复盘")
-
-            Spacer(minLength: 0)
-            if digest == nil {
-                Text("尚无执行会话").font(.kpLabel).foregroundStyle(Color.kpSecondary)
-            }
-            Button("打开会话", action: onOpenSession)
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .font(.kpLabel)
-                .disabled(digest == nil)
-                .help(digest == nil ? "尚无执行会话" : "打开当前轮次的完整会话（按需读取正文）")
-        }
-        .padding(.horizontal, isExpanded ? 0 : Self.tileHorizontalPadding)
-        .frame(minHeight: isExpanded ? 28 : 44)
-        .background(isExpanded ? Color.clear : Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.group))
-        .overlay {
-            if !isExpanded {
-                RoundedRectangle(cornerRadius: Radius.group).strokeBorder(Color.kpSeparator, lineWidth: 1)
+            if isExpanded {
+                expandedContent
+                    .background(GeometryReader { geometry in
+                        Color.clear
+                            .onAppear { availableWidth = geometry.size.width }
+                            .onChange(of: geometry.size.width) { _, width in availableWidth = width }
+                    })
             }
         }
     }
 
     private var elapsedText: String {
-        guard detail != nil else { return "—" }
-        return RetrospectiveFormat.duration(retrospective?.elapsedSeconds) ?? "未汇总"
+        RetrospectiveFormat.duration(retrospective?.elapsedSeconds).map { "已用时 " + $0 } ?? "用时未汇总"
     }
 
     /// 折叠行摘要：只列有数据的项（§4.18）；门控关闭时不显示等你处理次数。

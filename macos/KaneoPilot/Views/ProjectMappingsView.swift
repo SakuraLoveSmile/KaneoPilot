@@ -12,14 +12,14 @@ struct ProjectMappingsView: View {
 
     @State private var items: [ProjectMappingItem] = []
     @State private var revision: Int = 0
-    @State private var workspaceId: String = ""
-    @State private var remoteStatus: String = "not_requested"
     @State private var remoteFetchedAt: String? = nil
-    @State private var remoteError: String? = nil
 
     @State private var selectedProjectId: String? = nil
+    @State private var automationExpanded = false
+    @State private var engineExpanded = false
 
-    @State private var isLoading = false
+    @State private var isLoading = true
+    @State private var hasLoadedMappings = false
     @State private var isRefreshingRemote = false
     @State private var isSaving = false
     @State private var errorMessage: String? = nil
@@ -329,24 +329,28 @@ struct ProjectMappingsView: View {
                         .foregroundStyle(Color.kpSecondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if items.isEmpty {
+                ContentUnavailableView {
+                    Label(hasLoadedMappings ? "暂无可配置项目" : "项目列表不可用", systemImage: "folder.badge.gearshape")
+                } description: {
+                    if hasLoadedMappings { Text("点击「获取 Kaneo 项目」更新目录。") }
+                } actions: {
+                    if !hasLoadedMappings {
+                        Button("重试读取") { Task { await loadMappings(refreshRemote: false) } }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 GeometryReader { geo in
                     if geo.size.width >= 720 {
                         HStack(spacing: 0) {
                             projectListView
-                                .frame(width: max(280, min(360, geo.size.width * 0.42)))
-                            Divider()
-                            projectDetailView
-                                .frame(maxWidth: .infinity)
+                                .frame(width: min(280, max(208, geo.size.width * 0.28)))
+                            VerticalRule()
+                            projectDetailView(compact: false)
                         }
                     } else {
-                        VStack(spacing: 0) {
-                            projectListView
-                                .frame(maxHeight: 220)
-                            Divider()
-                            projectDetailView
-                                .frame(maxHeight: .infinity)
-                        }
+                        projectDetailView(compact: true)
                     }
                 }
                 .frame(minHeight: 0, maxHeight: .infinity)
@@ -409,6 +413,15 @@ struct ProjectMappingsView: View {
         } message: { pending in
             Text(pending.message)
         }
+        .onChange(of: selectedProjectId) { _, id in
+            invalidateReleaseAssist()
+            releaseConfigExpanded = false
+            automationExpanded = id.map { stepErrors[StepKey(projectID: $0, step: .automation)] != nil } ?? false
+            engineExpanded = id.map { projectID in
+                stepErrors[StepKey(projectID: projectID, step: .fallbackModel)] != nil ||
+                stepErrors[StepKey(projectID: projectID, step: .verifyEnv)] != nil
+            } ?? false
+        }
         .onDisappear { invalidateReleaseAssist() }
     }
 
@@ -416,18 +429,17 @@ struct ProjectMappingsView: View {
 
     private var headerBar: some View {
         HStack(spacing: Spacing.m) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("项目与仓库配置")
-                    .font(.kpSection)
-                if let fetched = remoteFetchedAt {
-                    Text("最近获取：\(formatTime(fetched)) · 映射版本 r\(revision)")
-                        .font(.kpLabel)
-                        .foregroundStyle(Color.kpSecondary)
-                } else {
-                    Text("本地映射版本 r\(revision)")
-                        .font(.kpLabel)
-                        .foregroundStyle(Color.kpSecondary)
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                Text("项目与仓库").font(.kpSection)
+                HStack(spacing: Spacing.s) {
+                    if hasLoadedMappings { Text("\(items.count) 个项目") }
+                    if let remoteFetchedAt {
+                        Text("上次获取 " + TimeFormat.short(remoteFetchedAt))
+                            .help(TimeFormat.fullString(remoteFetchedAt))
+                    }
                 }
+                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                .help("本地映射版本 r\(revision)")
             }
 
             Spacer()
@@ -445,7 +457,7 @@ struct ProjectMappingsView: View {
                 }
             }
             .buttonStyle(.bordered)
-            .disabled(isRefreshingRemote || isSaving)
+            .disabled(isRefreshingRemote || isLoading || isSaving)
         }
         .padding(.horizontal, Spacing.l)
         .padding(.vertical, Spacing.m)
@@ -479,7 +491,8 @@ struct ProjectMappingsView: View {
             ForEach(items) { item in
                 VStack(alignment: .leading, spacing: Spacing.xs) {
                     HStack(spacing: Spacing.s) {
-                        Text(item.displayName)
+                        Text(verbatim: item.displayName)
+                            .help(item.displayName)
                             .font(.kpBody.weight(.medium))
                             .lineLimit(1)
 
@@ -491,7 +504,8 @@ struct ProjectMappingsView: View {
                     let unsaved = !changedRows(for: item).isEmpty
                     if let repo = item.repository, !repo.isEmpty {
                         HStack(spacing: Spacing.xs) {
-                            Text(repo)
+                            Text(verbatim: (repo as NSString).abbreviatingWithTildeInPath)
+                                .help(repo)
                                 .font(.kpLabel)
                                 .foregroundStyle(Color.kpSecondary)
                                 .lineLimit(1)
@@ -502,7 +516,7 @@ struct ProjectMappingsView: View {
                         }
                     } else {
                         HStack(spacing: Spacing.xs) {
-                            SettingsNotice(text: "尚未选择本地仓库", icon: "exclamationmark.triangle.fill", tone: Color.kpOrange)
+                            Text("尚未选择仓库").font(.kpLabel).foregroundStyle(Color.kpSecondary)
                             if unsaved {
                                 unsavedTag
                             }
@@ -523,15 +537,9 @@ struct ProjectMappingsView: View {
                 .tag(item.projectId)
             }
         }
-        .listStyle(.inset(alternatesRowBackgrounds: true))
+        .listStyle(.inset(alternatesRowBackgrounds: false))
         .scrollContentBackground(.hidden)
-        .onChange(of: selectedProjectId) { _, newId in
-            // List 已先写入 selection，不能再靠 selectProject 内的新旧 ID 比较清理候选。
-            invalidateReleaseAssist()
-            if let id = newId {
-                selectProject(id)
-            }
-        }
+        .background(Color.kpWindow)
     }
 
     /// 列表行副文字里的「· 未保存」：橙色文字，不只靠颜色。
@@ -544,121 +552,79 @@ struct ProjectMappingsView: View {
 
     // MARK: - 项目详情编辑
 
-    private var projectDetailView: some View {
-        Group {
+    private func projectIDButton(_ item: ProjectMappingItem) -> some View {
+        Button {
+            Workspace.copy(item.projectId)
+            successMessage = "已复制项目 ID"
+        } label: {
+            HStack(spacing: Spacing.xs) {
+                Text(verbatim: item.projectId).font(.kpSmall.monospaced())
+                    .lineLimit(1).truncationMode(.middle)
+                Image(systemName: "doc.on.doc").font(.kpSmall)
+            }
+        }
+        .buttonStyle(.plain).foregroundStyle(Color.kpSecondary)
+        .help("复制项目 ID " + item.projectId)
+        .accessibilityLabel("复制项目 ID").accessibilityValue(item.projectId)
+    }
+
+    private func projectDetailView(compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if compact {
+                HStack(spacing: Spacing.m) {
+                    Picker("当前项目", selection: $selectedProjectId) {
+                        if selectedItem == nil { Text("选择项目").tag(nil as String?) }
+                        ForEach(items) { item in
+                            Text(verbatim: item.displayName + (changedRows(for: item).isEmpty ? "" : " · 未保存"))
+                                .tag(Optional(item.projectId))
+                        }
+                    }
+                    .pickerStyle(.menu).font(.kpBody).layoutPriority(1)
+                    .help(selectedItem?.displayName ?? "切换项目").accessibilityLabel("切换项目")
+                    Spacer(minLength: 0)
+                    if let item = selectedItem {
+                        statusBadge(for: item).fixedSize()
+                        projectIDButton(item)
+                    }
+                }
+                .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.s)
+                ListRule()
+            }
             if let item = selectedItem {
                 let changed = Set(changedRows(for: item))
                 ScrollView {
-                    VStack(alignment: .leading, spacing: Spacing.l) {
-                        // 基础信息（标题区，不在卡片内）：名称、状态、项目 ID 同一行
-                        HStack(spacing: Spacing.m) {
-                            Text(item.displayName)
-                                .font(.kpTitle)
-                            statusBadge(for: item)
-                            Spacer(minLength: Spacing.m)
-                            Text(item.projectId)
-                                .font(.kpLabel.monospaced())
-                                .foregroundStyle(Color.kpSecondary)
-                                .textSelection(.enabled)
-                                .accessibilityLabel("项目 ID \(item.projectId)")
-                            Button {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(item.projectId, forType: .string)
-                                successMessage = "已复制项目 ID"
-                            } label: {
-                                Image(systemName: "doc.on.doc")
-                                    .font(.kpLabel)
-                                    .foregroundStyle(Color.kpSecondary)
+                    VStack(alignment: .leading, spacing: Spacing.m) {
+                        if !compact {
+                            HStack(spacing: Spacing.s) {
+                                Text(verbatim: item.displayName).font(.kpTitle)
+                                    .lineLimit(2).help(item.displayName).layoutPriority(1)
+                                statusBadge(for: item).fixedSize()
+                                Spacer(minLength: Spacing.s)
+                                projectIDButton(item)
                             }
-                            .buttonStyle(.plain)
-                            .help("复制项目 ID")
-                            .accessibilityLabel("复制项目 ID")
                         }
-
-                        SettingsCard(title: "仓库映射") {
-                            ProjectFormRow(title: RowName.repository, changed: changed.contains(RowName.repository)) {
-                                HStack(spacing: Spacing.s) {
-                                    if let kind = item.repositoryKind {
-                                        Label(kind == "git" ? "Git 仓库" : "普通目录",
-                                              systemImage: kind == "git" ? "arrow.triangle.branch" : "folder")
-                                            .font(.kpLabel)
-                                            .foregroundStyle(Color.kpSecondary)
-                                    }
-                                    TextField("输入或选择仓库绝对路径…", text: projectBinding(item.projectId, \.repository))
-                                        .labelsHidden()
-                                        .textFieldStyle(.roundedBorder)
-                                        .font(.kpLabel.monospaced())
-                                        .frame(minWidth: 180, idealWidth: 260, maxWidth: 320)
-                                        .accessibilityLabel("本地仓库目录")
-                                    Button("选择目录…") {
-                                        chooseDirectory(item.projectId)
-                                    }
-                                    .buttonStyle(.bordered)
-                                }
-                            }
-                            ListRule()
-                            ProjectFormRow(title: RowName.planning,
-                                           detail: "允许从此项目创建规划请求。停用仅阻止新建规划；已排队或执行中的任务继续使用原快照。",
-                                           changed: changed.contains(RowName.planning)) {
-                                Toggle("启用新规划", isOn: projectBinding(item.projectId, \.enabled))
-                                    .labelsHidden()
-                                    .toggleStyle(.switch)
-                            }
-                            // 影响说明：紧挨路径与开关，独立一行
-                            if (item.activeTaskCount ?? 0) > 0 || (item.activeRequestCount ?? 0) > 0 {
-                                ListRule()
-                                ProjectPlainRow {
-                                    Label {
-                                        Text("当前项目有 \(item.activeTaskCount ?? 0) 个未完成任务、\(item.activeRequestCount ?? 0) 个活动请求。修改仓库仅用于之后新建的规划输入，不会改变已有排队或执行轮次的快照。")
-                                            .font(.kpLabel)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    } icon: {
-                                        Image(systemName: "exclamationmark.triangle.fill")
-                                            .foregroundStyle(Color.kpOrange)
-                                    }
-                                }
-                            }
-                            // 危险操作单独确认，不进保存栏；有未保存更改时置灰并写明原因。
-                            if item.repository != nil {
-                                ListRule()
-                                ProjectPlainRow {
-                                    Button("解除映射…") {
-                                        showUnmapConfirm = true
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .foregroundStyle(Color.primary)
-                                    .disabled(isSaving || !changed.isEmpty)
-                                    if !changed.isEmpty {
-                                        Text("先保存或放弃更改")
-                                            .font(.kpLabel)
-                                            .foregroundStyle(Color.kpSecondary)
-                                    }
-                                }
-                            }
-                            stepErrorRow(item.projectId, .mapping)
-                        }
-
+                        repositoryEditor(item, changed: changed)
                         automationEditor(item, changed: changed)
-
-                        SettingsCard(title: "引擎") {
+                        let draft = currentDraft(item.projectId)
+                        let fallback = [draft.fallbackProvider, draft.fallbackModel]
+                            .map(trimmedValue).filter { !$0.isEmpty }.joined(separator: " / ")
+                        SettingsCard(title: "引擎", icon: "cpu", expanded: $engineExpanded,
+                                     summary: fallback.isEmpty ? "未设置备用模型" : "备用模型 · " + fallback,
+                                     changed: changed.contains(RowName.fallbackModel) || changed.contains(RowName.verifyEnv)) {
                             engineEditor(item, changed: changed)
                         }
                     }
                     .padding(Spacing.l)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .disabled(isSaving || isLoading)
                 }
+                .id(item.projectId)
             } else {
-                VStack(spacing: Spacing.m) {
-                    Image(systemName: "folder.badge.gearshape")
-                        .font(.system(size: 36))
-                        .foregroundStyle(Color.kpSecondary)
-                    Text(items.isEmpty ? "暂无可配置项目，可点击「获取 Kaneo 项目」刷新" : "请在左侧选择一个项目进行仓库配置")
-                        .font(.kpBody)
-                        .foregroundStyle(Color.kpSecondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ContentUnavailableView("请选择项目", systemImage: "folder",
+                                       description: Text("选择要配置的项目即可查看仓库与自动处理设置。"))
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .confirmationDialog(
             "确定解除项目「\(selectedItem?.displayName ?? "")」的仓库映射？",
             isPresented: $showUnmapConfirm,
@@ -670,6 +636,58 @@ struct ProjectMappingsView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("解除后该项目无法再创建新规划。已有任务、历史记录与计划文件均不会删除。")
+        }
+    }
+
+    private func repositoryEditor(_ item: ProjectMappingItem, changed: Set<String>) -> some View {
+        SettingsCard(title: "仓库映射", icon: "folder") {
+            ProjectPlainRow(changed: changed.contains(RowName.repository)) {
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    HStack(spacing: Spacing.s) {
+                        Text(RowName.repository).font(.kpBody)
+                        Spacer()
+                        if !changed.contains(RowName.repository), let kind = item.repositoryKind {
+                            Label(kind == "git" ? "Git 仓库" : "普通目录",
+                                  systemImage: kind == "git" ? "arrow.triangle.branch" : "folder")
+                                .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                        }
+                    }
+                    HStack(spacing: Spacing.s) {
+                        TextField("输入仓库绝对路径…", text: projectBinding(item.projectId, \.repository))
+                            .labelsHidden().textFieldStyle(.roundedBorder).font(.kpLabel.monospaced())
+                            .accessibilityLabel(RowName.repository)
+                        Button("选择目录…") { chooseDirectory(item.projectId) }.fixedSize()
+                    }
+                    if !changed.contains(RowName.repository), ["missing", "unreadable"].contains(item.mappingState ?? ""),
+                       let reason = item.blockedReason, !reason.isEmpty {
+                        SettingsNotice(text: reason, icon: "exclamationmark.triangle", tone: Color.kpOrange)
+                    }
+                }
+            }
+            ListRule()
+            ProjectFormRow(title: RowName.planning, detail: "允许为此项目新建规划。", changed: changed.contains(RowName.planning)) {
+                Toggle("启用新规划", isOn: projectBinding(item.projectId, \.enabled))
+                    .labelsHidden().toggleStyle(.switch)
+            }
+            if (item.activeTaskCount ?? 0) > 0 || (item.activeRequestCount ?? 0) > 0 {
+                ListRule()
+                ProjectPlainRow {
+                    SettingsNotice(text: "\(item.activeTaskCount ?? 0) 个未完成任务 · \(item.activeRequestCount ?? 0) 个活动请求。已有轮次继续使用原仓库快照。",
+                                   icon: "info.circle", tone: Color.kpSecondary)
+                }
+            }
+            if let path = item.repository, !path.isEmpty {
+                ListRule()
+                ProjectPlainRow {
+                    Button("解除映射…") { showUnmapConfirm = true }
+                        .buttonStyle(.borderless).foregroundStyle(.primary)
+                        .disabled(isSaving || !changed.isEmpty)
+                    if !changed.isEmpty {
+                        Text("先保存或放弃更改").font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                    }
+                }
+            }
+            stepErrorRow(item.projectId, .mapping)
         }
     }
 
@@ -688,7 +706,15 @@ struct ProjectMappingsView: View {
     private func automationEditor(_ item: ProjectMappingItem, changed: Set<String>) -> some View {
         let id = item.projectId
         let draft = currentDraft(id).automation
-        return SettingsCard(title: "自动处理", trailing: "策略版本 r\(draft.revision)") {
+        let issues = item.automationPreflight?.count ?? 0
+        let summary = [draft.enabled ? "接收开启" : "接收关闭",
+                       draft.autoMerge ? "自动合并" : "手动合并",
+                       draft.releaseEnabled ? (draft.releaseChannel == "stable" ? "正式发布" : "预发布") : "自动发布关闭"]
+        return SettingsCard(title: "自动处理", icon: "arrow.triangle.2.circlepath",
+                            expanded: $automationExpanded, summary: summary.joined(separator: " · "),
+                            trailing: "策略版本 r\(draft.revision)",
+                            changed: !draft.changedRows(from: AutomationDraft(item.automation)).isEmpty,
+                            issueCount: issues) {
             ProjectFormRow(title: RowName.autoEnabled,
                            detail: "关闭后停止新的自动接收、确认与修复规划；进行中的检查、Review 和交付继续。",
                            changed: changed.contains(RowName.autoEnabled)) {
@@ -1187,11 +1213,12 @@ struct ProjectMappingsView: View {
 
     private func mappingStatus(_ state: String?) -> (label: String, tone: Color) {
         switch state {
+        case "unmapped": return ("未映射", Color.kpOrange)
         case "available": return ("可用", Color.kpGreen)
         case "disabled": return ("已停用", Color.kpGray)
         case "missing": return ("目录缺失", Color.kpRed)
         case "unreadable": return ("不可读", Color.kpRed)
-        default: return ("未映射", Color.kpOrange)
+        default: return ("状态未知", Color.kpGray)
         }
     }
 
@@ -1248,17 +1275,13 @@ struct ProjectMappingsView: View {
             )
             guard generation == mappingGeneration else { return false }
             revision = resp.revision
-            workspaceId = resp.workspaceId ?? ""
+            hasLoadedMappings = true
             let previous = items
             items = resp.items ?? []
             mergeDrafts(previous: previous)
-            if let rem = resp.remote {
-                remoteStatus = rem.status ?? "not_requested"
-                remoteFetchedAt = rem.fetchedAt
-                remoteError = rem.error
-                if remoteStatus == "error" {
-                    errorMessage = "获取 Kaneo 项目失败：\(remoteError ?? "请稍后重试")"
-                }
+            remoteFetchedAt = resp.remote?.fetchedAt
+            if let remote = resp.remote, remote.status == "error" {
+                errorMessage = "获取 Kaneo 项目失败：\(remote.error ?? "请稍后重试")"
             }
 
             if selectedItem == nil {
@@ -1389,6 +1412,13 @@ struct ProjectMappingsView: View {
         if done.contains(.mapping) { mappingSavedAwaitingNotify = true }
         if let step = failedStep {
             stepErrors[StepKey(projectID: id, step: step)] = failureText
+            if selectedProjectId == id {
+                switch step {
+                case .automation: automationExpanded = true
+                case .fallbackModel, .verifyEnv: engineExpanded = true
+                case .mapping: break
+                }
+            }
             errorMessage = failureSummary(step, savedSteps: done.count)
         } else {
             var text = "已保存 \(total) 项更改"
@@ -1538,17 +1568,6 @@ struct ProjectMappingsView: View {
 
         isSaving = false
     }
-
-    private func formatTime(_ iso: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = formatter.date(from: iso) {
-            let df = DateFormatter()
-            df.dateFormat = "HH:mm:ss"
-            return df.string(from: d)
-        }
-        return iso
-    }
 }
 
 /// 项目页草稿比较用：去掉首尾空白。
@@ -1570,31 +1589,63 @@ private extension View {
     }
 }
 
-/// 项目详情卡片（ui-spec §4.11，对齐设计画板）：区段标题在面板外（右侧可放一句说明），
-/// 内容是分组面板里一行行的字段，行与行之间由调用方放 `ListRule`。
+/// 仓库常开，较少修改的配置以可读摘要作为展开按钮。
 private struct SettingsCard<Content: View>: View {
     let title: String
-    var trailing: String? = nil
+    let icon: String
+    var expanded: Binding<Bool>?
+    var summary: String?
+    var trailing: String?
+    var changed = false
+    var issueCount = 0
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.s) {
-            HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
-                Text(title)
-                    .font(.kpBody.weight(.semibold))
-                Spacer(minLength: Spacing.s)
-                if let trailing {
-                    Text(trailing)
-                        .font(.kpLabel)
-                        .foregroundStyle(Color.kpSecondary)
-                }
-            }
-            .padding(.horizontal, Spacing.xs)
-            GroupPanel(background: Color.kpWindow.opacity(0.5),
-                       border: Color.kpSeparator.opacity(0.5)) {
+        GroupPanel(background: Color.kpWindow.opacity(0.5), border: Color.kpSeparator.opacity(0.5)) {
+            if let expanded {
+                Button { expanded.wrappedValue.toggle() } label: { heading }
+                    .buttonStyle(.plain)
+                    .accessibilityValue(expanded.wrappedValue ? "已展开" : "已折叠")
+            } else { heading }
+            if expanded?.wrappedValue != false {
+                ListRule()
                 content()
             }
         }
+    }
+
+    private var heading: some View {
+        HStack(spacing: Spacing.m) {
+            Image(systemName: icon)
+                .font(.kpSection).foregroundStyle(Color.kpSecondary)
+                .frame(width: Spacing.l).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                HStack(spacing: Spacing.s) {
+                    Text(title).font(.kpBody.weight(.semibold))
+                    if changed { Text("未保存").font(.kpSmall).foregroundStyle(Color.kpOrange) }
+                    if issueCount > 0 {
+                        Label("\(issueCount) 项待检查", systemImage: "exclamationmark.triangle")
+                            .font(.kpSmall).foregroundStyle(Color.kpOrange)
+                    }
+                }
+                if let summary {
+                    Text(verbatim: summary).font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+            if let trailing, expanded?.wrappedValue == true {
+                Text(trailing).font(.kpSmall).foregroundStyle(Color.kpSecondary)
+            }
+            if let expanded {
+                Image(systemName: expanded.wrappedValue ? "chevron.down" : "chevron.right")
+                    .font(.kpSmall.weight(.semibold)).foregroundStyle(Color.kpSecondary)
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, Spacing.m).padding(.vertical, Spacing.s)
+        .frame(maxWidth: .infinity, minHeight: RowHeight.interactive, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 

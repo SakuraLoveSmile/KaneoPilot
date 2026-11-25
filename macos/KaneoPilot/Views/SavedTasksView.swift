@@ -98,7 +98,10 @@ struct SessionsListView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                StatusFilterBar(selection: $categoryFilter, options: statusOptions)
+                WorkspaceListHeader(title: "会话浏览", icon: "bubble.left.and.bubble.right",
+                                    summary: "\(visibleSessions.count) 个会话") {
+                    StatusFilterBar(selection: $categoryFilter, options: statusOptions)
+                }
                 Group {
                 if model.isLoading && model.sessions.isEmpty {
                     LoadingView()
@@ -120,17 +123,6 @@ struct SessionsListView: View {
                     }
                 } else {
                     List {
-                        HStack(alignment: .firstTextBaseline, spacing: Spacing.l) {
-                            Spacer(minLength: 0)
-                            Text("\(visibleSessions.count) 个会话")
-                                .font(.kpSmall)
-                                .monospacedDigit()
-                        }
-                        .foregroundStyle(Color.kpSecondary)
-                        .padding(.bottom, Spacing.s)
-                        .listRowInsets(rowInsets)
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
                         ForEach(visibleSessions) { session in
                             SessionRow(session: session)
                                 .listRowInsets(rowInsets)
@@ -138,7 +130,7 @@ struct SessionsListView: View {
                                 .listRowSeparatorTint(Color.kpSeparator.opacity(0.5))
                         }
                     }
-                    .listStyle(.plain)
+                    .listStyle(.inset)
                     .scrollContentBackground(.hidden)
                     .contentMargins(.top, Spacing.l, for: .scrollContent)
                     .contentMargins(.horizontal, 0, for: .scrollContent)
@@ -207,26 +199,21 @@ struct SessionRow: View {
                             .font(.kpBody)
                             .fontWeight(.medium)
                             .fixedSize(horizontal: false, vertical: true)
-                        Text([projectName, stateLabel].compactMap { $0 }.joined(separator: " · "))
-                            .font(.kpLabel)
-                            .foregroundStyle(Color.kpSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .help(session.isUnavailable ? "当前会话状态读取失败，不表示任务执行失败；打开会话后可刷新检查。" : stateLabel)
-                        Text(session.sessionTitle ?? session.markerLabel)
-                            .font(.kpSmall)
-                            .foregroundStyle(Color.kpSecondary)
+                        Text([projectName, session.sessionTitle ?? session.markerLabel]
+                            .compactMap { $0 }.joined(separator: " · "))
+                            .font(.kpLabel).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    if let updated = TimeFormat.ago(session.updatedAt) {
-                        Text(updated)
-                            .font(.kpSmall)
-                            .foregroundStyle(Color.kpSecondary)
-                            .monospacedDigit()
-                            .frame(width: 88, alignment: .trailing)
-                            .fixedSize()
-                            .help(TimeFormat.fullString(session.updatedAt))
+                    VStack(alignment: .trailing, spacing: Spacing.xs) {
+                        Text(stateLabel).font(.kpLabel.weight(.medium))
+                            .foregroundStyle(stateColor)
+                        if let updated = TimeFormat.ago(session.updatedAt) {
+                            Text(updated).font(.kpSmall.monospacedDigit()).foregroundStyle(.secondary)
+                                .help(TimeFormat.fullString(session.updatedAt))
+                        }
                     }
+                    .help(session.isUnavailable ? "读取失败表示会话状态未知。" : stateLabel)
                     Image(systemName: "chevron.right")
                         .font(.kpSmall)
                         .foregroundStyle(.tertiary)
@@ -273,7 +260,7 @@ struct SessionRow: View {
                                ? "可移入回收站"
                                : (session.blockedReason ?? "暂不可用"))
         }
-        .padding(.vertical, Spacing.l)
+        .padding(.vertical, Spacing.m)
         .frame(minHeight: RowHeight.preferredTwoLine)
         .accessibilityElement(children: .contain)
         .contextMenu {
@@ -410,9 +397,24 @@ struct SavedTasksView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if mode == .trash { trashPicker }
-                if mode == .archive {
-                    StatusFilterBar(selection: $archiveStatusFilter, options: archiveStatusOptions)
+                WorkspaceListHeader(title: mode == .archive ? "已归档任务" : "已移入回收站",
+                                    icon: mode.icon,
+                                    summary: mode == .archive ? "\(filteredArchivedTasks.count) 个任务"
+                                        : "任务 \(tasks.count) · 会话 \(model.trashedSessions.count)") {
+                    if mode == .archive {
+                        StatusFilterBar(selection: $archiveStatusFilter, options: archiveStatusOptions)
+                    } else {
+                        HStack {
+                            trashPicker
+                            Spacer()
+                            Button { confirmingEmptyTrash = true } label: {
+                                Label("清空当前分类", systemImage: "trash.slash")
+                            }
+                            .controlSize(.small)
+                            .disabled(isEmpty || model.busy)
+                            .help("逐项永久移除当前分类全部条目；单项失败不影响其余")
+                        }
+                    }
                 }
                 Group {
                     if model.isLoading && isEmpty {
@@ -435,15 +437,6 @@ struct SavedTasksView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     HStack(spacing: Spacing.s) {
-                        if mode == .trash && !isEmpty {
-                            Button {
-                                confirmingEmptyTrash = true
-                            } label: {
-                                Label("清空当前分类", systemImage: "trash.slash")
-                            }
-                            .help("逐项永久移除当前分类全部条目；单项失败不影响其余")
-                            .accessibilityLabel("清空当前分类")
-                        }
                         Button {
                             Task { await model.loadSaved() }
                         } label: {
@@ -530,48 +523,42 @@ struct SavedTasksView: View {
 
     private func taskList(_ visibleTasks: [TaskSummary]) -> some View {
         List {
-            HStack(alignment: .firstTextBaseline, spacing: Spacing.l) {
-                Spacer(minLength: 0)
-                Text("\(visibleTasks.count) 个任务")
-                    .font(.kpSmall)
-                    .monospacedDigit()
-            }
-            .foregroundStyle(Color.kpSecondary)
-            .padding(.bottom, Spacing.s)
-            .listRowInsets(rowInsets)
-            .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
-            ForEach(visibleTasks) { task in
-                SavedTaskRow(task: task, mode: mode) {
-                    confirmingPurgeTask = task
+            if mode == .archive {
+                let projects = Dictionary(grouping: visibleTasks) { $0.projectName ?? "" }
+                ForEach(projects.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }, id: \.self) { project in
+                    Section(project.isEmpty ? "未标明项目" : project) {
+                        savedTaskRows(projects[project] ?? [])
+                    }
                 }
-                .listRowInsets(rowInsets)
-                .listRowBackground(Color.clear)
-                .listRowSeparatorTint(Color.kpSeparator.opacity(0.5))
+            } else {
+                savedTaskRows(visibleTasks)
             }
         }
-        .listStyle(.plain)
+        .listStyle(.inset)
         .scrollContentBackground(.hidden)
         .contentMargins(.top, Spacing.l, for: .scrollContent)
         .contentMargins(.horizontal, 0, for: .scrollContent)
         .clipped()
     }
 
+    private func savedTaskRows(_ items: [TaskSummary]) -> some View {
+        ForEach(items) { task in
+            SavedTaskRow(task: task, mode: mode) { confirmingPurgeTask = task }
+                .listRowInsets(rowInsets)
+                .listRowBackground(Color.clear)
+                .listRowSeparatorTint(Color.kpSeparator.opacity(0.5))
+        }
+    }
+
     private var trashPicker: some View {
-        Picker("分类", selection: $trashTab) {
+        Picker("回收站分类", selection: $trashTab) {
             ForEach(TrashTab.allCases, id: \.self) { tab in
                 Text(tab.rawValue).tag(tab)
             }
         }
+        .labelsHidden()
         .pickerStyle(.segmented)
-        .padding(.horizontal, Spacing.xl)
-        .padding(.vertical, Spacing.s)
-        .frame(maxWidth: .infinity)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.kpSeparator.opacity(0.5))
-                .frame(height: 1)
-        }
+        .fixedSize()
     }
 
     private var emptyState: some View {
@@ -589,17 +576,6 @@ struct SavedTasksView: View {
 
     private var trashedSessionList: some View {
         List {
-            HStack(alignment: .firstTextBaseline, spacing: Spacing.l) {
-                Spacer(minLength: 0)
-                Text("\(model.trashedSessions.count) 个会话")
-                    .font(.kpSmall)
-                    .monospacedDigit()
-            }
-            .foregroundStyle(Color.kpSecondary)
-            .padding(.bottom, Spacing.s)
-            .listRowInsets(rowInsets)
-            .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
             ForEach(model.trashedSessions) { session in
                 TrashedSessionRow(session: session) {
                     confirmingPurgeSession = session
@@ -609,7 +585,7 @@ struct SavedTasksView: View {
                 .listRowSeparatorTint(Color.kpSeparator.opacity(0.5))
             }
         }
-        .listStyle(.plain)
+        .listStyle(.inset)
         .scrollContentBackground(.hidden)
         .contentMargins(.top, Spacing.l, for: .scrollContent)
         .contentMargins(.horizontal, 0, for: .scrollContent)
@@ -647,7 +623,7 @@ struct SavedTaskRow: View {
                     .font(.kpBody)
                     .fontWeight(.medium)
                     .fixedSize(horizontal: false, vertical: true)
-                Text([task.projectName.flatMap { $0.isEmpty ? nil : $0 }, originalStage]
+                Text([mode == .trash ? task.projectName.flatMap { $0.isEmpty ? nil : $0 } : nil, originalStage]
                     .compactMap { $0 }.joined(separator: " · "))
                     .font(.kpLabel)
                     .foregroundStyle(Color.kpSecondary)
@@ -669,23 +645,25 @@ struct SavedTaskRow: View {
                     .fixedSize()
                     .help("移出时间 \(TimeFormat.fullString(task.savedAt))")
             }
-            Button("恢复") { confirmRestore() }
+            Button { confirmRestore() } label: { Label("恢复", systemImage: "arrow.uturn.backward") }
                 .disabled(model.busy)
                 .fixedSize()
                 .help(model.busy ? "正在执行操作" : "恢复到活跃看板")
                 .accessibilityLabel("恢复任务 \(task.title ?? task.taskId)")
             if mode == .trash {
-                Button(role: .destructive) {
-                    onPurge()
+                Menu {
+                    Button(PurgeText.actionTitle, role: .destructive, action: onPurge)
                 } label: {
-                    Label(PurgeText.actionTitle, systemImage: "trash")
+                    Image(systemName: "ellipsis.circle")
                 }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
                 .fixedSize()
                 .help(PurgeText.confirmMessage)
-                .accessibilityLabel("永久移除任务 \(task.title ?? task.taskId)")
+                .accessibilityLabel("任务操作：\(task.title ?? task.taskId)")
             }
         }
-        .padding(.vertical, Spacing.l)
+        .padding(.vertical, Spacing.m)
         .frame(minHeight: RowHeight.preferredTwoLine)
         .accessibilityElement(children: .contain)
     }
@@ -799,7 +777,7 @@ struct TrashedSessionRow: View {
             .help("会话操作")
             .accessibilityLabel("会话操作菜单")
         }
-        .padding(.vertical, Spacing.l)
+        .padding(.vertical, Spacing.m)
         .frame(minHeight: RowHeight.preferredTwoLine)
         .accessibilityElement(children: .contain)
         .contextMenu {

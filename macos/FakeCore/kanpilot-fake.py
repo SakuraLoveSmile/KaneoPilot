@@ -1318,6 +1318,84 @@ def cmd_list_tasks(state, payload):
     return {"tasks": [{k: t.get(k) for k in SUMMARY_KEYS} for t in tasks]}
 
 
+def cmd_get_delivery_status(state, payload):
+    """KP-DL01：交付页的只读快照。假核心不联网，按任务现有 delivery 造一份可读形状。"""
+    tid = payload.get("task_id")
+    if not tid:
+        return fail("缺少必填字段 task_id", "bad_request")
+    for task in merged_tasks(state):
+        if task["task_id"] != tid:
+            continue
+        scenario = fixture_scenario(state, "%s/%s" % (tid, task.get("run_id")))
+        override = scenario.get("delivery_status")
+        if isinstance(override, dict):
+            return override
+        return delivery_status_fixture(task, payload.get("include_terminal_checks") is True)
+    return fail("任务不存在：%s" % tid, "not_found")
+
+
+def delivery_status_fixture(task, include_terminal=False):
+    """同一份 delivery 造出的稳定形状：按当前 PR 和可选终态查询生成检查。"""
+    delivery = task.get("delivery") or {}
+    notice = delivery.get("auto_merge")
+    number = delivery.get("pr_number")
+    head = delivery.get("head_sha") or sha(task["task_id"], 40)
+    state = (delivery.get("pr_state") or "").upper() or None
+    value = {
+        "task_id": task["task_id"],
+        "observed_at": iso(datetime.now(timezone.utc)),
+        "live": False,
+        "error": None,
+        "delivery": {
+            "mode": delivery.get("mode"),
+            "pr_number": number,
+            "pr_url": delivery.get("pr_url"),
+            "pr_state": state,
+            "branch": delivery.get("branch"),
+            "base_branch": delivery.get("base_branch"),
+            "head_sha": delivery.get("head_sha"),
+            "merged_at": delivery.get("merged_at"),
+            "last_sync_at": delivery.get("last_sync_at"),
+            "next_sync_at": delivery.get("next_sync_at"),
+            "auto_merge_enabled": True,
+            "notice": notice,
+            "notice_matches_head": bool(notice and notice.get("head_sha") == head),
+        },
+        "pr": None,
+        "gate": None,
+        "checks": None,
+        "checks_summary": None,
+    }
+    terminal = bool(delivery.get("merged_at")) or state in ("MERGED", "CLOSED")
+    if delivery.get("mode") != "pr" or not isinstance(number, int) or (terminal and not include_terminal):
+        return value
+    root = (delivery.get("pr_url") or "").partition("/pull/")[0]
+    specs = [("Build", "macOS", "passed"), ("Build", "Android", "passed" if terminal else "failed"),
+             ("Tests", "Core tests", "passed" if terminal else "running"),
+             ("Tests", "UI fixtures", "passed" if terminal else "queued")]
+    checks = []
+    summary = dict(total=len(specs), passed=0, failed=0, running=0, unknown=0)
+    for i, (workflow, name, outcome) in enumerate(specs):
+        category = "running" if outcome == "queued" else outcome
+        summary[category] += 1
+        checks.append({"name": name, "workflow": workflow, "state": category,
+                       "status": {"queued": "QUEUED", "running": "IN_PROGRESS"}.get(outcome, "COMPLETED"),
+                       "conclusion": {"passed": "SUCCESS", "failed": "FAILURE"}.get(outcome),
+                       "url": f"{root}/actions/runs/{80 + i // 2}/job/{100 + i}" if root else None,
+                       "started_at": None if outcome == "queued" else past(minutes=8),
+                       "completed_at": past(minutes=6) if category != "running" else None,
+                       "superseded_runs": 1 if outcome == "running" else 0})
+    order = {"failed": 0, "running": 1, "passed": 2}
+    checks.sort(key=lambda item: (order[item["state"]], item["workflow"], item["name"]))
+    value.update(live=True, checks=checks, checks_summary=summary,
+                 pr={"state": state or "OPEN", "is_draft": False, "mergeable": "MERGEABLE",
+                     "merge_state_status": "CLEAN" if terminal else "UNSTABLE", "review_decision": "",
+                     "head_sha": head, "head_matches_delivery": head == delivery.get("head_sha"),
+                     "base_ref_name": delivery.get("base_branch"), "url": delivery.get("pr_url")},
+                 gate=None if terminal else {"state": "blocked", "reason": "Android 检查未通过", "ready": False})
+    return value
+
+
 def cmd_get_task(state, payload):
     tid = payload.get("task_id")
     if not tid:
@@ -3260,8 +3338,8 @@ def cmd_get_project_mappings(state, payload):
             "mapping_state": effective["mapping_state"],
             "repository_kind": effective["repository_kind"],
             "blocked_reason": effective["blocked_reason"],
-            "active_tasks_count": 0,
-            "active_requests_count": 0,
+            "active_task_count": item.get("active_task_count", 0),
+            "active_request_count": item.get("active_request_count", 0),
         })
     return {
         "revision": mappings.get("revision", 0),
@@ -4770,6 +4848,7 @@ COMMANDS = {
     "tick": lambda s, p: {"created": [], "skipped": [{"reason": "fake 不建请求"}]},
     "overview": lambda s, p: cmd_overview(s),
     "list-tasks": lambda s, p: cmd_list_tasks(s, p),
+    "get-delivery-status": cmd_get_delivery_status,
     "get-task": lambda s, p: cmd_get_task(s, p),
     "get-goal-blocker": cmd_get_goal_blocker_fixture,
     "resolve-goal-blocker": cmd_resolve_goal_blocker_fixture,

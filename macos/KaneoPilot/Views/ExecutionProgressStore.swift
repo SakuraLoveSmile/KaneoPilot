@@ -15,7 +15,7 @@ final class ExecutionProgressStore: ObservableObject {
     @Published private(set) var roundDetail: RoundDetail?
     @Published private(set) var digest: ExecutionSessionDigest?
     @Published private(set) var error: String?
-    @Published private(set) var loading = false
+    @Published private(set) var loading = true
 
     private var client: CoreClient?
     private var pollTask: Task<Void, Never>?
@@ -75,6 +75,11 @@ final class ExecutionProgressStore: ObservableObject {
             sessions = listed.sessions ?? []
         } catch {
             guard owner == generation else { return }
+            // 列表读取失败时保留上一轮已读到的汇报、目标及轮次统计。
+            if session != nil || roundDetail != nil {
+                self.error = error.coreMessage
+                return
+            }
             listError = error.coreMessage
         }
 
@@ -113,7 +118,7 @@ final class ExecutionProgressStore: ObservableObject {
             digest = ExecutionSessionDigest(
                 roundIndex: (index ?? 0) + 1,
                 roundCount: max(ordered.count, 1),
-                roundState: runStatus.map { ["finished", "failed"].contains($0) ? "已结束" : "进行中" },
+                roundState: runStatus.map(ExecutionSessionDigest.statusLabel),
                 messageCount: response.session?.messageCount,
                 lastCheckedAt: response.session?.lastCheckedAt)
             self.error = listError

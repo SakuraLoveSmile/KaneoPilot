@@ -244,10 +244,21 @@ struct EnvironmentCheckPanel: View {
             }
             .padding(Spacing.l)
             VStack(alignment: .leading, spacing: Spacing.s) {
-                Label(health.engineError == nil ? health.engineTitle : "引擎状态读取失败",
-                      systemImage: health.engineError == nil ? "waveform.path.ecg" : "exclamationmark.triangle")
-                Label(health.doctorTitle, systemImage: health.doctorIcon)
-                    .fixedSize(horizontal: false, vertical: true)
+                LabeledContent("调度引擎") {
+                    Label(health.engineError == nil ? health.engineTitle : "引擎状态读取失败",
+                          systemImage: "waveform.path.ecg")
+                        .foregroundStyle(health.engineError != nil ? Color.kpRed : Color.primary)
+                }
+                if let error = health.engineError {
+                    Text(error).font(.kpSmall).foregroundStyle(Color.kpRed)
+                        .lineLimit(2).help(error).textSelection(.enabled)
+                }
+                ListRule()
+                LabeledContent("环境诊断") {
+                    Label(health.doctorTitle, systemImage: health.doctorIcon)
+                        .foregroundStyle(health.needsAttention ? Color.kpOrange : Color.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 HStack {
                     if health.issueCount > 0 {
                         Text("\(health.issueCount) 项环境告警").foregroundStyle(Color.kpOrange)
@@ -257,8 +268,9 @@ struct EnvironmentCheckPanel: View {
                 }
             }
             .font(.kpLabel)
-            .foregroundStyle(Color.kpSecondary)
-            .padding(.horizontal, Spacing.l)
+            .padding(Spacing.m)
+            .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.control))
+            .padding(.horizontal, Spacing.m)
             .padding(.bottom, Spacing.m)
             if !health.checks.isEmpty {
                 Divider()
@@ -292,46 +304,47 @@ struct StatusFilterBar: View {
     let options: [StatusFilterOption]
 
     var body: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: Spacing.s) {
-                ForEach(options) { option in
-                    let selected = selection == option.id
-                    Button {
-                        selection = option.id
-                    } label: {
-                        HStack(spacing: Spacing.xs) {
-                            Text(option.title)
-                            if let count = option.count {
-                                Text("\(count)").monospacedDigit()
-                            }
-                        }
-                        .font(.kpLabel)
-                        .foregroundStyle(selected ? Color.kpBlue : Color.kpSecondary)
-                        .padding(.horizontal, Spacing.m)
-                        .frame(minHeight: 32)
-                        .background(selected ? Color.kpBlue.opacity(0.1) : .clear,
-                                    in: RoundedRectangle(cornerRadius: Radius.control))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: Radius.control)
-                                .strokeBorder(selected ? Color.kpBlue.opacity(0.3) : .clear, lineWidth: 1)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .fixedSize()
-                    .accessibilityLabel(option.title + (option.count.map { "，\($0) 项" } ?? ""))
-                    .accessibilityAddTraits(selected ? .isSelected : [])
-                }
+        ViewThatFits(in: .horizontal) {
+            picker.pickerStyle(.segmented).fixedSize()
+            picker.pickerStyle(.menu)
+        }
+    }
+
+    private var picker: some View {
+        Picker("状态分类", selection: $selection) {
+            ForEach(options) { option in
+                Text(option.title + (option.count.map { "  \($0)" } ?? ""))
+                    .tag(option.id)
             }
-            .padding(.horizontal, Spacing.xl)
         }
-        .fixedSize(horizontal: false, vertical: true)
-        .padding(.vertical, Spacing.s)
-        .background(Color.kpControl)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.kpSeparator.opacity(0.5)).frame(height: 1)
-        }
-        .accessibilityElement(children: .contain)
+        .labelsHidden()
         .accessibilityLabel("状态分类")
+    }
+}
+
+/// 内容页的常驻标题与筛选区。较长的原生分段控件由 StatusFilterBar 自适应为菜单。
+struct WorkspaceListHeader<Controls: View>: View {
+    let title: String
+    let icon: String
+    let summary: String
+    @ViewBuilder let controls: Controls
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                Image(systemName: icon).foregroundStyle(Color.accentColor)
+                    .accessibilityHidden(true)
+                Text(title).font(.kpTitle).accessibilityAddTraits(.isHeader)
+                Spacer(minLength: Spacing.s)
+                Text(summary).font(.kpLabel.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            controls
+        }
+        .padding(.horizontal, Spacing.xl)
+        .padding(.vertical, Spacing.l)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.kpWindow)
+        .overlay(alignment: .bottom) { ListRule() }
     }
 }
 
@@ -653,6 +666,8 @@ enum DisplayStatus {
             return StatusStyle(icon: "exclamationmark.triangle", tone: .orange, label: status!)
         case "待修复":
             return StatusStyle(icon: "exclamationmark.triangle", tone: .orange, label: "待修复")
+        case "PR 已关闭":
+            return StatusStyle(icon: "xmark.circle", tone: .gray, label: "PR 已关闭")
         case "评审通过 · 待合并", "评审通过 · 待交付", "交付中":
             return StatusStyle(icon: "checkmark.circle", tone: .blue, label: status!)
         case "需人工", "needs_user":
@@ -775,8 +790,10 @@ enum DisplayStatus {
 
     private static func deliveryStatus(phase: String?, conclusion: String?, delivery: TaskDeliveryView?) -> String? {
         guard phase == "delivery", conclusion == "pass" else { return nil }
-        if delivery?.mode == "pr" {
-            return delivery?.prState?.uppercased() == "MERGED" ? "交付中" : "评审通过 · 待合并"
+        if let delivery, delivery.mode == "pr" {
+            if delivery.hasRecordedPRMerge { return "交付中" }
+            if delivery.prState?.uppercased() == "CLOSED" { return "PR 已关闭" }
+            return "评审通过 · 待合并"
         }
         return "评审通过 · 待交付"
     }
@@ -1005,6 +1022,52 @@ struct GroupPanel<Content: View>: View {
         .background(background)
         .clipShape(RoundedRectangle(cornerRadius: Radius.group))
         .overlay(RoundedRectangle(cornerRadius: Radius.group).strokeBorder(border, lineWidth: 1))
+    }
+}
+
+/// 详情里的补充资料。标题行负责展开，内容里的复制和跳转保持独立。
+struct DetailDisclosureStyle: DisclosureGroupStyle {
+    let systemImage: String
+    var itemCount: Int? = nil
+
+    func makeBody(configuration: Configuration) -> some View {
+        GroupPanel(background: Color.kpSecondary.opacity(0.06), border: Color.kpSeparator.opacity(0.6)) {
+            Button {
+                configuration.isExpanded.toggle()
+            } label: {
+                HStack(spacing: Spacing.s) {
+                    Image(systemName: systemImage)
+                        .foregroundStyle(Color.kpSecondary)
+                        .frame(width: Spacing.l)
+                        .accessibilityHidden(true)
+                    configuration.label
+                        .font(.kpBody.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: Spacing.s)
+                    if let itemCount {
+                        Text("\(itemCount) 条")
+                            .font(.kpLabel.monospacedDigit())
+                            .foregroundStyle(Color.kpSecondary)
+                    }
+                    Image(systemName: configuration.isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.kpSmall.weight(.semibold))
+                        .foregroundStyle(Color.kpSecondary)
+                        .frame(width: Spacing.m)
+                        .accessibilityHidden(true)
+                }
+                .padding(.horizontal, Spacing.l)
+                .frame(maxWidth: .infinity, minHeight: RowHeight.interactive)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(configuration.isExpanded ? "已展开" : "已折叠")
+            if configuration.isExpanded {
+                ListRule()
+                configuration.content
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(Spacing.l)
+            }
+        }
     }
 }
 
@@ -1406,7 +1469,7 @@ struct PhaseStepperView: View {
     static let steps = ["plan", "dispatch", "observe", "verdict", "commit", "review", "delivery", "done"]
 
     /// 高亮步骤：needs-you 按 failure_stage 映射到流水线步骤；其余阶段高亮同名步骤；无 failure_stage 时不高亮。
-    private var highlightedStep: String? {
+    static func currentStep(phase: String?, failureStage: String?) -> String? {
         guard phase == "needs-you" else { return phase }
         switch failureStage {
         case "plan": return "plan"
@@ -1455,16 +1518,21 @@ struct PhaseStepperView: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
-            HStack(spacing: Spacing.s) {
+            FlowRow(spacing: Spacing.xs, lineSpacing: Spacing.xs) {
                 ForEach(Self.steps, id: \.self) { step in
+                    let isCurrent = Self.currentStep(phase: phase, failureStage: failureStage) == step
                     HStack(spacing: Spacing.xs) {
-                        Text(Self.title(step))
-                            .font(.kpSmall.weight(highlightedStep == step ? .semibold : .regular))
-                            .foregroundStyle(highlightedStep == step ? Color.accentColor : Color.kpSecondary)
-                        if phase == "needs-you", highlightedStep == step {
+                        if phase == "needs-you", isCurrent {
                             Circle().fill(Color.kpOrange).frame(width: 6, height: 6)
                         }
+                        Text(Self.title(step))
+                            .font(.kpLabel.weight(isCurrent ? .semibold : .regular))
+                            .foregroundStyle(isCurrent ? Color.primary : Color.kpSecondary)
                     }
+                    .padding(.horizontal, Spacing.s)
+                    .padding(.vertical, Spacing.xs)
+                    .background(isCurrent ? Color.accentColor.opacity(0.16) : Color.clear, in: Capsule())
+                    .accessibilityLabel(isCurrent ? "当前阶段，\(Self.title(step))" : Self.title(step))
                 }
             }
             if showsCaption {
@@ -1499,62 +1567,48 @@ struct ExecutionStatusCheckView: View {
     @State private var continuationResult: ExecutionContinuationResponse?
     @State private var requestID = UUID()
 
+    @State private var showsEvidence = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.l) {
-            Text("执行状态核验").font(.kpTitle)
+        VStack(spacing: 0) {
+            CheckSheetHeader(title: "执行状态核验", task: model.taskTitle(for: target.taskID))
+            Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: Spacing.l) {
-                    if continuing {
-                        HStack(spacing: Spacing.s) {
-                            ProgressView().controlSize(.small)
-                            Text("正在接续已有成果并安排证据核对…").font(.kpBody)
-                        }
-                    } else if checking {
-                        HStack(spacing: Spacing.s) {
-                            ProgressView().controlSize(.small)
-                            Text("正在核对执行记录与当前状态…").font(.kpBody)
-                        }
+                    if continuing || checking {
+                        ProgressView(continuing ? "正在接续并安排证据核对…" : "正在核对本轮执行状态…")
+                            .controlSize(.small).frame(maxWidth: .infinity, minHeight: 112)
                     } else if let error {
-                        Label("状态未确认", systemImage: "exclamationmark.triangle.fill")
-                            .font(.kpBody.weight(.semibold)).foregroundStyle(Color.kpOrange)
-                        Text(error).font(.kpSmall).textSelection(.enabled)
-                        Text("可重新核验，或查看执行会话中的记录与运行端状态。")
-                            .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                        CheckSummary(title: result == nil ? "状态未确认" : "接续结果待确认",
+                                     icon: "exclamationmark.circle", color: .kpOrange, detail: error)
                     } else if let continuationResult {
-                        Label("续接正在收尾", systemImage: "clock")
-                            .font(.kpBody.weight(.semibold)).foregroundStyle(Color.kpBlue)
-                        Text(continuationResult.detail).font(.kpBody).textSelection(.enabled)
-                        Text("稍后重新核验查看进度。接续和收尾尚不代表验证通过。")
-                            .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                        CheckSummary(title: "正在接续已有成果", icon: "clock", color: .kpBlue,
+                                     detail: continuationResult.detail)
                     } else if let result {
                         resultContent(result)
                     }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.trailing, Spacing.s)
+                }.padding(Spacing.l).frame(maxWidth: .infinity, alignment: .leading)
             }
-            if let candidate = result?.continuation, result?.state == "finished",
-               continuationResult == nil, error == nil {
-                HStack(spacing: Spacing.s) {
-                    Button("核对成果并继续") { continuationConfirmation = candidate }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(checking || continuing || model.busy)
-                    Text("验证证据通过后才进入评审。")
-                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                }
-            }
+            Divider()
             HStack(spacing: Spacing.s) {
                 Button("重新核验") { Task { await check() } }
                     .disabled(checking || continuing || model.busy)
                 if let onViewSession {
                     Button("查看执行会话") { dismiss(); onViewSession() }
+                        .disabled(continuing)
                 }
-                Spacer(minLength: 0)
-                Button("关闭") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
+                Spacer()
+                Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
+                if let candidate = result?.continuation, result?.state == "finished",
+                   continuationResult == nil, error == nil {
+                    Button("核对成果并继续") { continuationConfirmation = candidate }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(checking || continuing || model.busy)
+                }
+            }.padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
         }
-        .padding(Spacing.l)
-        .frame(width: 520, height: 440)
+        .background(Color.kpWindow)
+        .frame(width: 540, height: 440)
         .task(id: target.id) { await check() }
         .confirmationDialog("核对成果并继续？", isPresented: Binding(
             get: { continuationConfirmation != nil },
@@ -1575,44 +1629,46 @@ struct ExecutionStatusCheckView: View {
 
     private func resultContent(_ result: ExecutionStatusCheckResponse) -> some View {
         VStack(alignment: .leading, spacing: Spacing.l) {
-            VStack(alignment: .leading, spacing: Spacing.s) {
-                Label(result.label, systemImage: result.symbol)
-                    .font(.kpBody.weight(.semibold)).foregroundStyle(statusColor(result.state))
-                Text(result.summary).font(.kpBody).textSelection(.enabled)
-                Text("核验时间 \(TimeFormat.fullString(result.checkedAt))")
-                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+            CheckSummary(title: result.label, icon: result.symbol, color: statusColor(result.state),
+                         detail: result.summary)
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                Text("下一步").font(.kpLabel.weight(.semibold))
+                Text(result.nextStep).font(.kpBody).textSelection(.enabled)
                 if result.state == "finished" {
-                    Text("执行轮次已结束；需求是否完成仍以验证与评审结果为准。")
-                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                }
-            }
-            VStack(alignment: .leading, spacing: Spacing.m) {
-                ForEach(result.checks) { item in
-                    HStack(alignment: .top, spacing: Spacing.s) {
-                        Image(systemName: item.state == "confirmed" ? "checkmark.circle" : "exclamationmark.circle")
-                            .foregroundStyle(item.state == "confirmed" ? Color.kpSecondary : Color.kpOrange)
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: Spacing.xs) {
-                            Text(item.label).font(.kpBody)
-                            Text(item.detail).font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                                .textSelection(.enabled)
-                        }
-                    }
+                    Text(result.continuation == nil ? "本次未确认可接续的成果。" : "验证证据通过后才进入评审。")
+                        .font(.kpLabel).foregroundStyle(.secondary)
                 }
             }
             if let failure = result.originalFailure, !failure.isEmpty {
-                VStack(alignment: .leading, spacing: Spacing.s) {
-                    Text("原失败记录").font(.kpBody.weight(.semibold))
-                    Text(failure).font(.kpSmall).textSelection(.enabled)
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text("原失败记录").font(.kpLabel.weight(.semibold))
+                    Text(failure).font(.kpLabel).foregroundStyle(.secondary).textSelection(.enabled)
                 }
-                .padding(Spacing.m)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.kpSecondary.opacity(0.08), in: RoundedRectangle(cornerRadius: Radius.control))
             }
-            VStack(alignment: .leading, spacing: Spacing.s) {
-                Text("下一步").font(.kpBody.weight(.semibold))
-                Text(result.nextStep).font(.kpBody).textSelection(.enabled)
+            if !result.checks.isEmpty {
+                DisclosureGroup("核验依据", isExpanded: $showsEvidence) {
+                    VStack(alignment: .leading, spacing: Spacing.m) {
+                        ForEach(result.checks) { item in
+                            Label {
+                                VStack(alignment: .leading, spacing: Spacing.xs) {
+                                    Text(item.label).font(.kpBody.weight(.medium))
+                                    Text(item.detail).font(.kpLabel).foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            } icon: {
+                                Image(systemName: item.state == "confirmed" ? "checkmark.circle" : "questionmark.circle")
+                                    .foregroundStyle(item.state == "confirmed" ? Color.secondary : Color.kpOrange)
+                                    .accessibilityLabel(item.state == "confirmed" ? "已确认" : "待核对")
+                            }
+                        }
+                    }
+                }
+                .disclosureGroupStyle(DetailDisclosureStyle(systemImage: "list.bullet.clipboard", itemCount: result.checks.count))
             }
+            HStack(spacing: Spacing.s) {
+                if let backend = result.backend { Text(RoleBackend.shortLabel(backend)) }
+                Text("核验于 \(TimeFormat.fullString(result.checkedAt))")
+            }.font(.kpSmall).foregroundStyle(.secondary)
         }
     }
 
@@ -1679,52 +1735,164 @@ struct ExecutionStatusCheckView: View {
     }
 }
 
-struct RecheckResultView: View {
-    let result: RecheckResponse?
-    @Environment(\.dismiss) private var dismiss
+private struct CheckSheetHeader: View {
+    let title: String
+    let task: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.l) {
-            Text("重新校验结果")
-                .font(.kpTitle)
-            if let result {
-                HStack(spacing: Spacing.s) {
-                    Image(systemName: result.ok == false ? "xmark.circle.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(result.ok == false ? Color.kpRed : Color.kpGreen)
-                    Text(result.ok == false ? "存在未通过项" : "全部通过")
-                        .font(.kpBody)
-                }
-                if let checks = result.checks {
-                    ForEach(checks) { check in
-                        HStack(spacing: Spacing.m) {
-                            Image(systemName: check.ok == false ? "xmark.circle.fill" : "checkmark.circle.fill")
-                                .foregroundStyle(check.ok == false ? Color.kpRed : Color.kpGreen)
-                                .accessibilityLabel(check.ok == false ? "未通过" : "通过")
-                            Text(check.name ?? "—")
-                                .font(.kpBody)
-                            Spacer(minLength: 0)
-                            Text(check.detail ?? "")
-                                .font(.kpSmall)
-                                .foregroundStyle(Color.kpSecondary)
-                                .lineLimit(1)
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            Text(title).font(.kpTitle).accessibilityAddTraits(.isHeader)
+            Text(task).font(.kpLabel).foregroundStyle(.secondary).lineLimit(2).help(task)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
+    }
+}
+
+private struct CheckSummary: View {
+    let title: String
+    let icon: String
+    let color: Color
+    let detail: String?
+
+    var body: some View {
+        GroupPanel {
+            HStack(alignment: .top, spacing: Spacing.m) {
+                Image(systemName: icon).font(.kpTitle).foregroundStyle(color)
+                    .frame(width: 28, height: 28)
+                    .background(color.opacity(0.1), in: RoundedRectangle(cornerRadius: Radius.control))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text(title).font(.kpSection).accessibilityAddTraits(.isHeader)
+                    if let detail, !detail.isEmpty {
+                        Text(detail).font(.kpBody).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                }.frame(minHeight: 28, alignment: .leading)
+            }.padding(Spacing.m)
+        }
+    }
+}
+
+struct RecheckResultView: View {
+    let result: RecheckResponse
+    let taskTitle: String
+    var onViewRelease: (() -> Void)?
+    @Environment(\.dismiss) private var dismiss
+
+    private var style: (String, Color) {
+        switch result.conclusion {
+        case .blocked, .issues: return ("exclamationmark.circle.fill", .kpOrange)
+        case .waiting: return ("clock.fill", .kpBlue)
+        case .ready, .checked: return ("checkmark.circle", .kpGreen)
+        case .incomplete, .unknownGate: return ("questionmark.circle", .kpOrange)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            CheckSheetHeader(title: "重新校验结果", task: taskTitle)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    CheckSummary(title: result.conclusion.rawValue, icon: style.0, color: style.1,
+                                 detail: summaryDetail)
+                    if let gate = result.mergeGate, result.conclusion == .issues || result.conclusion == .incomplete {
+                        FieldRow("PR 合并条件", gate.detail ?? "尚无结果")
+                    }
+                    ForEach(RecheckCheck.Group.allCases, id: \.self) { group in
+                        let items = (result.checks ?? []).filter { $0.name != "pr_merge_gate" && $0.group == group }
+                        if !items.isEmpty || (group == .remote && result.kaneoStatus != nil) {
+                            RecheckGroupView(group: group, items: items, kaneoStatus: result.kaneoStatus)
                         }
                     }
-                }
-                if let status = result.kaneoStatus {
-                    FieldRow("远端状态", status)
-                }
-            } else {
-                Text("无结果")
-                    .font(.kpBody)
-                    .foregroundStyle(Color.kpSecondary)
+                }.padding(Spacing.l).frame(maxWidth: .infinity, alignment: .leading)
             }
+            Divider()
             HStack {
+                if result.mergeGate != nil, let onViewRelease {
+                    Button("查看 PR 状态", action: onViewRelease)
+                }
                 Spacer()
-                Button("关闭") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
+                Button("关闭") { dismiss() }.keyboardShortcut(.defaultAction)
+            }.padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
+        }
+        .background(Color.kpWindow)
+        .frame(width: 540, height: 440)
+    }
+
+    private var summaryDetail: String? {
+        switch result.conclusion {
+        case .blocked, .waiting, .ready, .unknownGate: return result.mergeGate?.detail
+        case .issues: return nil
+        case .incomplete: return "当前回执缺少校验结果。"
+        case .checked: return nil
+        }
+    }
+}
+
+private struct RecheckGroupView: View {
+    let group: RecheckCheck.Group
+    let items: [RecheckCheck]
+    let kaneoStatus: String?
+    @State private var expanded = false
+
+    private var needsAttention: Bool { items.contains { $0.ok != true } }
+
+    private var summary: String {
+        if needsAttention { return "需核对" }
+        if group == .remote, let status = kaneoStatus {
+            return TaskOverviewTabView.kaneoStatusTitle(status)
+        }
+        if group == .materials, items.allSatisfy({ $0.detail == "match" }) { return "一致" }
+        if group == .materials { return "已核对 \(items.count) 项" }
+        return "\(items.count) 项"
+    }
+
+    var body: some View {
+        GroupPanel {
+            Button {
+                expanded.toggle()
+            } label: {
+                HStack(spacing: Spacing.s) {
+                    Text(group.rawValue).font(.kpBody.weight(.semibold))
+                    Spacer()
+                    Text(summary).font(.kpLabel)
+                        .foregroundStyle(needsAttention ? Color.kpOrange : Color.secondary)
+                    if !items.isEmpty {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.kpSmall).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, Spacing.m)
+                .frame(minHeight: RowHeight.interactive).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).disabled(items.isEmpty)
+            .accessibilityValue(expanded ? "已展开" : "已折叠")
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                if expanded || item.ok != true {
+                    ListRule()
+                    HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+                        Image(systemName: item.ok == true ? "checkmark.circle" : "exclamationmark.circle")
+                            .foregroundStyle(item.ok == true ? Color.secondary : Color.kpOrange)
+                            .accessibilityLabel(item.ok == true ? "已核对" : "需核对")
+                        Text(item.label).font(.kpLabel.weight(.medium))
+                        Spacer(minLength: Spacing.s)
+                        Text(detail(for: item)).font(.kpLabel).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing).textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }.padding(.horizontal, Spacing.m).padding(.vertical, Spacing.s)
+                }
             }
         }
-        .padding(Spacing.l)
-        .frame(minWidth: 420, minHeight: 220)
+    }
+
+    private func detail(for item: RecheckCheck) -> String {
+        switch item.detail {
+        case "match": return "一致"
+        case "changed": return "内容已变化"
+        case "missing/changed": return "文件缺失或内容已变化"
+        case let value? where item.name == "remote_status": return TaskOverviewTabView.kaneoStatusTitle(value)
+        default: return item.detail ?? "尚无明细"
+        }
     }
 }

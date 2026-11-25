@@ -159,6 +159,7 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 | `delivery-commit` | monitor | 核验执行轮次并提交任务工作树（§5.27） |
 | `delivery-publish` | delivery runner | 非强制推送、复用或创建 PR、写交付评论（§5.27） |
 | `delivery-sync` | delivery runner | 读取 PR 状态并登记同步结果（§5.27） |
+| `get-delivery-status` | 桌面 | 只读：读取 PR 状态、检查与合并门（§5.27） |
 | `executor-instance` | App 调度器 | 登记/关闭本次 App 进程归属；不取消 Plus 会话或任务（§5.27） |
 | `round-observe` | monitor 执行端 | 只读续接缺席的观察进程（幂等；不改任务状态，§5.23.7） |
 | `get-goal-report` | monitor 执行端 | 只读：取回经身份/完整性校验的 Plus Goal 报告（T5，§5.23.10） |
@@ -401,6 +402,8 @@ v2 起 `request_id`/`run_id`/`planner_input_sha256` 为必填；旧三字段形�
 ### 5.11 recheck
 
 `recheck {task_id}` → 重算计划/来源哈希 + 远端 `get-task`（可缺省 `offline:true` 只验本地）→ `{"task_id", "checks": [{name, ok, detail}], "kaneo_status"?, "requirements_sha256"?, "ok": bool}`；写 `kaneo_checked_at` 与观察 `kaneo_status`。
+
+手动在线复校若读取了 PR 合并条件，`pr_merge_gate` 项另带 `gate_state: blocked | waiting | ready`，分别表示受阻、等待检查、条件已满足。该项的 `ok` 仍表示读取成功；顶层 `ok` 仍按既有检查项汇总。读取错误、旧响应或信息不足时，客户端不得仅凭 `ok` 推断 PR 可合并或任务验证通过。
 
 ### 5.12 migrate
 
@@ -1659,6 +1662,17 @@ A1 交付补充：live 的判定回执只保存命令摘要，不保存原始命
 - 发送前在短事务写 `runtime_operations` 回执，固定身份由 task/run/review key/report/head/repo/PR 导出；同身份仅一次发送。先 prepared 再 unknown 后外部写，网络事务外。超时、断连、无效响应或崩溃留下 unknown，后续只读 PR 对账，禁止盲目重发（包含策略版本或 Review 身份变化）。预留事务内若同任务已有其他 prepared/unknown 合并回执，亦禁止新发送，避免重新评审绕过未决请求。已明确拒绝同身份不自动重试，提示到 GitHub 处理；已 MERGED 可对账。响应成功也须重新读取同身份 PR 并确认 MERGED 才登记 accepted、merged_at 与 pr_merged 事件。
 - 读侧 `delivery.auto_merge` 可选对象：`{state, reason, head_sha, updated_at}`，state 为 `waiting_checks|blocked|merging|unknown|merged|disabled`。看板和详情展示 reason，unknown 明示结果待确认不会重复提交；不以此对象替代核心任务状态。无自动合并配置时保持被动观察。自动合并开启时 OPEN 等待沿用 300 秒快档检查；关闭时保留既有 5/30 分钟间隔。合并确认后复用 delivery runner 的 `advance-task` 同步 Kaneo/local done；同步失败保留已合并事实，不提前显示已完成。`reason` 必须点名拦下合并的对象：检查失败或运行中时列出检查名（可带 workflow，同名多次运行去重），检查全绿而状态仍非 CLEAN 时说明是保护规则/评审/目标分支，暂无可读检查时明说；`reason` 保持确定性（同一观测产生同一字符串，不拼时间、观测次数等动态内容），长期未就绪的连续观测以该字符串为键。任务停止轮询后（如升级为 `merge_checks_stalled`）该回执保持上次观测、不再自动刷新；用户手动 `recheck` 可只读重算该回执——不改任务状态、不写远端、不重置长期未就绪计数，未确认的合并回执与已前移的交付头不覆盖——使看板重新点名当前阻塞项。
 - 本功能不调用模型、无新增模型费用；开发验证仅使用隔离 DB、临时 Git 仓库与 fake GitHub/Kaneo。真实开启项目开关及合并需与实现/测试证据分开报告。
+
+#### 任务详情的 PR 只读观察（KP-DL01 / KP-UI11）
+
+- 命令 `get-delivery-status {task_id, include_terminal_checks?: bool}`（桌面）只读：读一次本任务的交付投影，至多一次结构化 `gh pr view --json …statusCheckRollup`，并用 `pr_auto_merge.eligibility` 原样给出合并门结论。不写 SQLite、不发 GitHub 写、不重排 `next_sync_at`，因此不改变引擎 300/1800 秒的同步节奏，也不替代 `delivery-sync`。
+- 响应：`{task_id, observed_at, live, error, delivery, pr, gate, checks, checks_summary}`。`delivery` 恒存在，字段来自交付投影（`notice` 是上次 `auto_merge` 观测；`notice_matches_head` 表示它是否仍对应当前 `head_sha`；`auto_merge_enabled` 取项目策略，缺失视为关闭）。
+- `live=false` 且 `error=null`：非 PR 交付、缺少 PR 编号、默认跳过的已合并或已关闭 PR——没有可读现场，不是读取失败；此时 `pr/gate/checks/checks_summary` 均为 null。
+- 发布页指定 `include_terminal_checks=true` 时也读取已合并或已关闭 PR 的检查，终态 `gate=null`。仓库和 PR 编号必须匹配登记的地址与现场地址。
+- `live=false` 且 `error={code,message}`：GitHub 或仓库来源读取失败（`GhError.kind` / `GitDeliveryError.code`，原文脱敏）。
+- `live=true`：`pr` 给 `state/is_draft/mergeable/merge_state_status/review_decision/head_sha/base_ref_name/url/head_matches_delivery`（`url` 同样只接受严格形状的 PR 页面地址，否则为空串）；`gate` 给 `{state,reason,ready}`，未阻塞时 `state=ready`、reason「检查与保护规则已满足，等待下一轮交付同步合并」。
+- `checks` 按 `(workflow, name)` 归组，同名多轮时**仍在运行的那轮视为当前轮**：GitHub 可能把已结束的旧轮排在更新的开始时间之后，纯时间序会把用户正在看的运行藏掉；同类别内再按 `completedAt` → `startedAt` → 列表顺序取。GitHub 对未完成检查返回的 `0001-01-01T00:00:00Z` 与空串一律视为没有时间。`superseded_runs` 记同名更早轮次数。排序 failed → running → unknown → passed，再按 workflow/name。检查名与 workflow 脱敏并截断（120/80）；`url` 只接受严格匹配本仓库的 `https://github.com/<repo>/actions/runs/<n>[/job/<m>]`，其余 null——地址类字段刻意不做 URL 脱敏（脱敏会把链接整段换成占位符，页面就用不了），只靠形状校验限定到本仓库。`statusCheckRollup` 不可读时 `checks=null` 而不是空数组。
+- 每项检查可含 GitHub 的原始 `status` 和 `conclusion`，供发布页区分排队、运行、取消、中立与跳过。界面只读刷新，展示约定见 ui-spec §4。
 
 ## 5.28 执行期提问转交（P0 冻结，2026-10-14）
 

@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 紧凑列表视图（T2，ui-spec §4.13；观测列表 §4.18）。
-/// 顶部 chips 按观测口径筛选并计数；项目可折叠，项目内保留五个观测分组，空组隐藏。
+/// 顶部分段控件按观测口径筛选并计数；项目可折叠，项目内保留五个观测分组，空组隐藏。
 /// 共用搜索、看板列筛选、批量选择与详情打开逻辑。
 struct TaskCompactListView: View {
     /// 已套用搜索与看板列筛选、未套用 chip 的任务；chip 过滤与分组统一由 ObserveScope 计算。
@@ -22,7 +22,7 @@ struct TaskCompactListView: View {
     var body: some View {
         let projects = ObserveScope.projects(tasks, chip: chip)
         VStack(alignment: .leading, spacing: 0) {
-            chipBar
+            scopeFilter
             // 行与分组头通栏，左右边距由各自的内边距承担。
             ScrollView(.vertical, showsIndicators: true) {
                 LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
@@ -38,56 +38,37 @@ struct TaskCompactListView: View {
                             projectHeader(project)
                         }
                     }
-                    if projects.isEmpty {
-                        emptyRow
-                    }
+                }
+            }
+            .overlay {
+                if projects.isEmpty {
+                    ContentUnavailableView("当前没有符合「\(chip.title)」的任务",
+                                           systemImage: "line.3.horizontal.decrease.circle")
                 }
             }
         }
         .background(Color.kpControl)
     }
 
-    private func count(_ option: ObserveChip) -> Int {
-        ObserveScope.count(option, in: tasks)
+    private var scopePicker: some View {
+        Picker("任务范围", selection: $chip) {
+            ForEach(ObserveChip.allCases) { option in
+                Text("\(option.title) \(ObserveScope.count(option, in: tasks))").tag(option)
+            }
+        }
+        .labelsHidden()
+        .accessibilityLabel("任务范围")
     }
 
-    // MARK: - chips
-
-    /// chips 紧凑排成一行（ui-spec §4.18）：宽度不足时换行，不拉伸成等距网格；下方一条通栏分隔线。
-    private var chipBar: some View {
-        FlowRow(spacing: Spacing.s, lineSpacing: Spacing.s) {
-            ForEach(ObserveChip.allCases) { option in
-                Button {
-                    chip = option
-                } label: {
-                    HStack(spacing: Spacing.xs) {
-                        Text(option.title)
-                        Text("\(count(option))").monospacedDigit().foregroundStyle(Color.kpSecondary)
-                    }
-                    .font(.kpLabel)
-                    .padding(.horizontal, Spacing.m)
-                    .padding(.vertical, Spacing.xs)
-                    .background(chip == option ? Color.accentColor.opacity(0.14) : Color.kpWindow, in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(chip == option ? AccessibilityTraits.isSelected : [])
-            }
+    private var scopeFilter: some View {
+        ViewThatFits(in: .horizontal) {
+            scopePicker.pickerStyle(.segmented).fixedSize()
+            scopePicker.pickerStyle(.menu)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, Spacing.l)
         .padding(.vertical, Spacing.m)
         .overlay(alignment: .bottom) { ListRule() }
-    }
-
-    private var emptyRow: some View {
-        HStack {
-            Text("当前没有符合「\(chip.title)」的任务")
-                .font(.kpSmall)
-                .foregroundStyle(.tertiary)
-            Spacer()
-        }
-        .padding(.horizontal, Spacing.l)
-        .padding(.vertical, Spacing.s)
     }
 
     private func taskGroups(_ groups: [TaskBoardGroup]) -> some View {

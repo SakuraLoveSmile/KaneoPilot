@@ -13,9 +13,19 @@ struct SessionMessageDetailView: View {
     init(row: SessionMessageRowData, openRaw: Bool = false, onClose: (() -> Void)? = nil) {
         self.row = row
         self.onClose = onClose
-        _outputField = State(initialValue: row.match?.field ?? (row.presentation.body.isEmpty && row.presentation.input != nil ? "输入" : row.presentation.stdout?.isEmpty == false ? "标准输出" : row.presentation.stderr?.isEmpty == false ? "标准错误" : "输出"))
+        let fields = Self.outputFields(for: row)
+        let preferred = row.match?.field ?? (row.presentation.body.isEmpty ? "输入" : row.presentation.stdout?.isEmpty == false ? "标准输出" : "标准错误")
+        _outputField = State(initialValue: fields.contains(preferred) ? preferred : fields.first ?? "输出")
         // Markdown 的渲染索引不能映射原文范围，搜索先使用纯文本定位。
         _mode = State(initialValue: Self.initialMode(for: row, openRaw: openRaw))
+    }
+
+    private static func outputFields(for row: SessionMessageRowData) -> [String] {
+        var fields = [row.presentation.stdout == nil ? "输出" : "标准输出"]
+        if row.presentation.stderr != nil { fields.append("标准错误") }
+        if row.presentation.input != nil { fields.append("输入") }
+        if row.match?.field == "工具" { fields.append("工具") }
+        return fields
     }
 
     static func initialMode(for row: SessionMessageRowData, openRaw: Bool) -> String {
@@ -39,32 +49,44 @@ struct SessionMessageDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: Spacing.m) {
-                Text("\(Labels.messageType(row.message.type)) · 查看全文").font(.kpTitle)
-                Spacer(minLength: 0)
-                Picker("阅读模式", selection: $mode) {
-                    Text(row.presentation.isTool ? "输出" : "阅读").tag(row.presentation.isTool ? "输出" : "阅读")
-                    Text("原文").tag("原文")
-                }.pickerStyle(.segmented).frame(maxWidth: 200)
-                Button("复制全文") { Workspace.copy(text) }
-                    .focused($focusedControl, equals: "copy")
-                    .keyboardShortcut(focusedControl == "copy" ? KeyboardShortcut(.return, modifiers: []) : nil)
+            HStack(alignment: .center, spacing: Spacing.m) {
+                Image(systemName: row.presentation.isTool ? "terminal" : "text.alignleft")
+                    .font(.kpTitle).foregroundStyle(Color.accentColor).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(Labels.messageType(row.message.type)) · 查看全文").font(.kpTitle)
+                        .accessibilityAddTraits(.isHeader)
+                    let metadata = [row.presentation.toolName, row.message.sourceAt.map { TimeFormat.fullString($0) },
+                                    row.presentation.exitCode.map { "退出码 \($0)" }].compactMap { $0 }.joined(separator: " · ")
+                    if !metadata.isEmpty {
+                        Text(metadata).font(.kpSmall).foregroundStyle(.secondary).lineLimit(2).help(metadata)
+                    }
+                }
+                Spacer()
                 Button("关闭") { closeDetail() }
                     .focused($focusedControl, equals: "close")
                     .keyboardShortcut(focusedControl == "close" ? KeyboardShortcut(.return, modifiers: []) : .cancelAction)
-            }.padding(Spacing.l)
+            }.padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
+            Divider()
+            HStack(spacing: Spacing.s) {
+                Picker("阅读模式", selection: $mode) {
+                    Text(row.presentation.isTool ? "输出" : "阅读").tag(row.presentation.isTool ? "输出" : "阅读")
+                    Text("原文").tag("原文")
+                }.pickerStyle(.segmented).labelsHidden().fixedSize()
+                if mode == "输出" {
+                    Picker("输出分区", selection: $outputField) {
+                        ForEach(Self.outputFields(for: row), id: \.self) { Text($0).tag($0) }
+                    }.pickerStyle(.menu).labelsHidden().fixedSize().accessibilityLabel("输出分区")
+                }
+                Spacer(minLength: 0)
+                Button("复制全文") { Workspace.copy(text) }
+                    .focused($focusedControl, equals: "copy")
+                    .keyboardShortcut(focusedControl == "copy" ? KeyboardShortcut(.return, modifiers: []) : nil)
+                    .help("复制当前显示的完整文本")
+            }.padding(.horizontal, Spacing.l).padding(.vertical, Spacing.s)
             if let match = row.match {
-                Text("\(match.field)命中\(highlight == nil || mode == "阅读" ? "" : " · 已定位实际文字")").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                Text("\(match.field)命中\(highlight == nil || mode == "阅读" ? "" : " · 已定位实际文字")")
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, Spacing.l).padding(.bottom, Spacing.s)
-            }
-            if mode == "输出" {
-                Picker("输出分区", selection: $outputField) {
-                    if row.presentation.stdout != nil { Text("标准输出").tag("标准输出") }
-                    if row.presentation.stderr != nil { Text("标准错误").tag("标准错误") }
-                    if row.presentation.input != nil { Text("输入").tag("输入") }
-                    if row.match?.field == "工具" { Text("工具").tag("工具") }
-                    if row.presentation.stdout == nil { Text("输出").tag("输出") }
-                }.pickerStyle(.menu).padding(.horizontal, Spacing.l).padding(.bottom, Spacing.s)
             }
             Divider()
             if mode == "阅读", text.utf8.count <= 64 * 1024 {

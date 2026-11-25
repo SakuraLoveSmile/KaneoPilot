@@ -20,6 +20,31 @@ func decode<T: Decodable>(_ type: T.Type, _ json: String) -> T? {
     }
 }
 
+// recheck.ok 表示已完成该次核对，不能据此判定 PR 可交付。
+for (payload, conclusion) in [
+    (#"{"ok":true,"checks":[{"name":"plan_sha256","ok":true},{"name":"pr_merge_gate","gate_state":"blocked","ok":true}]}"#, RecheckResponse.Conclusion.blocked),
+    (#"{"ok":true,"checks":[{"name":"pr_merge_gate","gate_state":"waiting","ok":true}]}"#, .waiting),
+    (#"{"ok":true,"checks":[{"name":"pr_merge_gate","gate_state":"ready","ok":true}]}"#, .ready),
+    (#"{"ok":true,"checks":[{"name":"pr_merge_gate","detail":"旧核心原文","ok":true}]}"#, .unknownGate),
+    (#"{"ok":false,"checks":[{"name":"remote_requirements","ok":false},{"name":"pr_merge_gate","gate_state":"ready","ok":true}]}"#, .issues),
+    (#"{"ok":true,"checks":[{"name":"plan_sha256","ok":true}]}"#, .checked),
+    (#"{"ok":true,"checks":[]}"#, .incomplete),
+    (#"{"checks":[{"name":"remote_status"}]}"#, .incomplete)
+] {
+    if let receipt = decode(RecheckResponse.self, payload) {
+        expect(receipt.conclusion == conclusion, "复校结论应为 \(conclusion.rawValue)")
+    }
+}
+
+// 工作树迁移核心返回根目录的汇总清单，旧版详细列表也可解码。
+if let preview = decode(WorktreeRelocatePreviewDTO.self, #"{"worktree_count":3,"repository_count":2,"pool_slot_count":1,"current_lease_count":0,"backup_dir":"/fixture/backup","status":"planned","dry_run":true,"audit_sha256":"audit"}"#) {
+    expect(preview.worktreeCount == 3 && preview.repositoryCount == 2 && preview.poolSlotCount == 1 && preview.currentLeaseCount == 0, "工作树迁移预览保留核心数量及零值")
+    expect(preview.backupDir == "/fixture/backup" && preview.auditSha256 == "audit", "备份目录与预览指纹来自同一回执")
+}
+if let legacy = decode(WorktreeRelocatePreviewDTO.self, #"{"moves":[],"blockers":[{"code":"active","detail":"引擎正在运行"}]}"#) {
+    expect(!legacy.isReady && legacy.worktreeCount == nil && legacy.blockers?.first?.detail == "引擎正在运行", "旧预览保留阻断原因，缺失数量保持未知")
+}
+
 // MARK: - Plus readiness probe snake_case response
 
 // KP-SV02：真实核心契约的字段解码，不把 finished 解释为需求验收完成。
@@ -674,6 +699,15 @@ for state in ["waiting_checks", "blocked", "merging", "unknown", "merged", "disa
 }
 if let delivery = decode(TaskDeliveryView.self, #"{"head_sha":"new","auto_merge":{"state":"merged","reason":"旧提交已合并","head_sha":"old"}}"#) {
     expect(delivery.autoMergeNotice == nil, "新提交不显示旧 head 的合并结果")
+}
+
+for (state, head, merged) in [("OPEN", "current", true), ("OPEN", "old", false), ("CLOSED", "current", false)] {
+    let json = """
+    {"pr_state":"\(state)","head_sha":"current","auto_merge":{"state":"merged","reason":"已观察到合并","head_sha":"\(head)"}}
+    """
+    if let delivery = decode(TaskDeliveryView.self, json) {
+        expect(delivery.hasRecordedPRMerge == merged, "发布页按 PR 状态和提交归属显示合并回执 \(state)/\(head)")
+    }
 }
 
 // Direct repair startup carries the exact reviewed material identity.

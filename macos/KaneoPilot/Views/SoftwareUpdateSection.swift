@@ -28,29 +28,18 @@ struct SoftwareUpdateSection: View {
     }
 
     var body: some View {
-        Section("软件更新") {
-            FieldRow("当前版本", "\(updater.currentVersion)（\(updater.currentBuild)）")
-            Toggle("自动检查更新", isOn: $updater.automaticallyChecks)
-                .font(.kpBody).disabled(!updater.allowsNetwork)
-            Toggle("自动下载更新", isOn: $updater.automaticallyDownloads)
-                .font(.kpBody).disabled(!updater.allowsNetwork || updater.isPreview)
-            Toggle("接收测试版", isOn: testBuildsBinding)
-                .font(.kpBody).disabled(!updater.canChangeTestChannel)
-            Text("开启后，也会检查并提供来自开发分支的测试构建；测试构建可能不稳定，也可能升级数据库，无法在 App 内降级。")
-                .font(.kpSmall).foregroundStyle(.secondary)
-            Text(frequencyText)
-                .font(.kpSmall).foregroundStyle(.secondary)
-            if updater.isPreview {
-                Text("当前是开发预览版，不会自动切换到正式版。可手动检查并查看发布页。")
-                    .font(.kpSmall).foregroundStyle(.secondary)
-                Text("开发预览版不接收测试版。")
-                    .font(.kpSmall).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: Spacing.m) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: Spacing.l) {
+                    versionSummary
+                    Spacer(minLength: Spacing.s)
+                    updateActions
+                }
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    versionSummary
+                    updateActions
+                }
             }
-            if updater.installedIsTestBuild && !updater.testChannelActive {
-                Text("当前是测试版。开启「接收测试版」可获取后续测试构建；关闭时只在出现更高的正式版时提示。")
-                    .font(.kpSmall).foregroundStyle(.secondary)
-            }
-            Text(updater.statusText).font(.kpBody).textSelection(.enabled)
             if let release = updater.release, release.isTest, let branch = release.branch {
                 Text(verbatim: "来源分支：\(branch)")
                     .font(.kpSmall).foregroundStyle(.secondary).textSelection(.enabled)
@@ -70,18 +59,6 @@ struct SoftwareUpdateSection: View {
             if let result = updater.installationResult {
                 Text(result).font(.kpSmall).foregroundStyle(.secondary).textSelection(.enabled)
             }
-            HStack(spacing: Spacing.s) {
-                Button("检查更新") { Task { await updater.check() } }
-                    .disabled(!updater.allowsNetwork || updater.isBusy)
-                if updater.canDownload {
-                    Button(updater.errorMessage == nil ? "下载更新" : "重新下载") { Task { await updater.download() } }
-                }
-                if updater.canInstall {
-                    Button("安装并重新启动") { confirmsInstallation = true }
-                }
-                Link("发布说明", destination: updater.release?.pageURL ?? SoftwareUpdateSource.releasesURL)
-            }
-            .font(.kpBody)
             if let package = updater.downloadedPackage, !updater.isBusy {
                 Button("在 Finder 中显示安装包") {
                     NSWorkspace.shared.activateFileViewerSelecting([package])
@@ -95,6 +72,41 @@ struct SoftwareUpdateSection: View {
                 }
                 .font(.kpBody)
             }
+            if updater.isPreview {
+                Text("当前是开发预览版，不会自动切换到正式版。可手动检查并查看发布页。")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+                Text("开发预览版不接收测试版。")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+            }
+            if updater.installedIsTestBuild && !updater.testChannelActive {
+                Text("当前是测试版。开启「接收测试版」可获取后续测试构建；关闭时只在出现更高的正式版时提示。")
+                    .font(.kpSmall).foregroundStyle(.secondary)
+            }
+            Divider()
+            DisclosureGroup("更新偏好") {
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    Toggle(isOn: $updater.automaticallyChecks) {
+                        Text("自动检查更新").frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .disabled(!updater.allowsNetwork)
+                    Toggle(isOn: $updater.automaticallyDownloads) {
+                        Text("自动下载更新").frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .disabled(!updater.allowsNetwork || updater.isPreview)
+                    Toggle(isOn: testBuildsBinding) {
+                        Text("接收测试版").frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .disabled(!updater.canChangeTestChannel)
+                    Text("开启后，也会检查并提供来自开发分支的测试构建；测试构建可能不稳定，也可能升级数据库，无法在 App 内降级。")
+                        .font(.kpSmall).foregroundStyle(.secondary)
+                    Text(frequencyText)
+                        .font(.kpSmall).foregroundStyle(.secondary)
+                }
+                .toggleStyle(.switch)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, Spacing.s)
+            }
+            .font(.kpBody)
         }
         .confirmationDialog("安装更新并重新启动？", isPresented: $confirmsInstallation) {
             Button("安装并重新启动") { Task { await updater.installAndRestart() } }
@@ -102,5 +114,29 @@ struct SoftwareUpdateSection: View {
         } message: {
             Text(installationWarning)
         }
+    }
+
+    private var versionSummary: some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            Text("KaneoPilot \(updater.currentVersion)").font(.kpTitle)
+                .accessibilityLabel("当前版本 \(updater.currentVersion)")
+            Text("构建 \(updater.currentBuild) · \(updater.statusText)")
+                .font(.kpLabel).foregroundStyle(.secondary).textSelection(.enabled)
+        }
+    }
+
+    private var updateActions: some View {
+        HStack(spacing: Spacing.s) {
+            Button("检查更新") { Task { await updater.check() } }
+                .disabled(!updater.allowsNetwork || updater.isBusy)
+            if updater.canDownload {
+                Button(updater.errorMessage == nil ? "下载更新" : "重新下载") { Task { await updater.download() } }
+            }
+            if updater.canInstall {
+                Button("安装并重新启动") { confirmsInstallation = true }
+            }
+            Link("发布说明", destination: updater.release?.pageURL ?? SoftwareUpdateSource.releasesURL)
+        }
+        .font(.kpBody)
     }
 }

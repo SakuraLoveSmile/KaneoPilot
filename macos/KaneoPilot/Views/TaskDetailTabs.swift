@@ -1,13 +1,13 @@
 import SwiftUI
 import AppKit
 
-// MARK: - 详情浮层分段（ui-spec §4.1 T4 五段式）
+// MARK: - 详情浮层分段（ui-spec §4.1）
 
-/// 任务详情浮层的五个分段：概览 / 计划 / 执行 / 评审 / 记录。
+/// 任务详情浮层的六个分段：概览 / 计划 / 执行 / 评审 / 发布 / 记录。
 /// `TaskSheetItem.startTab` 让看板入口直达指定分段（待办 → 计划；
 /// 进行中「查看实时会话」→ 执行）。
 enum TaskDetailTab: String, CaseIterable, Identifiable {
-    case overview, plan, execution, review, log
+    case overview, plan, execution, review, release, log
 
     var id: String { rawValue }
 
@@ -17,6 +17,7 @@ enum TaskDetailTab: String, CaseIterable, Identifiable {
         case .plan: return "计划"
         case .execution: return "执行"
         case .review: return "评审"
+        case .release: return "发布"
         case .log: return "记录"
         }
     }
@@ -24,7 +25,7 @@ enum TaskDetailTab: String, CaseIterable, Identifiable {
 
 // MARK: - 计划阅读页（ui-spec §4.8 / protocol §5.23.1，T2）
 
-/// 计划页：固定头部（可选标题行 + 元数据区 + 独立操作行）+
+/// 计划页：紧凑阅读工具栏与按需打开的计划信息 +
 /// 渲染/原文双模式正文。数据源 `get-plan`（携带当前视图 plan_sha256
 /// 做 expected 核验）；正文只读，核验失败不展示旧正文。
 struct PlanReaderView: View {
@@ -37,7 +38,7 @@ struct PlanReaderView: View {
     @EnvironmentObject private var model: AppViewModel
 
     private enum Mode: String, CaseIterable {
-        case rendered = "渲染"
+        case rendered = "阅读"
         case raw = "原文"
         var id: String { rawValue }
     }
@@ -47,6 +48,7 @@ struct PlanReaderView: View {
     @State private var errorText: String?
     @State private var errorCode: String?
     @State private var mode: Mode = .rendered
+    @State private var showsPlanInfo = false
     /// 在途响应归属守卫：旧响应不得覆盖新页面（§4.8）。
     @State private var generation = 0
 
@@ -59,13 +61,18 @@ struct PlanReaderView: View {
         plan?.planPath ?? detail?.planPath ?? detail?.links?.planFile
     }
 
-    /// 核验通过：只有 get-plan 成功返回正文才算「已核验」。
-    private var isVerified: Bool { plan != nil }
+    private var hasPlanInfo: Bool {
+        plan != nil || planPath != nil || detail?.planSha256 != nil
+            || detail?.planKind != nil || detail?.planGeneratedAt != nil
+            || detail?.plannerModel != nil || detail?.reasoningEffort != nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider().overlay(Color.kpSeparator).opacity(0.5)
+            if showsHeaderInfo || hasPlanInfo {
+                header
+                ListRule()
+            }
             body(for: plan)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -77,7 +84,15 @@ struct PlanReaderView: View {
         .onChange(of: model.lastRefreshAt) {
             Task { await load() }
         }
+        .onChange(of: detail?.planSha256) { _, registered in
+            guard registered == nil || plan?.planSha256 != registered else { return }
+            generation += 1
+            plan = nil
+            loading = true
+            Task { await load() }
+        }
         .onChange(of: taskID) {
+            showsPlanInfo = false
             // 任务切换：清旧正文并守卫在途响应。
             generation += 1
             plan = nil
@@ -90,9 +105,6 @@ struct PlanReaderView: View {
 
     // MARK: 固定头部（不随正文滚动）
 
-    /// 结构（§4.8）：标题行（仅父详情隐藏顶栏时出现，≤2 行，可选中）→ 元数据区 →
-    /// 独立操作行（模式分段 + 打开/定位按钮，窄时换行）。
-    /// 操作行与元数据分行，右侧不再被固定宽度控件挤压。
     private var header: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
             if showsHeaderInfo {
@@ -100,128 +112,40 @@ struct PlanReaderView: View {
                     .font(.kpTitle)
                     .lineLimit(2)
                     .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityAddTraits(.isHeader)
+                if detail?.planExecutionHold == true { StatusBadge(status: "待确认执行") }
             }
-
-            metadata
-
-            actionRow
+            if hasPlanInfo {
+                HStack(spacing: Spacing.m) {
+                    if plan != nil {
+                        Picker("阅读模式", selection: $mode) {
+                            ForEach(Mode.allCases, id: \.id) { item in
+                                Text(item.rawValue).tag(item)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityLabel("计划阅读模式")
+                    }
+                    Spacer(minLength: 0)
+                    Button {
+                        showsPlanInfo.toggle()
+                    } label: {
+                        Label("计划信息", systemImage: "info.circle")
+                    }
+                    .popover(isPresented: $showsPlanInfo) {
+                        PlanFileInfoView(plan: plan, detail: detail, planPath: planPath)
+                    }
+                }
+                .controlSize(.small)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, Spacing.xl)
-        .padding(.vertical, Spacing.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, Spacing.s)
     }
 
-    /// 元数据区：状态 / 类型 / 时间 / 哈希前缀 + 中间截断的可复制路径。
-    private var metadata: some View {
-        VStack(alignment: .leading, spacing: Spacing.xs) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
-                    planMetadataItems
-                }
-                .fixedSize(horizontal: true, vertical: false)
-                VStack(alignment: .leading, spacing: Spacing.xs) {
-                    planMetadataItems
-                }
-            }
-            .font(.kpSmall)
-            .foregroundStyle(Color.kpSecondary)
-
-            if let path = planPath {
-                // 长路径中间截断，但完整值仍可选中复制并经「在 Finder 显示」定位。
-                Text(path)
-                    .font(.kpSmall)
-                    .foregroundStyle(Color.kpSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-                    .help(path)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
-                    plannerMetadataItems
-                }
-                .fixedSize(horizontal: true, vertical: false)
-                VStack(alignment: .leading, spacing: Spacing.xs) {
-                    plannerMetadataItems
-                }
-            }
-            .font(.kpSmall)
-            .foregroundStyle(Color.kpSecondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private var planMetadataItems: some View {
-        // §4.8/§5：plan_execution_hold → 「待确认执行」图标+文字。
-        if detail?.planExecutionHold == true, showsHeaderInfo {
-            StatusBadge(status: "待确认执行")
-        }
-        if let kind = plan?.planKind ?? detail?.planKind {
-            Text("类型：\(Labels.planKind(kind))")
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        if let at = plan?.generatedAt ?? detail?.planGeneratedAt {
-            Text("生成于 \(TimeFormat.fullString(at))")
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        if let sha = plan?.planSha256 ?? detail?.planSha256 {
-            Button {
-                Workspace.copy(sha)
-            } label: {
-                Label(String(sha.prefix(12)), systemImage: "doc.on.doc")
-            }
-            .buttonStyle(.borderless)
-            .font(.kpSmall)
-            .help("复制完整计划哈希")
-            .accessibilityLabel("复制计划哈希")
-        }
-    }
-
-    @ViewBuilder
-    private var plannerMetadataItems: some View {
-        if let method = plan?.meta?.plannerMethod {
-            Text("方法 \(method)")
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        if let plannerModel = plan?.meta?.plannerModel ?? detail?.plannerModel {
-            Text("模型 \(plannerModel)")
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        if let effort = plan?.meta?.reasoningEffort ?? detail?.reasoningEffort {
-            Text("思考 \(effort)")
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    /// 独立操作行：模式分段 + 打开/定位。宽度不足时**换行**（不是裁切），
-    /// 因此不与元数据争宽，右侧也不会有漂浮残字。
-    private var actionRow: some View {
-        FlowRow(spacing: Spacing.m, lineSpacing: Spacing.s) {
-            Picker("查看模式", selection: $mode) {
-                ForEach(Mode.allCases, id: \.id) { m in
-                    Text(m.rawValue).tag(m)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 140)
-            .accessibilityLabel("渲染或原文模式")
-
-            Button("打开计划文件") { Workspace.open(planPath) }
-                .disabled(planPath == nil)
-                .help(planPath == nil ? "无计划文件" : "")
-            Button("在 Finder 显示") { Workspace.reveal(planPath) }
-                .disabled(planPath == nil)
-                .help(planPath == nil ? "无计划文件" : "")
-        }
-        .font(.kpSmall)
-        .controlSize(.small)
-    }
     // MARK: 正文 / 状态机
 
     @ViewBuilder
@@ -284,7 +208,9 @@ struct PlanReaderView: View {
     @ViewBuilder
     private var confirmBar: some View {
         if detail?.planExecutionHold == true {
-            let verified = isVerified
+            let hash = plan?.planSha256
+            let verified = hash?.isEmpty == false && plan?.markdown != nil
+                && (detail?.planSha256 == nil || detail?.planSha256 == hash)
             let allowed = detail?.allowedActions?.contains("confirm_dispatch") == true
             VStack(spacing: 0) {
                 Divider().overlay(Color.kpSeparator).opacity(0.5)
@@ -303,9 +229,10 @@ struct PlanReaderView: View {
                         Task {
                             await model.confirmDispatch(
                                 taskID: taskID,
-                                planSha256: detail?.planSha256)
+                                planSha256: hash)
                         }
                     }
+                    .buttonStyle(.borderedProminent)
                     .disabled(!verified || !allowed || model.busy)
                     .help(verified
                           ? "按已核验的计划安排执行，执行前会再次确认计划未变更"
@@ -340,6 +267,71 @@ struct PlanReaderView: View {
             errorText = error.coreMessage
             if case CoreError.exited(_, _, let code) = error {
                 errorCode = code
+            }
+        }
+    }
+}
+
+/// 阅读工具栏的资料弹层，文件操作使用当前任务的同一份路径。
+struct PlanFileInfoView: View {
+    let plan: GetPlanResponse?
+    let detail: TaskDetail?
+    let planPath: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Spacing.m) {
+                Text("计划信息").font(.kpBody.weight(.semibold)).accessibilityAddTraits(.isHeader)
+                Grid(alignment: .leading, horizontalSpacing: Spacing.l, verticalSpacing: Spacing.s) {
+                    infoRow("类型", (plan?.planKind ?? detail?.planKind).map(Labels.planKind))
+                    infoRow("生成时间", (plan?.generatedAt ?? detail?.planGeneratedAt).map { TimeFormat.fullString($0) })
+                    infoRow("规划方法", plan?.meta?.plannerMethod)
+                    infoRow("规划模型", plan?.meta?.plannerModel ?? detail?.plannerModel)
+                    infoRow("思考强度", plan?.meta?.reasoningEffort ?? detail?.reasoningEffort)
+                    if let sha = plan?.planSha256 ?? detail?.planSha256 {
+                        GridRow(alignment: .firstTextBaseline) {
+                            Text("计划哈希").foregroundStyle(Color.kpSecondary)
+                            Button { Workspace.copy(sha) } label: {
+                                Label(String(sha.prefix(12)), systemImage: "doc.on.doc")
+                                    .font(.system(size: 12, design: .monospaced))
+                            }
+                            .buttonStyle(.borderless)
+                            .help("复制完整计划哈希")
+                            .accessibilityLabel("复制完整计划哈希")
+                            .accessibilityValue(sha)
+                        }
+                    }
+                }
+                if let path = planPath, !path.isEmpty {
+                    ListRule()
+                    Text(path)
+                        .font(.kpLabel)
+                        .foregroundStyle(Color.kpSecondary)
+                        .lineLimit(1).truncationMode(.middle)
+                        .textSelection(.enabled).help(path)
+                    HStack(spacing: Spacing.s) {
+                        Button("打开计划文件") { Workspace.open(path) }
+                        Button("在 Finder 显示") { Workspace.reveal(path) }
+                        Button("复制路径") { Workspace.copy(path) }
+                    }
+                    .controlSize(.small)
+                }
+            }
+            .font(.kpLabel)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(Spacing.l)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(width: 360)
+        .frame(maxHeight: 360)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private func infoRow(_ title: String, _ value: String?) -> some View {
+        if let value, !value.isEmpty {
+            GridRow(alignment: .firstTextBaseline) {
+                Text(title).foregroundStyle(Color.kpSecondary).fixedSize()
+                Text(value).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             }
         }
     }
@@ -589,330 +581,477 @@ struct TaskReviewTabView: View {
     let detail: TaskDetail
     var onOpenTask: ((String) -> Void)? = nil
     var onOpenSession: (() -> Void)? = nil
-
-    private var hasReview: Bool {
-        detail.parentCloseout != nil || detail.reviewRepair != nil || detail.reviewRisk != nil
-            || detail.reviewReportPath != nil || detail.fixTaskId != nil
-            || detail.reviewKey != nil || detail.reviewConclusion != nil
-            || detail.reviewSummary?.conclusion != nil
-            || detail.reviewSummary?.reportPath != nil
-            || detail.reviewSummary?.fixTaskId != nil
-            || detail.reviewSummary?.reviewKey != nil
-    }
+    var onOpenOverview: (() -> Void)? = nil
 
     private var conclusion: String? {
         detail.reviewConclusion ?? detail.reviewSummary?.conclusion
     }
 
     private var reportPath: String? {
-        detail.reviewReportPath ?? detail.reviewSummary?.reportPath
-            ?? detail.links?.reportFile
+        [detail.reviewReportPath, detail.reviewSummary?.reportPath, detail.links?.reportFile]
+            .compactMap { $0 }.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
-    private var fixTaskID: String? {
-        detail.fixTaskId ?? detail.reviewSummary?.fixTaskId
+    private var reviewKey: String? { detail.reviewKey ?? detail.reviewSummary?.reviewKey }
+    private var fixTaskID: String? { detail.fixTaskId ?? detail.reviewSummary?.fixTaskId }
+    private var registeredAt: String? { detail.reviewSummary?.registeredAt }
+    private var history: [ReviewHistoryEntry] { detail.reviewHistory ?? [] }
+
+    private var hasFileDetails: Bool {
+        reportPath != nil || reviewKey != nil || fixTaskID != nil || detail.reviewReportSha256 != nil
+    }
+
+    private var reviewIsBlocked: Bool {
+        detail.reviewResolution != nil || (detail.status == "needs_user" && detail.failureCode == "review_blocked")
+    }
+
+    private var blockedReason: String? {
+        guard reviewIsBlocked else { return nil }
+        if let resolution = detail.reviewResolution { return resolution.summary }
+        return detail.failureReason ?? detail.blockedReason
+    }
+
+    private var awaitingResult: Bool {
+        detail.phase == "review" && detail.condition == "reviewing"
+    }
+
+    private var hasReview: Bool {
+        detail.parentCloseout != nil || detail.reviewRepair != nil || detail.reviewRisk != nil
+            || conclusion != nil || hasFileDetails || registeredAt != nil || !history.isEmpty
+            || reviewIsBlocked || awaitingResult
+    }
+
+    private var hasRelatedTasks: Bool {
+        guard let relations = detail.taskRelations else { return false }
+        return relations.parent != nil || !relations.children.isEmpty
     }
 
     var body: some View {
-        Group {
-            if hasReview {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: Spacing.xl) {
-                        if let relations = detail.taskRelations {
-                            TaskRelationsView(relations: relations, onOpenTask: onOpenTask)
+        GeometryReader { area in
+            ScrollView {
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    if hasReview {
+                        currentReview
+                        supplementaryDetails
+                    } else {
+                        ContentUnavailableView {
+                            Label("暂无评审数据", systemImage: "doc.text.magnifyingglass")
+                        } description: {
+                            Text("该任务还没有登记评审结论或报告。")
                         }
-                        if let closeout = detail.parentCloseout {
-                            ParentCloseoutSection(closeout: closeout, onOpenTask: onOpenTask)
-                        } else if let repair = detail.reviewRepair {
-                            ReviewRepairSection(taskID: detail.taskId, repair: repair,
-                                                readOnly: detail.readOnly == true, onOpenSession: onOpenSession)
-                        } else if let risk = detail.reviewRisk {
-                            TaskDetailTabSection(title: "已接受遗留风险") {
-                                VStack(alignment: .leading, spacing: Spacing.s) {
-                                    Text("用户已确认接受本轮评审的 \(risk.findingsCount) 项遗留风险，继续交付不再等待评审通过。")
-                                        .font(.kpBody)
-                                    if !risk.note.isEmpty {
-                                        Text(risk.note).font(.kpSmall)
-                                            .foregroundStyle(Color.kpSecondary)
-                                    }
-                                    if let at = risk.authorizedAt {
-                                        Text("接受于 \(TimeFormat.fullString(at))").font(.kpSmall)
-                                            .foregroundStyle(Color.kpSecondary)
-                                    }
-                                }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    if hasRelatedTasks, let relations = detail.taskRelations {
+                        DisclosureGroup {
+                            VStack(alignment: .leading, spacing: Spacing.s) {
+                                TaskRelationsView(relations: relations, onOpenTask: onOpenTask, inTaskInfo: true)
                             }
-                        }
-                        TaskDetailTabSection(title: detail.parentCloseout == nil ? "评审状态" : "当前收尾状态") {
-                            HStack(spacing: Spacing.m) {
-                                if detail.status != "done", let release = detail.release, release.showsTaskStatus {
-                                    StatusBadge(text: release.title, style: ReleasePresentation.style(release))
-                                } else {
-                                    StatusBadge(task: detail)
-                                }
-                                if detail.parentCloseout == nil, let at = detail.reviewSummary?.registeredAt {
-                                    Text("登记于 \(TimeFormat.fullString(at))")
-                                        .font(.kpSmall)
-                                        .foregroundStyle(Color.kpSecondary)
-                                }
-                            }
-                        }
-                        TaskDetailTabSection(title: detail.parentCloseout == nil ? "评审结论" : "历史评审") {
-                            if detail.parentCloseout != nil {
-                                Text("以下为收尾前的评审记录，当前结果以上方收尾校验为准。")
+                        } label: {
+                            HStack(spacing: Spacing.s) {
+                                Text("关联任务")
+                                Text(TaskRelationsView.levelText(relations))
                                     .font(.kpSmall).foregroundStyle(Color.kpSecondary)
                             }
-                            FieldRow("结论", Labels.reviewConclusion(conclusion))
-                            FieldRow("报告", reportPath.map {
-                                ($0 as NSString).lastPathComponent
-                            })
-                            if let fixTaskID { FieldRow("历史修复任务", fixTaskID) }
-                            FieldRow("评审标识",
-                                     detail.reviewKey ?? detail.reviewSummary?.reviewKey)
-                            FieldRow("报告哈希", detail.reviewReportSha256.map {
-                                String($0.prefix(12))
-                            })
-                            HStack(spacing: Spacing.m) {
-                                Button("打开报告") { Workspace.open(reportPath) }
-                                    .disabled(reportPath == nil)
-                                    .help(reportPath == nil ? "无评审报告" : "")
+                        }
+                        .disclosureGroupStyle(DetailDisclosureStyle(systemImage: "point.3.connected.trianglepath.dotted",
+                            itemCount: relations.children.count + (relations.parent == nil ? 0 : 1)))
+                    }
+                }
+                .padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.l)
+                .frame(maxWidth: .infinity, minHeight: area.size.height, alignment: .topLeading)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .background(Color.kpControl)
+    }
+
+    @ViewBuilder private var currentReview: some View {
+        if let closeout = detail.parentCloseout {
+            ParentCloseoutSection(closeout: closeout, onOpenTask: onOpenTask)
+        } else if let repair = detail.reviewRepair {
+            ReviewRepairSection(taskID: detail.taskId, repair: repair,
+                                readOnly: detail.readOnly == true, onOpenSession: onOpenSession)
+        } else {
+            GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    HStack(spacing: Spacing.m) {
+                        Image(systemName: resultStyle.icon)
+                            .font(.kpTitle).foregroundStyle(resultStyle.color)
+                            .frame(width: RowHeight.interactive, height: RowHeight.interactive)
+                            .background(resultStyle.color.opacity(0.10), in: RoundedRectangle(cornerRadius: Radius.group))
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: Spacing.xs) {
+                            Text(resultStyle.label).font(.kpTitle).accessibilityAddTraits(.isHeader)
+                            if let risk = detail.reviewRisk {
+                                if let at = risk.authorizedAt { timestamp("接受于", at) }
+                            } else if let registeredAt {
+                                timestamp("登记于", registeredAt)
                             }
                         }
                     }
-                    .padding(.horizontal, Spacing.xl)
-                    .padding(.vertical, Spacing.l)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if let risk = detail.reviewRisk {
+                        Text("已接受 \(risk.findingsCount) 项遗留风险，继续交付。").font(.kpBody)
+                        if !risk.note.isEmpty { Text(risk.note).font(.kpBody).textSelection(.enabled) }
+                    } else {
+                        if let blockedReason, !blockedReason.isEmpty {
+                            Text(blockedReason).font(.kpBody).textSelection(.enabled)
+                        } else if conclusion == "changes_requested", detail.phase == "review",
+                                  let progress = detail.lastProgress, !progress.isEmpty {
+                            VStack(alignment: .leading, spacing: Spacing.xs) {
+                                Text("最近进展").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                                Text(progress).font(.kpBody).lineLimit(2).help(progress).textSelection(.enabled)
+                            }
+                        }
+                        if detail.reviewResolution != nil, detail.readOnly != true,
+                           detail.allowedActions?.contains("resolve_review_blocker") == true,
+                           let onOpenOverview {
+                            Button("在概览中处理", action: onOpenOverview).controlSize(.small)
+                        }
+                    }
                 }
-                .scrollBounceBehavior(.basedOnSize)
-            } else {
-                // §4.1：没有对应数据时显示清晰空态文案，不显示空白表。
-                // 空态只在导航以下的内容区居中（不改变浮层尺寸）。
-                ContentUnavailableView {
-                    Label("暂无评审数据", systemImage: "eye")
-                } description: {
-                    Text("该任务还没有登记评审结论或报告。")
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(Spacing.l)
+                if let reportPath {
+                    ListRule()
+                    reportRow(reportPath)
+                        .padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.kpControl)
+    }
+
+    private var resultStyle: StatusStyle {
+        if detail.reviewRisk != nil {
+            return StatusStyle(icon: "flag", tone: .orange, label: "已接受遗留风险")
+        }
+        if reviewIsBlocked {
+            return StatusStyle(icon: "exclamationmark.circle", tone: .orange, label: "评审受阻")
+        }
+        switch conclusion {
+        case "pass": return StatusStyle(icon: "checkmark.circle", tone: .green, label: "评审通过")
+        case "changes_requested": return StatusStyle(icon: "pencil.circle", tone: .orange, label: "评审要求修改")
+        case "blocked": return StatusStyle(icon: "exclamationmark.circle", tone: .orange, label: "评审受阻")
+        case let value?: return StatusStyle(icon: "text.bubble", tone: .gray, label: Labels.reviewConclusion(value))
+        case nil:
+            return StatusStyle(icon: "clock", tone: .gray, label: awaitingResult ? "等待评审结果" : "本轮尚无评审结论")
+        }
+    }
+
+    private func timestamp(_ label: String, _ at: String) -> some View {
+        Text("\(label) \(TimeFormat.fullString(at))").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+    }
+
+    private func reportRow(_ path: String) -> some View {
+        HStack(spacing: Spacing.m) {
+            Image(systemName: "doc.text").foregroundStyle(Color.kpSecondary).accessibilityHidden(true)
+            Text((path as NSString).lastPathComponent)
+                .font(.kpBody).lineLimit(1).truncationMode(.middle)
+                .help(path).textSelection(.enabled)
+            Spacer(minLength: 0)
+            Button("打开报告") { Workspace.open(path) }
+                .controlSize(.small).fixedSize().help(path)
+        }
+    }
+
+    @ViewBuilder private var supplementaryDetails: some View {
+        let closeout = detail.parentCloseout != nil
+        let showingDisposition = closeout || detail.reviewRepair != nil || detail.reviewRisk != nil
+        let showRecordedConclusion = showingDisposition || (reviewIsBlocked && conclusion != "blocked")
+        let findings = detail.reviewRisk?.findings ?? []
+        if hasFileDetails || !findings.isEmpty || (showRecordedConclusion && conclusion != nil)
+            || (showingDisposition && registeredAt != nil) {
+            DisclosureGroup(closeout ? "收尾前的评审" : "评审资料") {
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    if showRecordedConclusion, let conclusion { FieldRow("登记结论", Labels.reviewConclusion(conclusion)) }
+                    if showingDisposition, let registeredAt {
+                        FieldRow("登记时间", TimeFormat.fullString(registeredAt))
+                    }
+                    if let path = reportPath {
+                        if closeout || (detail.reviewRepair != nil && path != detail.reviewRepair?.reportPath) {
+                            reportRow(path)
+                        }
+                        FieldRow("报告路径", path)
+                    }
+                    if let relations = detail.taskRelations, !hasRelatedTasks {
+                        FieldRow("任务层级", TaskRelationsView.levelText(relations))
+                    }
+                    if let fixTaskID { FieldRow("修复任务 ID", fixTaskID) }
+                    if let reviewKey { FieldRow("评审标识", reviewKey) }
+                    if let hash = detail.reviewReportSha256 { FieldRow("报告哈希", hash) }
+                    ForEach(Array(findings.enumerated()), id: \.offset) { _, finding in
+                        FieldRow("已接受风险", finding)
+                    }
+                }
+            }
+            .disclosureGroupStyle(DetailDisclosureStyle(systemImage: "doc.text.magnifyingglass"))
+        }
+        if !history.isEmpty {
+            DisclosureGroup("历次评审") {
+                VStack(alignment: .leading, spacing: Spacing.m) {
+                    ForEach(history.indices.reversed(), id: \.self) { index in
+                        let entry = history[index]
+                        if index != history.indices.last { ListRule() }
+                        HStack(spacing: Spacing.m) {
+                            Text(entry.conclusion.map { Labels.reviewConclusion($0) } ?? "未登记结论")
+                                .font(.kpBody.weight(.semibold))
+                            if let at = entry.registeredAt { timestamp("登记于", at) }
+                        }
+                        if let path = entry.reportPath, !path.isEmpty { reportRow(path) }
+                        if let run = entry.executionRunId { FieldRow("执行轮次", run) }
+                        if let sha = entry.headSha { FieldRow("提交", sha) }
+                        if entry.reportPath == nil, let key = entry.reviewKey { FieldRow("评审标识", key) }
+                    }
+                }
+            }
+            .disclosureGroupStyle(DetailDisclosureStyle(systemImage: "clock.arrow.circlepath", itemCount: history.count))
+        }
     }
 }
 
 // MARK: - 记录页（ui-spec §4.1 T4：尝试记录 + 事件时间线）
 
-/// 「记录」分段：运行端快照 + 尝试和事件两个并列区段 + 单个外层滚动。
-/// 数据源 `get-task.attempts` 与 `list-events(task_id, limit:200)`，
-/// 因此本页只称「最近记录」。
+/// get-task 返回登记顺序的尝试，list-events 返回最近 200 条事件，最新的在前。
 struct TaskLogTabView: View {
     let detail: TaskDetail
     let events: [EventItem]
+    let readError: String?
+    let loading: Bool
+    let onRetry: () -> Void
+    @State private var showsRunInfo = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Spacing.xl) {
-                Text("最近记录")
-                    .font(.kpTitle)
-                stageBackendSection
-                AttemptSection(attempts: detail.attempts ?? [])
-                EventTimelineSection(events: events)
-            }
-            .padding(.horizontal, Spacing.xl)
-            .padding(.vertical, Spacing.l)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.kpControl)
-    }
-
-    @ViewBuilder
-    private var stageBackendSection: some View {
+        let attempts = detail.attempts ?? []
         let rows = stageRows
-        if !rows.isEmpty {
-            TaskDetailTabSection(title: "运行端与身份") {
-                ForEach(rows, id: \.label) { row in
-                    FieldRow(row.label, row.value)
+        VStack(spacing: 0) {
+            HStack(spacing: Spacing.m) {
+                Text("最近记录").font(.kpSection).accessibilityAddTraits(.isHeader)
+                Spacer()
+                if !rows.isEmpty {
+                    Button { showsRunInfo.toggle() } label: {
+                        Label(showsRunInfo ? "收起运行资料" : "运行资料", systemImage: "info.circle")
+                    }
+                    .controlSize(.small)
+                    .accessibilityValue(showsRunInfo ? "已展开" : "已折叠")
+                }
+            }
+            .padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.m)
+            ListRule()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Spacing.l) {
+                        if showsRunInfo && !rows.isEmpty {
+                            GroupPanel {
+                                VStack(alignment: .leading, spacing: Spacing.s) {
+                                    ForEach(rows, id: \.label) { row in FieldRow(row.label, row.value) }
+                                }
+                                .padding(Spacing.m)
+                            }
+                            .id("log-run-info")
+                        }
+                        if let readError {
+                            HStack(alignment: .top, spacing: Spacing.s) {
+                                Image(systemName: "exclamationmark.triangle").foregroundStyle(Color.kpOrange)
+                                VStack(alignment: .leading, spacing: Spacing.xs) {
+                                    Text(events.isEmpty ? "记录读取失败" : "记录刷新失败，显示上次读取的事件")
+                                        .font(.kpBody.weight(.semibold))
+                                    Text(readError).font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                                        .textSelection(.enabled)
+                                }
+                                Spacer()
+                                Button("重试", action: onRetry).controlSize(.small).disabled(loading)
+                            }
+                        }
+                        if !attempts.isEmpty {
+                            AttemptSection(attempts: attempts, initiallyExpanded: events.isEmpty)
+                        }
+                        if !events.isEmpty {
+                            EventTimelineSection(events: events)
+                        } else if readError == nil {
+                            if !attempts.isEmpty || showsRunInfo {
+                                Text(attempts.isEmpty ? "暂无任务记录" : "暂无事件记录")
+                                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.l)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .onChange(of: showsRunInfo) {
+                    if showsRunInfo { proxy.scrollTo("log-run-info", anchor: .top) }
+                }
+                .overlay {
+                    if attempts.isEmpty && events.isEmpty && readError == nil && !showsRunInfo {
+                        ContentUnavailableView("暂无任务记录", systemImage: "clock.arrow.circlepath",
+                            description: Text("任务产生的尝试和事件会显示在这里。"))
+                    }
                 }
             }
         }
+        .background(Color.kpControl)
     }
 
-    /// 任务执行轮次快照 + 当前活动请求（核心未返回的行不显示）。
     private var stageRows: [(label: String, value: String)] {
         var rows: [(String, String)] = []
         if let round = detail.executionRound {
-            rows.append(("任务执行运行端", RoleBackend.label(round.backend)))
-            if let config = round.config?.summaryText {
-                rows.append(("轮次配置", config))
-            }
-            if let session = round.sessionId {
-                rows.append(("会话 ID", session))
-            }
-            if let turn = round.turnId {
-                rows.append(("轮次 ID", turn))
-            }
-            if let send = round.sendState {
-                rows.append(("发送状态", Labels.sendState(send)))
-            }
-            if let status = round.runStatus {
-                rows.append(("轮次状态", status))
-            }
+            if let backend = round.backend { rows.append(("执行运行端", RoleBackend.label(backend))) }
+            if let config = round.config?.summaryText { rows.append(("轮次配置", config)) }
+            if let session = round.sessionId { rows.append(("会话 ID", session)) }
+            if let turn = round.turnId { rows.append(("轮次 ID", turn)) }
+            if let send = round.sendState { rows.append(("发送状态", Labels.sendState(send))) }
+            if let status = round.runStatus { rows.append(("轮次状态", ExecutionSessionDigest.statusLabel(status))) }
         }
         if let request = detail.activeRequest {
-            let kind = Labels.kind(request.kind)
-            let status = Labels.requestStatus(request.status)
-            rows.append(("当前请求", "\(kind) · \(status)"))
+            let title = [request.kind.map(Labels.kind), request.status.map(Labels.requestStatus)]
+                .compactMap { $0 }.joined(separator: " · ")
+            if !title.isEmpty { rows.append(("当前请求", title)) }
         }
         return rows
     }
 }
 
-/// 区段标题（13pt semibold，与 18pt 的详情标题区分层级）。
-private struct LogSectionHeader: View {
-    let title: String
-    var note: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.kpBody.weight(.semibold))
-            if let note {
-                Text(note)
-                    .font(.kpSmall)
-                    .foregroundStyle(Color.kpSecondary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+private func logOutcomeStyle(_ value: String?) -> StatusStyle {
+    switch value {
+    case "succeeded": return StatusStyle(icon: "checkmark.circle", tone: .green, label: "成功")
+    case "failed": return StatusStyle(icon: "xmark.circle", tone: .red, label: "失败")
+    case "needs_user": return StatusStyle(icon: "exclamationmark.triangle", tone: .orange, label: "需人工")
+    case "cancelled": return StatusStyle(icon: "slash.circle", tone: .gray, label: "已取消")
+    case "claimed": return StatusStyle(icon: "clock", tone: .blue, label: "已领取")
+    case nil: return StatusStyle(icon: "circle.fill", tone: .gray, label: "")
+    case let other?: return StatusStyle(icon: "questionmark.circle", tone: .gray, label: other)
     }
 }
 
-/// 「尝试记录」：结果图标、完整说明、阶段与结果，以及右侧时间。
 struct AttemptSection: View {
     let attempts: [Attempt]
+    var initiallyExpanded = false
+    @State private var userExpanded: Bool?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.s) {
-            LogSectionHeader(title: "尝试记录",
-                             note: "按发生顺序排列，最近的在最下方。")
-            if attempts.isEmpty {
-                Text("暂无尝试记录")
-                    .font(.kpSmall)
-                    .foregroundStyle(Color.kpSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, Spacing.s)
-            } else {
-                GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
-                    ForEach(Array(attempts.enumerated()), id: \.element.id) { index, attempt in
-                        if index > 0 { Divider().overlay(Color.kpSeparator).opacity(0.5) }
-                        AttemptRow(attempt: attempt)
+        if let latest = attempts.last {
+            let expanded = Binding(get: { userExpanded ?? initiallyExpanded }, set: { userExpanded = $0 })
+            DisclosureGroup(isExpanded: expanded) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(attempts.indices.reversed(), id: \.self) { index in
+                        if index != attempts.indices.last { ListRule() }
+                        AttemptRow(attempt: attempts[index])
+                    }
+                }
+            } label: {
+                HStack(spacing: Spacing.m) {
+                    Text("尝试记录")
+                    if let outcome = latest.outcome {
+                        let style = logOutcomeStyle(outcome)
+                        Label("最近一次\(style.label)", systemImage: style.icon)
+                            .font(.kpLabel).foregroundStyle(style.color)
                     }
                 }
             }
+            .disclosureGroupStyle(DetailDisclosureStyle(systemImage: "arrow.clockwise",
+                                                       itemCount: attempts.count))
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// 时间列保持对齐，类型、阶段和结果留给正文换行。
+private struct LogEntryLabel: View {
+    let at: String?
+    let title: String
+    let kind: String?
+    let stage: String?
+    let outcome: String?
+    var isExpanded: Bool? = nil
+
+    private var metadata: String {
+        var parts: [String] = []
+        for value in [kind, stage, outcome.map(Labels.outcome)].compactMap({ $0 }) {
+            if !value.isEmpty && value != title && !parts.contains(value) { parts.append(value) }
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    var body: some View {
+        let style = logOutcomeStyle(outcome)
+        HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+            Text(TimeFormat.short(at))
+                .font(.kpLabel.monospacedDigit()).foregroundStyle(Color.kpSecondary)
+                .frame(width: 68, alignment: .leading)
+                .help(TimeFormat.fullString(at))
+            Image(systemName: style.icon)
+                .font(outcome == nil ? .system(size: Spacing.s) : .kpBody).foregroundStyle(style.color)
+                .frame(width: Spacing.l).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                Text(title).font(.kpBody.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                if !metadata.isEmpty {
+                    Text(metadata).font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let isExpanded {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary).accessibilityHidden(true)
+            }
+        }
+        .padding(.vertical, Spacing.s)
+        .frame(minHeight: RowHeight.interactive, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 
 private struct AttemptRow: View {
     let attempt: Attempt
 
-    private var outcome: StatusStyle {
-        switch attempt.outcome {
-        case "succeeded":
-            return StatusStyle(icon: "checkmark.circle", tone: .green, label: "成功")
-        case "failed":
-            return StatusStyle(icon: "xmark.circle", tone: .red, label: "失败")
-        case "needs_user":
-            return StatusStyle(icon: "exclamationmark.triangle", tone: .orange, label: "需人工")
-        case "cancelled":
-            return StatusStyle(icon: "slash.circle", tone: .gray, label: "已取消")
-        case "claimed":
-            return StatusStyle(icon: "clock", tone: .blue, label: "已领取")
-        default:
-            return StatusStyle(icon: "questionmark.circle", tone: .gray,
-                               label: Labels.outcome(attempt.outcome))
-        }
-    }
-
     var body: some View {
-        HStack(alignment: .top, spacing: Spacing.m) {
-            Image(systemName: outcome.icon)
-                .font(.kpBody)
-                .foregroundStyle(outcome.color)
-                .frame(width: 32, height: 32)
-                .background(outcome.color.opacity(0.06), in: RoundedRectangle(cornerRadius: Radius.control))
-                .overlay {
-                    RoundedRectangle(cornerRadius: Radius.control)
-                        .strokeBorder(Color.kpSeparator.opacity(0.5), lineWidth: 1)
-                }
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: Spacing.xs) {
-                Text(attempt.note.flatMap { $0.isEmpty ? nil : $0 } ?? "—")
-                    .font(.kpBody)
-                    .fontWeight(.medium)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text([attempt.stage.map { Labels.stage($0) }, Labels.kind(attempt.kind), outcome.label]
-                    .compactMap { $0 }.joined(separator: " · "))
-                    .font(.kpLabel)
-                    .foregroundStyle(Color.kpSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let sendState = attempt.sendState, attempt.sendState != "sent" {
-                    Label("发送状态：\(Labels.sendState(sendState))", systemImage: "paperplane")
-                        .font(.kpSmall)
-                        .foregroundStyle(Color.kpSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Text(TimeFormat.ago(attempt.startedAt) ?? TimeFormat.short(attempt.startedAt))
-                .font(.kpSmall)
-                .foregroundStyle(Color.kpSecondary)
-                .monospacedDigit()
-                .frame(width: 88, alignment: .trailing)
-                .fixedSize(horizontal: false, vertical: true)
+        let kind = attempt.kind.map(Labels.kind)
+        let stage = attempt.stage.map(Labels.stage)
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            LogEntryLabel(at: attempt.startedAt,
+                          title: attempt.note.flatMap { $0.isEmpty ? nil : $0 } ?? kind ?? stage ?? "执行尝试",
+                          kind: kind, stage: stage, outcome: attempt.outcome)
                 .textSelection(.enabled)
-                .help(TimeFormat.fullString(attempt.startedAt))
+            if let send = attempt.sendState, send != "sent" {
+                Label("发送状态：\(Labels.sendState(send))", systemImage: "paperplane")
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+            }
+            if let evidence = attempt.evidence, !evidence.isNull {
+                DisclosureGroup("查看尝试证据") {
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        LogRawDetail(text: evidence.pretty)
+                        Button("复制证据") { Workspace.copy(evidence.pretty) }.controlSize(.small)
+                    }
+                }
+                .font(.kpSmall)
+                .padding(.bottom, Spacing.s)
+            }
         }
-        .padding(Spacing.l)
-        .frame(minHeight: RowHeight.preferredTwoLine, alignment: .top)
-        .accessibilityElement(children: .combine)
     }
 }
 
-/// 「事件时间线」：完整摘要与次要元信息，独立按钮展开原始内容并复制。
 struct EventTimelineSection: View {
     let events: [EventItem]
     @State private var expanded: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.s) {
-            LogSectionHeader(title: "事件时间线",
-                             note: "显示最近最多 200 条；点「展开」查看完整内容并复制。")
-            if events.isEmpty {
-                Text("暂无事件记录")
-                    .font(.kpSmall)
-                    .foregroundStyle(Color.kpSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, Spacing.s)
-            } else {
-                GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
+            HStack {
+                Text("事件时间线").font(.kpSection).accessibilityAddTraits(.isHeader)
+                Spacer()
+                Text("最近 \(events.count) 条").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    .help("最多显示最近 200 条事件，最新的在前。")
+            }
+            GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(events.enumerated()), id: \.element.listID) { index, event in
-                        if index > 0 { Divider().overlay(Color.kpSeparator).opacity(0.5) }
-                        EventRow(event: event,
-                                 isExpanded: expanded.contains(event.listID)) {
-                            toggle(event.listID)
+                        if index > 0 { ListRule() }
+                        EventRow(event: event, isExpanded: expanded.contains(event.listID)) {
+                            if !expanded.insert(event.listID).inserted { expanded.remove(event.listID) }
                         }
                     }
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func toggle(_ id: String) {
-        if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
     }
 }
 
@@ -921,137 +1060,59 @@ private struct EventRow: View {
     let isExpanded: Bool
     let onToggle: () -> Void
 
-    /// §4.1：未知 kind 保留原值（Labels 的 default 分支已回落到原值）。
-    private var kindLabel: String { Labels.eventKind(event.kind) }
-
     private var summary: String {
-        if let summary = event.summary, !summary.isEmpty { return summary }
-        if let text = event.detail?.text, !text.isEmpty { return text }
-        return "—"
-    }
-
-    private var detailText: String {
-        guard let detail = event.detail, !detail.isNull else { return "无详细内容" }
-        switch detail {
-        case .string, .number, .bool, .null:
-            return detail.text
-        default:
-            return detail.pretty
-        }
-    }
-
-    private var resultColor: Color {
-        switch event.result {
-        case "succeeded": return .kpGreen
-        case "failed": return .kpRed
-        case "needs_user": return .kpOrange
-        case "cancelled": return .kpGray
-        default: return .kpBlue
-        }
-    }
-
-    private var resultIcon: String {
-        switch event.result {
-        case "succeeded": return "checkmark.circle"
-        case "failed": return "xmark.circle"
-        case "needs_user": return "exclamationmark.triangle"
-        case "cancelled": return "minus.circle"
-        default: return "clock.arrow.circlepath"
-        }
+        if let value = event.summary, !value.isEmpty { return value }
+        if let raw = event.detail, !raw.isNull, !raw.text.isEmpty { return raw.text }
+        return event.kind.map(Labels.eventKind) ?? "任务事件"
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.m) {
-            HStack(alignment: .top, spacing: Spacing.m) {
-                Image(systemName: resultIcon)
-                    .font(.kpBody)
-                    .foregroundStyle(resultColor)
-                    .frame(width: 32, height: 32)
-                    .background(resultColor.opacity(0.06), in: RoundedRectangle(cornerRadius: Radius.control))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: Radius.control)
-                            .strokeBorder(Color.kpSeparator.opacity(0.5), lineWidth: 1)
-                    }
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: Spacing.xs) {
-                    Text(summary)
-                        .font(.kpBody)
-                        .fontWeight(.medium)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text([kindLabel, event.stage.map { Labels.stage($0) },
-                          event.result.map { Labels.outcome($0) }]
-                        .compactMap { $0 }.joined(separator: " · "))
-                        .font(.kpLabel)
-                        .foregroundStyle(Color.kpSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .help(event.kind ?? "")
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Text(TimeFormat.ago(event.at) ?? TimeFormat.short(event.at))
-                    .font(.kpSmall)
-                    .foregroundStyle(Color.kpSecondary)
-                    .monospacedDigit()
-                    .frame(width: 88, alignment: .trailing)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .help(TimeFormat.fullString(event.at))
-                // 独立按钮保留原展开行为，不与正文选择手势混用。
-                Button(action: onToggle) {
-                    HStack(spacing: Spacing.xs) {
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        Text(isExpanded ? "收起" : "展开")
-                    }
-                    .font(.kpSmall)
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(Color.kpSecondary)
-                .fixedSize()
-                .help(isExpanded ? "收起完整内容" : "展开完整记录")
-                .accessibilityLabel(isExpanded ? "收起完整内容" : "展开完整内容")
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: onToggle) {
+                LogEntryLabel(at: event.at, title: summary, kind: event.kind.map(Labels.eventKind),
+                              stage: event.stage.map(Labels.stage), outcome: event.result, isExpanded: isExpanded)
+                    .padding(.horizontal, Spacing.l)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityValue(isExpanded ? "已展开" : "已折叠")
             if isExpanded {
                 VStack(alignment: .leading, spacing: Spacing.s) {
-                    Text("摘要")
-                        .font(.kpSmall)
-                        .foregroundStyle(Color.kpSecondary)
-                    Text(summary)
-                        .font(.kpBody)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text("原始详情")
-                        .font(.kpSmall)
-                        .foregroundStyle(Color.kpSecondary)
-                    Text(detailText)
-                        .font(.kpLabel.monospaced())
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    FlowRow(spacing: Spacing.m, lineSpacing: Spacing.s) {
-                        Button("复制原始详情") { Workspace.copy(detailText) }
-                        Button("复制摘要") { Workspace.copy(summary) }
-                        if let taskId = event.taskId {
-                            Button("复制任务 ID") { Workspace.copy(taskId) }
+                    FlowRow(spacing: Spacing.l, lineSpacing: Spacing.xs) {
+                        if let at = event.at {
+                            Label(TimeFormat.fullString(at), systemImage: "clock")
+                                .accessibilityLabel("发生时间 \(TimeFormat.fullString(at))")
+                        }
+                        if let actor = event.actor, !actor.isEmpty {
+                            Label(actor, systemImage: "person").accessibilityLabel("操作来源 \(actor)")
                         }
                     }
-                    .font(.kpSmall)
-                    .controlSize(.small)
-                    if let actor = event.actor, !actor.isEmpty {
-                        Text("操作来源 \(actor)")
-                            .font(.kpSmall)
-                            .foregroundStyle(Color.kpSecondary)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary).textSelection(.enabled)
+                    if let raw = event.detail, !raw.isNull { LogRawDetail(text: raw.pretty) }
+                    FlowRow(spacing: Spacing.s, lineSpacing: Spacing.s) {
+                        if let raw = event.detail, !raw.isNull {
+                            Button("复制原始详情") { Workspace.copy(raw.pretty) }
+                        }
+                        Button("复制摘要") { Workspace.copy(summary) }
+                        if let taskID = event.taskId { Button("复制任务 ID") { Workspace.copy(taskID) } }
                     }
+                    .controlSize(.small)
                 }
-                .padding(Spacing.l)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.kpControl, in: RoundedRectangle(cornerRadius: Radius.group))
+                .padding(Spacing.m)
+                .background(Color.kpSecondary.opacity(0.06))
             }
         }
-        .padding(Spacing.l)
-        .frame(minHeight: RowHeight.preferredTwoLine, alignment: .top)
+    }
+}
+
+private struct LogRawDetail: View {
+    let text: String
+
+    var body: some View {
+        Text(text).font(.kpLabel.monospaced()).textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1128,13 +1189,13 @@ struct FlowRow: Layout {
     }
 }
 
-/// 任务信息分组里的交付与自动处理字段行；按钮、通知与折叠记录留在 `TaskAutomationSections`。
+/// 任务资料中的交付与自动处理字段。
 struct TaskAutomationFieldRows: View {
     let detail: TaskDetail
 
     var body: some View {
         if let delivery = detail.delivery {
-            FieldRow("交付状态", delivery.mode == "manual" ? "人工交付" : deliveryState(delivery.prState))
+            FieldRow("交付状态", delivery.mode == "manual" ? "人工交付" : delivery.pullRequestStatus.label)
         } else {
             FieldRow("交付状态", "未开启")
         }
@@ -1152,76 +1213,89 @@ struct TaskAutomationFieldRows: View {
         }
     }
 
-    private func deliveryState(_ state: String?) -> String {
-        switch state?.lowercased() {
-        case "open": return "PR 已创建"
-        case "merged": return "已合并"
-        case "closed": return "PR 已关闭"
-        case nil: return "尚未创建 PR"
-        default: return state ?? "—"
-        }
-    }
 }
 
-// 自动处理与交付放在既有概览页，保持五段导航不变。
+// 概览保留交付操作和发布摘要。
 struct TaskAutomationSections: View {
     let detail: TaskDetail
+    let onOpenRelease: () -> Void
     var onOpenSession: (() -> Void)? = nil
     var onRefreshDetail: (() -> Void)? = nil
     var body: some View {
         if let delivery = detail.delivery {
-            Group {
-                if let notice = delivery.autoMergeNotice {
-                    Label {
-                        Text(notice.reason)
-                            .foregroundStyle(notice.needsAttention ? Color.primary : Color.kpSecondary)
-                    } icon: {
-                        Image(systemName: notice.needsAttention ? "exclamationmark.triangle" : "arrow.triangle.merge")
-                            .foregroundStyle(notice.needsAttention ? Color.kpOrange : Color.kpSecondary)
-                    }
-                    .font(.kpSmall)
-                    .fixedSize(horizontal: false, vertical: true)
+            if let notice = delivery.currentPullRequestNotice {
+                Label {
+                    Text(notice.reason)
+                        .foregroundStyle(notice.needsAttention ? Color.primary : Color.kpSecondary)
+                } icon: {
+                    Image(systemName: notice.needsAttention ? "exclamationmark.triangle" : "arrow.triangle.merge")
+                        .foregroundStyle(notice.needsAttention ? Color.kpOrange : Color.kpSecondary)
                 }
-                if let action = detail.taskAiAction, !action.isBuildFailure || detail.release == nil {
-                    TaskAIActionSection(detail: detail, action: action,
-                                        onOpenSession: onOpenSession, onRefreshDetail: onRefreshDetail)
-                }
-                if let url = delivery.prUrl {
-                    Button("打开 PR，查看交付结果") { Workspace.open(url) }
-                }
-                if let release = detail.release {
-                    Divider()
-                    TaskReleaseSection(detail: detail, release: release,
-                                       onOpenSession: onOpenSession, onRefreshDetail: onRefreshDetail)
-                }
-                DisclosureGroup("分支、提交与同步记录") {
-                    FieldRow("方式", delivery.mode == "pr" ? "Pull Request" : "人工交付")
-                    FieldRow("分支", delivery.branch)
-                    FieldRow("目标分支", delivery.baseBranch)
-                    FieldRow("工作树", delivery.worktreePath)
-                    if let url = delivery.prUrl {
-                        Text(url).font(.kpSmall).textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    ForEach(delivery.commits ?? []) { commit in
-                        VStack(alignment: .leading, spacing: Spacing.s) {
-                            FieldRow("提交", commit.sha)
-                            Text("\(TimeFormat.fullString(commit.at)) · 修复 \(commit.fixRound ?? 0) · \(commit.files ?? 0) 个文件")
-                                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                        }
-                    }
-                    if delivery.commits?.isEmpty ?? true {
-                        Text("暂无交付提交").font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                    }
-                    FieldRow("Kaneo 评论", TimeFormat.fullString(delivery.kaneoCommentAt))
-                    FieldRow("最近同步", TimeFormat.fullString(delivery.lastSyncAt))
-                    FieldRow("下次同步", TimeFormat.fullString(delivery.nextSyncAt))
-                    FieldRow("合并时间", TimeFormat.fullString(delivery.mergedAt))
-                }.font(.kpSmall)
+                .font(.kpSmall)
+                .fixedSize(horizontal: false, vertical: true)
             }
-        } else if let release = detail.release {
-            TaskReleaseSection(detail: detail, release: release,
-                               onOpenSession: onOpenSession, onRefreshDetail: onRefreshDetail)
+            if let action = detail.taskAiAction, !action.isBuildFailure || detail.release == nil {
+                TaskAIActionSection(detail: detail, action: action,
+                                    onOpenSession: onOpenSession, onRefreshDetail: onRefreshDetail)
+            }
+        }
+        if let release = detail.release {
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                HStack(spacing: Spacing.s) {
+                    StatusLabel(text: release.title, style: ReleasePresentation.style(release), emphasized: true)
+                    Spacer(minLength: Spacing.s)
+                    Button("查看发布详情", action: onOpenRelease).controlSize(.small)
+                }
+                Text(release.reason).font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            }
+        }
+        if let delivery = detail.delivery {
+            let showStatus = detail.release == nil && delivery.showsPullRequest
+            let url = detail.phase == "delivery" ? delivery.pullRequestWebURL : nil
+            if showStatus || url != nil {
+                FlowRow(spacing: Spacing.s) {
+                    if showStatus { Button("查看 PR 状态", action: onOpenRelease) }
+                    if let url { Button("打开 PR，查看交付结果") { Workspace.open(url.absoluteString) } }
+                }
+                .controlSize(.small)
+            }
+        }
+    }
+}
+
+struct TaskAutomationRecords: View {
+    let detail: TaskDetail
+
+    var body: some View {
+        if let delivery = detail.delivery {
+            if detail.phase != "delivery", let url = delivery.prUrl {
+                Button("打开 PR，查看交付结果") { Workspace.open(url) }
+            }
+            DisclosureGroup("分支、提交与同步记录") {
+                FieldRow("方式", delivery.mode == "pr" ? "Pull Request" : "人工交付")
+                FieldRow("分支", delivery.branch)
+                FieldRow("目标分支", delivery.baseBranch)
+                FieldRow("工作树", delivery.worktreePath)
+                if let url = delivery.prUrl {
+                    Text(url).font(.kpSmall).textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(delivery.commits ?? []) { commit in
+                    VStack(alignment: .leading, spacing: Spacing.s) {
+                        FieldRow("提交", commit.sha)
+                        Text("\(TimeFormat.fullString(commit.at)) · 修复 \(commit.fixRound ?? 0) · \(commit.files ?? 0) 个文件")
+                            .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    }
+                }
+                if delivery.commits?.isEmpty ?? true {
+                    Text("暂无交付提交").font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                }
+                FieldRow("Kaneo 评论", TimeFormat.fullString(delivery.kaneoCommentAt))
+                FieldRow("最近同步", TimeFormat.fullString(delivery.lastSyncAt))
+                FieldRow("下次同步", TimeFormat.fullString(delivery.nextSyncAt))
+                FieldRow("合并时间", TimeFormat.fullString(delivery.mergedAt))
+            }.font(.kpSmall)
         }
         if let automation = detail.automation {
             Group {
@@ -1577,7 +1651,191 @@ struct ReleaseVerificationActionButton: View {
     }
 }
 
-private struct TaskReleaseSection: View {
+private extension TaskDeliveryView {
+    var pullRequestWebURL: URL? {
+        guard let prUrl, let url = URL(string: prUrl),
+              ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+              let host = url.host, !host.isEmpty else { return nil }
+        return url
+    }
+
+    var showsPullRequest: Bool {
+        mode == "pr" || (prNumber ?? 0) > 0 || pullRequestWebURL != nil
+            || !(prState ?? "").isEmpty || !(mergedAt ?? "").isEmpty
+    }
+
+    var pullRequestStatus: StatusStyle {
+        if hasRecordedPRMerge {
+            let title = currentPullRequestNotice?.state == "merged" ? "已合并 · 待同步" : "已合并"
+            return StatusStyle(icon: "arrow.triangle.merge", tone: .green, label: title)
+        }
+        switch prState?.uppercased() {
+        case "OPEN":
+            switch currentPullRequestNotice?.state {
+            case "blocked": return StatusStyle(icon: "exclamationmark.triangle", tone: .orange, label: "合并受阻")
+            case "unknown": return StatusStyle(icon: "questionmark.circle", tone: .orange, label: "合并结果待确认")
+            case "merging": return StatusStyle(icon: "arrow.triangle.merge", tone: .blue, label: "合并中")
+            default: return StatusStyle(icon: "arrow.triangle.branch", tone: .blue, label: "待合并")
+            }
+        case "CLOSED": return StatusStyle(icon: "xmark.circle", tone: .gray, label: "已关闭")
+        case nil, "":
+            let known = (prNumber ?? 0) > 0 || pullRequestWebURL != nil
+            return StatusStyle(icon: "circle.dashed", tone: .gray, label: known ? "状态未记录" : "尚未创建 PR")
+        default: return StatusStyle(icon: "questionmark.circle", tone: .gray, label: prState ?? "未知")
+        }
+    }
+}
+
+private struct ReleasePullRequestCard: View {
+    let taskID: String
+    let delivery: TaskDeliveryView
+
+    private var title: String {
+        if let number = delivery.prNumber, number > 0 { return "PR #\(number)" }
+        return "Pull Request"
+    }
+
+    private var branchSummary: String? {
+        let head = delivery.branch ?? ""
+        let base = delivery.baseBranch ?? ""
+        if head.isEmpty { return base.isEmpty ? nil : "目标分支 " + base }
+        return base.isEmpty ? "来源分支 " + head : head + " → " + base
+    }
+
+    var body: some View {
+        GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                HStack(spacing: Spacing.m) {
+                    if let url = delivery.pullRequestWebURL {
+                        Button { Workspace.open(url.absoluteString) } label: {
+                            Label(title, systemImage: "arrow.up.right.square")
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("打开 " + title).help("在浏览器打开 " + title)
+                    } else {
+                        Label(title, systemImage: "arrow.triangle.branch")
+                    }
+                    Spacer(minLength: Spacing.s)
+                    let status = delivery.pullRequestStatus
+                    StatusBadge(text: status.label, style: status)
+                }
+                .font(.kpBody.weight(.semibold))
+                if let branchSummary {
+                    Text(verbatim: branchSummary).font(.kpLabel)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }
+                if let notice = delivery.currentPullRequestNotice, !notice.reason.isEmpty {
+                    Label(notice.reason, systemImage: notice.needsAttention ? "exclamationmark.triangle" : "info.circle")
+                        .font(.kpLabel).foregroundStyle(notice.needsAttention ? Color.kpOrange : Color.primary)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }
+                FlowRow(spacing: Spacing.l) {
+                    if let merged = delivery.mergedAt, !merged.isEmpty {
+                        Text("合并于 " + TimeFormat.fullString(merged))
+                    }
+                    if let synced = delivery.lastSyncAt, !synced.isEmpty {
+                        Text("最近同步 " + TimeFormat.fullString(synced))
+                    }
+                }
+                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                if delivery.mode == "pr", let number = delivery.prNumber, number > 0 {
+                    Divider().padding(.vertical, Spacing.xs)
+                    let identity = PRChecksIdentity(taskID: taskID, number: number,
+                                                    url: delivery.prUrl, head: delivery.headSha)
+                    ReleasePRChecksView(identity: identity)
+                        .id(identity)
+                }
+            }
+            .padding(Spacing.l)
+        }
+    }
+}
+
+struct TaskReleaseTabView: View {
+    let detail: TaskDetail
+    var onOpenSession: (() -> Void)?
+    var onRefreshDetail: (() -> Void)?
+
+    var body: some View {
+        if detail.release == nil && detail.delivery?.showsPullRequest != true {
+            ContentUnavailableView("暂无发布记录", systemImage: "shippingbox",
+                                   description: Text("这项任务还没有登记构建或版本信息。"))
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Spacing.xl) {
+                    if let release = detail.release {
+                        ReleaseSummaryPanel(detail: detail, release: release, onOpenSession: onOpenSession,
+                                            onRefreshDetail: onRefreshDetail)
+                    }
+                    if let delivery = detail.delivery, delivery.showsPullRequest {
+                        ReleasePullRequestCard(taskID: detail.taskId, delivery: delivery)
+                    }
+                    if let release = detail.release {
+                        if !release.assets.isEmpty { assetList(release) }
+                        if release.batchId != nil || release.targetSha != nil || !release.memberTaskIds.isEmpty
+                            || !release.assets.isEmpty || release.workflowRunId != nil || release.buildNumber != nil {
+                            batchEvidence(release)
+                        }
+                    } else {
+                        Label("暂无发布记录", systemImage: "shippingbox")
+                            .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+                    }
+                }
+                .padding(.horizontal, Spacing.xl).padding(.vertical, Spacing.l)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private func assetList(_ release: TaskRelease) -> some View {
+        TaskDetailTabSection(title: "发布产物（\(release.assets.count)）") {
+            ForEach(release.assets) { asset in
+                if asset.id != release.assets.first?.id { ListRule() }
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                    Button { Workspace.open(asset.url) } label: {
+                        Label {
+                            Text(verbatim: asset.name).multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } icon: { Image(systemName: "arrow.down.circle") }
+                    }
+                    .buttonStyle(.borderless).font(.kpBody)
+                    .accessibilityLabel("下载 " + asset.name)
+                    Spacer(minLength: 0)
+                    Text(ByteCountFormatter.string(fromByteCount: asset.size, countStyle: .file))
+                        .font(.kpLabel).foregroundStyle(Color.kpSecondary).fixedSize()
+                }
+                .padding(.vertical, Spacing.xs)
+            }
+            if release.hasUnsignedAssets {
+                Text("标记 unsigned 的 iOS 安装包未签名，不能作为可直接安装版本。")
+                    .font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func batchEvidence(_ release: TaskRelease) -> some View {
+        DisclosureGroup("发布批次与证据") {
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                FieldRow("关联任务", "\(release.memberTaskIds.count) 项")
+                if let sha = release.targetSha { FieldRow("目标提交", sha) }
+                if let id = release.batchId { FieldRow("批次", id) }
+                if let number = release.buildNumber { FieldRow("构建编号", String(number)) }
+                if let run = release.workflowRunId { FieldRow("Actions 运行", String(run)) }
+                ForEach(release.assets) { asset in
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        Text(verbatim: asset.name).font(.kpLabel)
+                        Text("SHA256  " + asset.sha256).font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                    }
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }
+            }
+        }
+        .disclosureGroupStyle(DetailDisclosureStyle(systemImage: "doc.text.magnifyingglass"))
+    }
+}
+
+private struct ReleaseSummaryPanel: View {
     private struct AbandonCandidate {
         let batchID: String
         let contextSHA256: String
@@ -1599,142 +1857,13 @@ private struct TaskReleaseSection: View {
     @State private var operationID: UUID?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.s) {
-            Text("构建与发布").font(.kpBody.weight(.semibold))
-            StatusBadge(text: release.title, style: ReleasePresentation.style(release))
-            Text(release.reason).font(.kpSmall).foregroundStyle(Color.primary)
-                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-            FieldRow("渠道", release.channelLabel)
-            if release.tag != nil || release.version != nil { FieldRow("版本", release.tag ?? release.version) }
-            ForEach(Array(release.blockers.enumerated()), id: \.offset) { _, blocker in
-                Label {
-                    Text(blocker.message)
-                        .foregroundStyle(Color.primary)
-                } icon: {
-                    Image(systemName: "exclamationmark.triangle")
-                        .foregroundStyle(Color.kpOrange)
-                }
-                .font(.kpSmall).fixedSize(horizontal: false, vertical: true)
+        GroupPanel(background: .kpWindow.opacity(0.5), border: .kpSeparator.opacity(0.5)) {
+            VStack(alignment: .leading, spacing: Spacing.m) {
+                releaseSummary
+                releaseChecks
+                releaseActions
             }
-            if release.state == "unknown" {
-                Text("仅核对既有发布结果，不会重新发送构建。")
-                    .font(.kpSmall).foregroundStyle(Color.kpSecondary).fixedSize(horizontal: false, vertical: true)
-            } else if release.state == "failed", release.externalRepair == nil {
-                Text(release.canReconcile
-                     ? "不会自动重试。可使用 AI 处理构建问题，或在 Actions 中检查并重跑，再同步发布结果。"
-                     : "原失败记录已保留，合并与再次构建发布需另行确认。")
-                    .font(.kpSmall).foregroundStyle(Color.kpSecondary).fixedSize(horizontal: false, vertical: true)
-            }
-            if let repair = release.externalRepair {
-                VStack(alignment: .leading, spacing: Spacing.s) {
-                    Button("修复 PR #\(repair.prNumber)") { Workspace.open(repair.prUrl) }.buttonStyle(.borderless)
-                    FieldRow("新目标", repair.targetSha)
-                    FieldRow("原失败版本", repair.sourceTag)
-                    FieldRow("完整验证", repair.verification?.stateLabel ?? "尚未开始")
-                    if let reason = repair.verification?.reason {
-                        Text(reason).font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                    }
-                    DisclosureGroup("原失败批次（只读历史）") {
-                        FieldRow("版本", repair.sourceTag)
-                        FieldRow("批次", repair.sourceBatchId)
-                    }.font(.kpSmall)
-                }
-            } else if let verification = release.currentVerification {
-                FieldRow("验证目标", verification.targetSha)
-                FieldRow("完整验证", verification.stateLabel)
-                if let reason = verification.reason, reason != release.reason {
-                    Text(reason).font(.kpSmall).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                }
-            } else if ReleaseVerificationAction.prepare.isAvailable(for: detail) {
-                Text("合并后的源码包含原验证之外的改动，需要先完整验证。准备时会展示目标、验证命令和模型费用，确认后才开始。")
-                    .font(.kpSmall).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if release.externalRepair == nil, let action = detail.taskAiAction, action.isBuildFailure {
-                TaskAIActionSection(detail: detail, action: action,
-                                    onOpenSession: onOpenSession, onRefreshDetail: onRefreshDetail)
-            }
-            if let url = release.workflowUrl { Button("查看 Actions 构建") { Workspace.open(url) } }
-            if let url = release.releaseUrl { Button("打开版本发布页") { Workspace.open(url) } }
-            ForEach(release.assets) { asset in
-                VStack(alignment: .leading, spacing: Spacing.s) {
-                    Button { Workspace.open(asset.url) } label: {
-                        Label(asset.name, systemImage: "arrow.down.circle")
-                            .font(.kpBody).foregroundStyle(Color.accentColor)
-                            .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
-                    }.buttonStyle(.borderless)
-                    Text(ByteCountFormatter.string(fromByteCount: asset.size, countStyle: .file))
-                        .font(.kpSmall).foregroundStyle(Color.kpSecondary)
-                }
-            }
-            if release.hasUnsignedAssets {
-                Text("标记 unsigned 的 iOS 安装包未签名，不能作为可直接安装版本。")
-                    .font(.kpSmall).foregroundStyle(Color.kpSecondary).fixedSize(horizontal: false, vertical: true)
-            }
-            if !release.memberTaskIds.isEmpty || release.targetSha != nil {
-                DisclosureGroup("发布批次与证据") {
-                    FieldRow("关联任务", "\(release.memberTaskIds.count) 项")
-                    FieldRow("目标提交", release.targetSha)
-                    FieldRow("批次", release.batchId)
-                    FieldRow("构建编号", release.buildNumber.map(String.init))
-                    FieldRow("最近核验", release.checkedAt.map(TimeFormat.fullString))
-                    ForEach(release.assets) { asset in FieldRow("\(asset.name) SHA256", asset.sha256) }
-                }.font(.kpSmall)
-            }
-            if detail.readOnly != true {
-                verificationActions
-                HStack(spacing: Spacing.s) {
-                    if preparing || working { ProgressView().controlSize(.small) }
-                    if release.showsStartAction {
-                        Button(preparing ? "正在准备发布…" : release.externalRepair != nil ? "准备新批次…" : release.batchId != nil ? "继续构建发布…" : detail.status == "done" ? "补发版本…" : "构建并发布…") {
-                            let token = UUID(), taskID = detail.taskId
-                            preparationID = token
-                            preparing = true
-                            errorText = nil
-                            Task {
-                                defer { if preparationID == token { preparing = false; preparationID = nil } }
-                                do {
-                                    let prepared = try await model.prepareTaskRelease(taskID: taskID)
-                                    guard preparationID == token else { return }
-                                    candidate = prepared
-                                } catch {
-                                    guard preparationID == token else { return }
-                                    errorText = error.coreMessage
-                                }
-                            }
-                        }.disabled(locked)
-                    } else if release.canReconcile, let batchID = release.batchId {
-                        Button(release.syncLabel) {
-                            working = true
-                            errorText = nil
-                            Task {
-                                await model.syncReleaseBatch(batchID: batchID, onError: { errorText = $0 })
-                                working = false
-                                onRefreshDetail?()
-                            }
-                        }.disabled(locked)
-                    }
-                    if release.showsAbandonAction, let batchID = release.batchId, let context = release.contextSha256 {
-                        Button("放弃未发送批次…") {
-                            errorText = nil
-                            abandoning = AbandonCandidate(batchID: batchID, contextSHA256: context)
-                        }.disabled(locked)
-                    }
-                }
-            }
-            if let errorText {
-                Label {
-                    Text(errorText)
-                        .foregroundStyle(Color.primary)
-                } icon: {
-                    Image(systemName: "exclamationmark.triangle")
-                        .foregroundStyle(Color.kpOrange)
-                }
-                .font(.kpSmall).textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-            }
+            .padding(Spacing.l)
         }
         .alert("确认构建并发布？", isPresented: Binding(
             get: { candidate != nil }, set: { if !$0 { candidate = nil } }
@@ -1789,6 +1918,146 @@ private struct TaskReleaseSection: View {
         .onDisappear { clearCandidates() }
     }
 
+    private var releaseSummary: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.m) {
+                if let version = release.tag ?? release.version {
+                    Text(verbatim: version).font(.kpSection)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    Spacer(minLength: 0)
+                }
+                StatusBadge(text: release.title, style: ReleasePresentation.style(release))
+            }
+            Text(release.reason).font(.kpBody).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            FlowRow(spacing: Spacing.l) {
+                Label(release.channelLabel, systemImage: "tag")
+                if release.isHistorical == true { Label("历史任务发布", systemImage: "clock.arrow.circlepath") }
+                if let checked = release.checkedAt {
+                    Label("最近核验 " + TimeFormat.fullString(checked), systemImage: "clock")
+                }
+            }
+            .font(.kpLabel).foregroundStyle(Color.kpSecondary)
+        }
+    }
+
+    @ViewBuilder private var releaseChecks: some View {
+        ForEach(Array(release.blockers.enumerated()), id: \.offset) { _, blocker in
+            Label {
+                Text(blocker.message)
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(Color.kpOrange)
+            }
+            .font(.kpSmall).fixedSize(horizontal: false, vertical: true)
+        }
+        if release.state == "unknown" {
+            Text("仅核对既有发布结果，不会重新发送构建。")
+                .font(.kpSmall).foregroundStyle(Color.kpSecondary).fixedSize(horizontal: false, vertical: true)
+        } else if release.state == "failed", release.externalRepair == nil {
+            Text(release.canReconcile
+                 ? "不会自动重试。可使用 AI 处理构建问题，或在 Actions 中检查并重跑，再同步发布结果。"
+                 : "原失败记录已保留，合并与再次构建发布需另行确认。")
+                .font(.kpSmall).foregroundStyle(Color.kpSecondary).fixedSize(horizontal: false, vertical: true)
+        }
+        if let repair = release.externalRepair {
+            VStack(alignment: .leading, spacing: Spacing.s) {
+                Button("修复 PR #\(repair.prNumber)") { Workspace.open(repair.prUrl) }.buttonStyle(.borderless)
+                FieldRow("新目标", repair.targetSha)
+                FieldRow("原失败版本", repair.sourceTag)
+                FieldRow("完整验证", repair.verification?.stateLabel ?? "尚未开始")
+                if let reason = repair.verification?.reason {
+                    Text(reason).font(.kpSmall).foregroundStyle(Color.kpSecondary)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }
+                DisclosureGroup("原失败批次（只读历史）") {
+                    FieldRow("版本", repair.sourceTag)
+                    FieldRow("批次", repair.sourceBatchId)
+                }.font(.kpSmall)
+            }
+        } else if let verification = release.currentVerification {
+            FieldRow("验证目标", verification.targetSha)
+            FieldRow("完整验证", verification.stateLabel)
+            if let reason = verification.reason, reason != release.reason {
+                Text(reason).font(.kpSmall).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            }
+        } else if ReleaseVerificationAction.prepare.isAvailable(for: detail) {
+            Text("合并后的源码包含原验证之外的改动，需要先完整验证。准备时会展示目标、验证命令和模型费用，确认后才开始。")
+                .font(.kpSmall).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if release.externalRepair == nil, let action = detail.taskAiAction, action.isBuildFailure {
+            TaskAIActionSection(detail: detail, action: action,
+                                onOpenSession: onOpenSession, onRefreshDetail: onRefreshDetail)
+        }
+    }
+
+    @ViewBuilder private var releaseActions: some View {
+        if detail.readOnly != true {
+            verificationActions
+        }
+        FlowRow(spacing: Spacing.s) {
+            if let url = release.releaseUrl {
+                Button("打开版本发布页") { Workspace.open(url) }
+            }
+            if let url = release.workflowUrl {
+                Button("查看 Actions 构建") { Workspace.open(url) }
+            }
+            if detail.readOnly != true {
+                if preparing || working { ProgressView().controlSize(.small) }
+                if release.showsStartAction {
+                    Button(preparing ? "正在准备发布…" : release.externalRepair != nil ? "准备新批次…" : release.batchId != nil ? "继续构建发布…" : detail.status == "done" ? "补发版本…" : "构建并发布…") {
+                        let token = UUID(), taskID = detail.taskId
+                        preparationID = token
+                        preparing = true
+                        errorText = nil
+                        Task {
+                            defer { if preparationID == token { preparing = false; preparationID = nil } }
+                            do {
+                                let prepared = try await model.prepareTaskRelease(taskID: taskID)
+                                guard preparationID == token else { return }
+                                candidate = prepared
+                            } catch {
+                                guard preparationID == token else { return }
+                                errorText = error.coreMessage
+                            }
+                        }
+                    }.disabled(locked)
+                } else if release.canReconcile, let batchID = release.batchId {
+                    Button(release.syncLabel) {
+                        working = true
+                        errorText = nil
+                        Task {
+                            await model.syncReleaseBatch(batchID: batchID, onError: { errorText = $0 })
+                            working = false
+                            onRefreshDetail?()
+                        }
+                    }.disabled(locked)
+                }
+                if release.showsAbandonAction, let batchID = release.batchId, let context = release.contextSha256 {
+                    Button("放弃未发送批次…") {
+                        errorText = nil
+                        abandoning = AbandonCandidate(batchID: batchID, contextSHA256: context)
+                    }.disabled(locked)
+                }
+            }
+        }
+        .controlSize(.small)
+        if let errorText {
+            Label {
+                Text(errorText)
+                    .foregroundStyle(Color.primary)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(Color.kpOrange)
+            }
+            .font(.kpSmall).textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var locked: Bool {
         preparing || working || candidate != nil || abandoning != nil || repairCandidate != nil || model.busy
     }
@@ -1803,7 +2072,7 @@ private struct TaskReleaseSection: View {
         if release.canLinkExternalRepair == true {
             Button("关联已合并修复…") { errorText = nil; repairPR = ""; showingRepairInput = true }.disabled(locked)
         }
-        ForEach([ReleaseVerificationAction.prepare, .sync, .restart], id: \.rawValue) { action in
+        ForEach([ReleaseVerificationAction.prepare, .sync, .restart, .rebind, .reset], id: \.rawValue) { action in
             if action.isAvailable(for: detail) {
                 ReleaseVerificationActionButton(detail: detail, action: action, disabled: locked, onRefreshDetail: onRefreshDetail)
             }
@@ -1811,43 +2080,82 @@ private struct TaskReleaseSection: View {
     }
 
     private var repairInput: some View {
-        VStack(alignment: .leading, spacing: Spacing.m) {
-            Text("关联已合并修复").font(.kpBody.weight(.semibold))
-            Text("填写同仓库已合并的修复 PR 编号，先只读核对，再确认关联。")
-                .font(.kpSmall).foregroundStyle(Color.kpSecondary)
-            TextField("PR 编号", text: $repairPR).textFieldStyle(.roundedBorder)
-            if let errorText {
-                Label {
-                    Text(errorText)
-                        .foregroundStyle(Color.primary)
-                } icon: {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(Color.kpOrange)
-                }
-                .font(.kpSmall)
-                .fixedSize(horizontal: false, vertical: true)
+        RepairPRInputSheet(taskTitle: detail.title ?? detail.taskId, number: $repairPR,
+                           busy: preparing, unavailable: model.busy, error: errorText,
+                           onEdit: { errorText = nil },
+                           onCancel: { preparationID = nil; preparing = false; showingRepairInput = false },
+                           onCheck: prepareRepairPR)
+            .interactiveDismissDisabled(preparing)
+    }
+
+    private func prepareRepairPR(_ number: Int) {
+        guard !preparing, !model.busy else { return }
+        let token = UUID(), taskID = detail.taskId
+        preparationID = token
+        preparing = true
+        errorText = nil
+        Task {
+            defer { if preparationID == token { preparing = false; preparationID = nil } }
+            do {
+                let prepared = try await model.prepareExternalBuildRepair(taskID: taskID, prNumber: number)
+                guard preparationID == token, showingRepairInput else { return }
+                showingRepairInput = false
+                repairCandidate = prepared
+            } catch {
+                if preparationID == token { errorText = error.coreMessage }
             }
-            HStack {
-                if preparing { ProgressView().controlSize(.small) }
-                Spacer()
-                Button("取消") { preparationID = nil; preparing = false; showingRepairInput = false }.keyboardShortcut(.cancelAction)
-                Button("核对修复 PR") {
-                    guard let number = Int(repairPR.trimmingCharacters(in: .whitespacesAndNewlines)), number > 0 else { return }
-                    let token = UUID(), taskID = detail.taskId
-                    preparationID = token; preparing = true; errorText = nil
-                    Task {
-                        defer { if preparationID == token { preparing = false; preparationID = nil } }
-                        do {
-                            let prepared = try await model.prepareExternalBuildRepair(taskID: taskID, prNumber: number)
-                            guard preparationID == token else { return }
-                            showingRepairInput = false; repairCandidate = prepared
-                        } catch {
-                            if preparationID == token { errorText = error.coreMessage }
-                        }
+        }
+    }
+}
+
+struct RepairPRInputSheet: View {
+    let taskTitle: String
+    @Binding var number: String
+    let busy: Bool
+    let unavailable: Bool
+    let error: String?
+    let onEdit: () -> Void
+    let onCancel: () -> Void
+    let onCheck: (Int) -> Void
+
+    private var prNumber: Int? {
+        guard let value = Int(number.trimmingCharacters(in: .whitespacesAndNewlines)), value > 0 else { return nil }
+        return value
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SettingsSheetHeader(title: "关联已合并修复", icon: "link", scope: taskTitle)
+            ScrollView {
+                VStack(alignment: .leading, spacing: Spacing.s) {
+                    Text("修复 PR 编号").font(.kpSection)
+                    HStack {
+                        Text("#").foregroundStyle(.secondary).accessibilityHidden(true)
+                        TextField("例如 128", text: $number).textFieldStyle(.roundedBorder)
+                            .frame(width: 144).disabled(busy).accessibilityLabel("修复 PR 编号")
+                            .onChange(of: number) { onEdit() }
                     }
-                }.disabled(preparing || model.busy || (Int(repairPR.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) <= 0)
-                    .keyboardShortcut(.defaultAction)
+                    if !number.isEmpty && prNumber == nil {
+                        Text("请填写大于零的整数。").font(.kpLabel).foregroundStyle(Color.kpOrange)
+                    } else {
+                        Text("核对同一仓库的合并记录后，可在下一步确认关联。").font(.kpLabel).foregroundStyle(.secondary)
+                    }
+                    if let error {
+                        Label(error, systemImage: "exclamationmark.circle").font(.kpLabel)
+                            .foregroundStyle(Color.kpOrange).textSelection(.enabled)
+                    }
+                }.padding(Spacing.l).frame(maxWidth: .infinity, alignment: .leading)
             }
-        }.padding(Spacing.l).frame(width: 460)
+            Divider()
+            HStack {
+                Button("取消", action: onCancel).keyboardShortcut(.cancelAction)
+                Spacer()
+                if busy { ProgressView().controlSize(.small) }
+                Button(busy ? "正在核对…" : "核对修复 PR") {
+                    if let prNumber { onCheck(prNumber) }
+                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    .disabled(busy || unavailable || prNumber == nil)
+            }.padding(.horizontal, Spacing.l).padding(.vertical, Spacing.m)
+        }.frame(width: 480, height: 268)
     }
 }

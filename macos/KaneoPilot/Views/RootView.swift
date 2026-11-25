@@ -96,21 +96,10 @@ struct RootView: View {
         }
     }
 
-    @ViewBuilder
     private func sidebarItem(_ item: AppViewModel.Section) -> some View {
-        HStack {
-            Label(item.title, systemImage: item.icon)
-            if item == .pending && model.attentionCount > 0 {
-                Spacer(minLength: Spacing.s)
-                Text("\(model.attentionCount)")
-                    .font(.kpSmall)
-                    .padding(.horizontal, Spacing.s)
-                    .padding(.vertical, Spacing.xs)
-                    .background(Color.kpOrange.opacity(colorScheme == .dark ? 0.20 : 0.14), in: Capsule())
-            }
-        }
-        .tag(item)
-        .accessibilityLabel(item == .pending ? "\(item.title)，\(model.attentionCount) 项" : item.title)
+        Label(item.title, systemImage: item.icon)
+            .badge(item == .pending ? model.attentionCount : 0)
+            .tag(item)
     }
 
     @ViewBuilder
