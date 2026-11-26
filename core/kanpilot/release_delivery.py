@@ -287,7 +287,8 @@ def projection(conn,task):
     """SQL only; unrelated old done tasks acquire no automatic release intent."""
     from . import external_build_repair as external
     external_value=external.summary(conn,task)
-    hold=db.task_extra(task).get('build_failure_hold')
+    extra=db.task_extra_view(task)
+    hold=extra.get('build_failure_hold')
     if hold and not _build_repair_merged(task):
         old=_batch(conn,hold.get('release_batch_id'))
         if old:
@@ -296,11 +297,12 @@ def projection(conn,task):
                 reason='原失败批次已归档；构建修复只创建新 PR，合并与再次构建发布须另行确认')
             return value
     batch=_attached(conn,task)
-    ref=db.task_extra(task).get('release_ref') or {}
+    ref=extra.get('release_ref') or {}
     policy,_revision=_policy(conn,task)
+    external_ref=extra.get('external_build_repair_ref')
     required=task['status']!='done' and (policy['enabled'] or ref.get('required') is True
-        or bool(db.task_extra(task).get('external_build_repair_ref')))
-    if db.task_extra(task).get('external_build_repair_ref'):
+        or bool(external_ref))
+    if external_ref:
         try:
             linked=external.accepted(conn,task)
             _require(linked is not None,'external_repair_changed','外部修复关联回执或任务身份已变化')

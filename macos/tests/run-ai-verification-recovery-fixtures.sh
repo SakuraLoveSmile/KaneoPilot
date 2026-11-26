@@ -22,11 +22,9 @@ presentation = (root / 'macos/KaneoPilot/Views/Components.swift').read_text().sp
     let client = CoreClient()
     var alertMessage: String?
     var actionInFlight: String?
-    var selectedTaskID: String?
     var toast: String?
-    func refreshAll() async {}
-    func loadSaved() async {}
-    func loadDetail(taskID: String) async {}
+    enum ReadDomain: Hashable { case overview, tasks, requests, events, archive, trashedTasks, sessions, trashedSessions }
+    func dataDidChange(_ domains: Set<ReadDomain>) {}
     func showToast(_ text: String) { toast = text }
     static func actionLabel(_ action: String) -> String { action }
     private func perform(''' + perform + '\n    func resolve(taskID:' + resolve

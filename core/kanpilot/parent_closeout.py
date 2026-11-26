@@ -5,6 +5,8 @@ verification always remains in Plus, and unknown writes are never resent.
 """
 import os
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from . import (bridge, constants, core, db, gh_client, git_delivery, planfile, remote,
@@ -13,6 +15,16 @@ from . import parent_closeout_github as github
 
 ACCEPTANCE_NOTE = '仅确认软件交付及现有自动验证；原计划的真机、真实服务及人工体验仍未核验，不代表人工已验收。'
 _TOOL = 'closeout_parent_task'
+_projection_reads = ContextVar("parent_closeout_projection_reads", default=None)
+
+
+@contextmanager
+def projection_read_scope(conn, now):
+    token = _projection_reads.set((conn, now, {}))
+    try:
+        yield
+    finally:
+        _projection_reads.reset(token)
 
 
 class _Blocked(Exception):
@@ -36,20 +48,20 @@ def _pending(conn, task_id):
                         (_scope(task_id), _TOOL)).fetchone()
 
 
-def _task_snapshot(task):
+def _task_snapshot(task, *, read_projection=False):
     result = dict(task)
     # Observations and our own receipt are not new task intent. In particular,
     # sync-tasks may observe remote done while an unknown write is reconciled.
     for key in ('updated_at', 'kaneo_checked_at', 'kaneo_status'):
         result.pop(key, None)
-    extra = db.task_extra(task)
+    extra = dict(db.task_extra_view(task)) if read_projection else db.task_extra(task)
     extra.pop('parent_closeout', None)
     result['extra_json'] = extra
     return result
 
 
-def _local(conn, parent, *, software_ready=False):
-    extra = db.task_extra(parent)
+def _local(conn, parent, *, software_ready=False, read_projection=False):
+    extra = db.task_extra_view(parent) if read_projection else db.task_extra(parent)
     children = list(conn.execute('SELECT * FROM tasks WHERE review_source_task_id=? ORDER BY task_id',
                                  (parent['task_id'],)))
     history = extra.get('review_history') or []
@@ -101,7 +113,7 @@ def _local(conn, parent, *, software_ready=False):
                 or child['project_id'] != parent['project_id'] or child['repository'] != parent['repository']
                 or db.task_save_state(child) == 'purged' or child['task_id'] == parent['task_id']):
             block('repair_identity_mismatch', '二级修复任务缺失、已移除或不属于同一原始任务与仓库')
-        if entry.get('head_sha') != core.delivery_of(parent).get('head_sha'):
+        if entry.get('head_sha') != (extra.get('delivery') or {}).get('head_sha'):
             block('parent_head_changed', '原始评审不对应当前登记的功能提交')
     if set(c['task_id'] for c in children) != bound_ids:
         block('unbound_child', '存在未绑定当前原始评审周期的直接二级任务，不能漏过收尾')
@@ -138,7 +150,8 @@ def _local(conn, parent, *, software_ready=False):
                            (task_id,task['run_id'])).fetchone()
         if row is not None:
             rounds.append({k:row[k] for k in row.keys() if k != 'updated_at'})
-    snapshot = dict(tasks=[_task_snapshot(involved[k]) for k in sorted(involved)],
+    snapshot = dict(tasks=[_task_snapshot(involved[k], read_projection=read_projection)
+                           for k in sorted(involved)],
                     requests=requests, rounds=rounds)
     context = util.sha256_text(util.jdump(snapshot))
     complete = sum(child['status'] == 'done' for child in children)
@@ -152,7 +165,10 @@ def candidate(conn, task):
         return False
     if _pending(conn, task['task_id']) is not None:
         return True
-    extra = db.task_extra(task)
+    return _current_cycle_candidate(task, db.task_extra(task))
+
+
+def _current_cycle_candidate(task, extra):
     saved = extra.get('parent_closeout') or {}
     original = saved.get('original_evidence') or {}
     if (task['status'] == 'done' and saved.get('state') == 'completed'
@@ -160,7 +176,7 @@ def candidate(conn, task):
             and original.get('run_id') == task['run_id']
             and original.get('plan_sha256') == task['plan_sha256']
             and original.get('requirements_sha256') == task['requirements_sha256']
-            and original.get('head_sha') == core.delivery_of(task).get('head_sha')
+            and original.get('head_sha') == (extra.get('delivery') or {}).get('head_sha')
             and any(entry.get('execution_run_id')==task['run_id']
                     and all(entry.get(key)==task[column] for key,column in
                         (('review_key','review_key'),('report_path','review_report_path'),
@@ -175,11 +191,25 @@ def candidate(conn, task):
 
 def projection(conn, task, now=None):
     """SQL-only DTO; no filesystem, network, subprocess, or persisted mutation."""
-    if not candidate(conn, task):
+    if task is None:
         return None
-    local = _local(conn, task)
-    saved = db.task_extra(task).get('parent_closeout') or {}
+    scope = _projection_reads.get()
+    if scope is None or scope[0] is not conn or (now is not None and now != scope[1]):
+        return _project(conn, task)
+    cache = scope[2]
+    key = tuple(task)
+    if key not in cache:
+        cache[key] = _project(conn, task)
+    return cache[key]
+
+
+def _project(conn, task):
     pending = _pending(conn, task['task_id'])
+    extra = db.task_extra_view(task)
+    if pending is None and not _current_cycle_candidate(task, extra):
+        return None
+    local = _local(conn, task, read_projection=True)
+    saved = extra.get('parent_closeout') or {}
     blockers = list(local['blockers'])
     if task['status'] == 'done' and saved.get('state') == 'completed':
         state, reason, blockers = 'completed', '收尾校验已通过，已同步完成', []

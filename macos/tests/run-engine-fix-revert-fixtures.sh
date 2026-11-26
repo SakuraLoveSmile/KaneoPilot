@@ -23,7 +23,9 @@ presentation = (root / 'macos/KaneoPilot/Views/Components.swift').read_text().sp
     var alertMessage: String?
     var actionInFlight: String?
     var refreshCount = 0
-    func refreshAll() async { refreshCount += 1 }
+    enum ReadDomain: Hashable { case overview, tasks, requests, events }
+    func dataDidChange(_ domains: Set<ReadDomain>) {}
+    func refreshCurrentPage() async { refreshCount += 1 }
     func showToast(_ text: String) {}
     static func actionLabel(_ action: String) -> String { action }
     func perform(_ title: String, successToast: String? = nil,

@@ -81,7 +81,7 @@ struct PlanReaderView: View {
         // 不把不可信正文当作已批准计划展示。
         .safeAreaInset(edge: .bottom) { confirmBar }
         .task { await load() }
-        .onChange(of: model.lastRefreshAt) {
+        .onChange(of: model.detailRevision) {
             Task { await load() }
         }
         .onChange(of: detail?.planSha256) { _, registered in

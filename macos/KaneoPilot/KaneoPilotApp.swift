@@ -136,7 +136,7 @@ struct KaneoPilotApp: App {
         .windowResizability(.automatic)
         .commands {
             CommandGroup(after: .sidebar) {
-                Button("刷新") { Task { await model.refreshAll() } }
+                Button("刷新") { Task { await model.refreshEverythingVisible() } }
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(model.busy)
             }

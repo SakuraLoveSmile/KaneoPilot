@@ -52,6 +52,24 @@ except urllib.error.HTTPError as error:
     print("https api.github.com", error.code)
 PY
 
+echo "== bytecode of the signed bundled core =="
+run "$PY" - "$APP/Contents/Resources/core" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+core = Path(sys.argv[1])
+for relative in ("kanpilot.py", "kanpilot/__init__.py", "kanpilot/cli.py",
+                 "kanpilot/cmd_read.py", "kanpilot/derive.py", "_vendor/yaml/__init__.py"):
+    source = core / relative
+    cache = Path(importlib.util.cache_from_source(str(source)))
+    expected = importlib.util.MAGIC_NUMBER + b"\x01\x00\x00\x00"
+    expected += importlib.util.source_hash(source.read_bytes())
+    if cache.read_bytes()[:16] != expected:
+        raise SystemExit("Invalid unchecked-hash bytecode for " + relative)
+print("verified representative core bytecode and source hashes")
+PY
+
 echo "== core doctor with the bundled interpreter =="
 # An explicit empty payload and a closed stdin: without --json the CLI waits for a payload on a piped stdin.
 # Most other checks are legitimately not ok in a clean environment (no Kaneo login, no folders), so the exit code is not judged.

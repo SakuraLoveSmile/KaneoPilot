@@ -7,6 +7,8 @@ struct RootView: View {
     @State private var settingsSegment: SettingsSegment = .roles
     @ObservedObject private var scheduler = AppRuntime.shared.scheduler
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.controlActiveState) private var windowActivity
+    @State private var windowID = UUID()
     @State private var environmentPresented = false
     @FocusState private var environmentEntryFocused: Bool
 
@@ -33,7 +35,7 @@ struct RootView: View {
             VStack(spacing: 0) {
                 if let banner = model.banner {
                     BannerView(banner: banner, stale: model.hasData) {
-                        Task { await model.refreshAll() }
+                        Task { await model.refreshEverythingVisible() }
                     }
                 }
                 sectionView
@@ -74,21 +76,16 @@ struct RootView: View {
                 .environmentObject(model)
                 .frame(minWidth: 760, idealWidth: 760, minHeight: 600)
         }
-        .task { await model.refreshAll() }
-        .task { await model.loadSaved() }
+        .onAppear { model.showPage(section, windowID: windowID) }
+        .onDisappear { model.showPage(nil, windowID: windowID) }
+        .onChange(of: windowActivity) { _, activity in
+            if activity == .key { model.showPage(section, windowID: windowID) }
+        }
         .onChange(of: model.attentionTaskToOpen) { _, id in
             if id != nil { section = .dashboard }
         }
         .task { await pollLoop() }
-        .onChange(of: section) { _, newSection in
-            // 归档/回收站/会话节按需加载（与看板周期刷新解耦）
-            switch newSection {
-            case .archive, .trash, .sessions:
-                Task { await model.loadSaved() }
-            default:
-                break
-            }
-        }
+        .onChange(of: section) { _, newSection in model.showPage(newSection, windowID: windowID) }
         .alert("操作失败", isPresented: alertPresented) {
             Button("好", role: .cancel) { model.alertMessage = nil }
         } message: {
@@ -132,7 +129,7 @@ struct RootView: View {
         while !Task.isCancelled {
             try? await Task.sleep(for: .seconds(30))
             guard !Task.isCancelled else { return }
-            await model.refreshAll()
+            await model.refreshPeriodically(windowID: windowID)
         }
     }
 
@@ -185,7 +182,7 @@ struct RootView: View {
                 .buttonStyle(.plain)
                 .help("全局已暂停：不再自动领取新任务。点击恢复自动推进")
                 .accessibilityLabel("已暂停，恢复自动推进")
-                .disabled(model.busy || !model.coreFound || model.overview == nil || model.banner != nil)
+                .disabled(model.busy || !model.coreFound || !model.pauseStatusKnown)
             }
         }
     }
@@ -223,9 +220,9 @@ struct RootView: View {
                           systemImage: model.globalPaused ? "play.fill" : "pause.fill")
                         .frame(maxWidth: .infinity)
                 }
-                .disabled(model.busy || !model.coreFound || model.overview == nil || model.banner != nil)
+                .disabled(model.busy || !model.coreFound || !model.pauseStatusKnown)
                 Button {
-                    Task { await model.refreshAll() }
+                    Task { await model.refreshEverythingVisible() }
                 } label: {
                     Label("刷新", systemImage: "arrow.clockwise")
                         .frame(maxWidth: .infinity)

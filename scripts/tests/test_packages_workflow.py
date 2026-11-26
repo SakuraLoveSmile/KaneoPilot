@@ -23,7 +23,7 @@ UPDATE_FIXTURES = (
     "run-software-update-appkit-termination-fixtures",
 )
 WIRED_FIXTURES = (
-    "run-fixtures", "run-engine-fixtures", "run-plan-answer-fixtures", "run-execution-answer-fixtures",
+    "run-fixtures", "run-engine-fixtures", "run-page-refresh-fixtures", "run-plan-answer-fixtures", "run-execution-answer-fixtures",
     "run-owner-fixtures", "run-mobile-fixtures", "run-mobile-real-core-fixtures", "run-retrospective-fixtures",
     "run-completion-display-fixtures", "run-build-ai-action-fixtures", "run-external-build-repair-fixtures",
     "run-ai-verification-recovery-fixtures", "run-planning-input-fixtures", "run-recovery-supervisor-fixtures",

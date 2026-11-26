@@ -37,7 +37,7 @@ struct ExecutionProgressView: View {
         .onDisappear { store.stop() }
         .onAppear { onDigestChange?(store.digest) }
         .onChange(of: store.digest) { _, digest in onDigestChange?(digest) }
-        .onChange(of: model.lastRefreshAt) { _, _ in
+        .onChange(of: model.detailRevision) { _, _ in
             Task { await store.refresh() }
         }
     }

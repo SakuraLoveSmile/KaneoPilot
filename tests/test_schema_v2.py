@@ -187,6 +187,26 @@ def _backup_dirs(tmp_env):
 
 
 class TestUpgradeV1ToV2:
+    def test_read_indexes_are_added_to_existing_schema_without_version_change(self, cli, tmp_env):
+        cli("overview", {})
+        indexes = {
+            "requests_task_status": ("task_id", "status"),
+            "requests_run": ("run_id",),
+            "tasks_review_source": ("review_source_task_id",),
+        }
+        version = _schema_version(tmp_env.db)
+        with sqlite3.connect(tmp_env.db) as conn:
+            for name, columns in indexes.items():
+                assert tuple(row[2] for row in conn.execute(f"PRAGMA index_info({name})")) == columns
+                conn.execute(f"DROP INDEX {name}")
+        for _attempt in range(2):
+            cli("overview", {})
+            assert _schema_version(tmp_env.db) == version
+            with sqlite3.connect(tmp_env.db) as conn:
+                for name, columns in indexes.items():
+                    assert tuple(row[2] for row in conn.execute(f"PRAGMA index_info({name})")) == columns
+        assert not _backup_dirs(tmp_env)
+
     def test_fresh_db_is_v2(self, cli, tmp_env):
         """新库直接建为 v6（含 session_reads + execution_rounds +
         planner_inputs + runtime_operations + worktree_slots），无升级备份。"""

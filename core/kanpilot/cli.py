@@ -704,6 +704,7 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         cmd_exec.cmd_record_goal_evaluation,
     ),
     # v1.6：执行端状态（App ExecutorScheduler 单飞判断与设置页显示）。
+    "desktop-status": ({}, cmd_read.cmd_desktop_status),
     "executor-status": ({"instance_id": (False, "str")}, cmd_config.cmd_executor_status),
     "executor-instance": ({"instance_id": (True, "str"), "action": (True, "str"),
                            "task_id": (False, "str"), "run_id": (False, "str"),
@@ -932,6 +933,8 @@ def run(command: str, payload: Optional[dict], db_path: Path) -> dict:
     allow_upgrade = (command == "migrate")
     ctx = Context(db_path, allow_upgrade=allow_upgrade)
     try:
+        if command in {"overview", "list-tasks", "list-events", "desktop-status"}:
+            ctx.conn.execute("PRAGMA query_only=ON")
         # Check inside each write transaction as well as before a mutating
         # command, so a task cannot be replanned/overridden during its checks.
         if command not in {"run-verification-checks", "check-execution-status"} and not command.startswith(("get-", "list-", "session-")):

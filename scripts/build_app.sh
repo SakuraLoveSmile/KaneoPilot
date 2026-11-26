@@ -103,8 +103,11 @@ LICENSE_COUNT=$(find "$LICENSE_DST" -type f | wc -l | tr -d ' ')
 [ "$LICENSE_COUNT" -gt 0 ] || { echo "ERROR: no license text reached $LICENSE_DST" >&2; exit 1; }
 echo "bundled $LICENSE_COUNT license texts into $LICENSE_DST"
 
+echo "== precompile bundled core =="
+"$RUNTIME_DST/bin/python3" -I -m compileall -q -f --invalidation-mode unchecked-hash -s "$RES" "$RES"
+
 echo "== verify bundled desktop backend and source hashes (with the bundled Python) =="
-# -I keeps the runner's environment out; -B keeps bytecode out of the bundle, which is not signed yet but must stay as copied.
+# -I keeps the runner's environment out; -B prevents the import checks from writing bytecode.
 "$RUNTIME_DST/bin/python3" -I -B - "$ROOT/core" "$RES" <<'PY'
 import hashlib
 import importlib

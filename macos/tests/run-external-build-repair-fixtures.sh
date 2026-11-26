@@ -21,11 +21,9 @@ error = source.split('extension Error {', 1)[1].split('// BEGIN EXECUTION ANSWER
     let client = CoreClient()
     var alertMessage: String?
     var actionInFlight: String?
-    var selectedTaskID: String?
     var toast: String?
-    func refreshAll() async {}
-    func loadSaved() async {}
-    func loadDetail(taskID: String) async {}
+    enum ReadDomain: Hashable { case overview, tasks, requests, events, archive, trashedTasks, sessions, trashedSessions }
+    func dataDidChange(_ domains: Set<ReadDomain>) {}
     func showToast(_ text: String) { toast = text }
     private func perform(''' + perform + '\n    func prepareTaskRelease(' + methods
     + '\n}\nextension Error {' + error)

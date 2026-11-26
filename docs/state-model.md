@@ -80,6 +80,9 @@ CREATE TABLE requests(
 CREATE UNIQUE INDEX requests_active_key ON requests(idempotency_key)
   WHERE status IN ('queued','claimed');
 CREATE INDEX requests_poll ON requests(stage, status, priority, created_at);
+CREATE INDEX requests_task_status ON requests(task_id, status);
+CREATE INDEX requests_run ON requests(run_id);
+CREATE INDEX tasks_review_source ON tasks(review_source_task_id);
 
 CREATE TABLE attempts(
   id INTEGER PRIMARY KEY AUTOINCREMENT,

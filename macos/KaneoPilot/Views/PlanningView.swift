@@ -57,6 +57,8 @@ struct PlanningView: View {
                 .disabled(reconnectingID != nil)
         }
         .frame(minWidth: 720, minHeight: 560)
+        .task(id: model.requestRevision) { await model.readRelatedRequests() }
+        .task(id: model.detailRevision) { await model.readPlanningTasks() }
         .task {
             // 读规划配置（运行端 + default_method 预选）+ 能力（planner_methods）。
             async let loadTasks: Void = fetchTodos(auto: true)
@@ -264,11 +266,11 @@ struct PlanningView: View {
                 }
                 Button {
                     Task {
-                        if scope == .queue { await model.refreshAll() }
+                        if scope == .queue { await model.readPlanningTasks(); await model.readRelatedRequests() }
                         else { await fetchTodos(auto: false) }
                     }
                 } label: { Image(systemName: "arrow.clockwise") }
-                .disabled(fetchLoading || reconnectingID != nil || model.isLoading)
+                .disabled(fetchLoading || reconnectingID != nil || (scope == .queue && (model.isLoading(.tasks) || model.isLoading(.requests))))
                 .accessibilityLabel(scope == .queue ? "刷新规划队列" : "刷新候选任务")
                 .help(scope == .queue ? "刷新规划队列" : fetchedAt.map { "上次获取于 \(TimeFormat.short($0))" } ?? "刷新候选任务")
             }

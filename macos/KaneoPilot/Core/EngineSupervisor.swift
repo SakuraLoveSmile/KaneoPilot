@@ -7,6 +7,7 @@ import Foundation
 @MainActor
 final class EngineSupervisor: ObservableObject {
     @Published private(set) var status: ExecutorStatusDTO?
+    @Published private(set) var globalPaused: Bool?
     @Published private(set) var engineStatus: EngineStatusResponse?
     @Published private(set) var attentionItems: [AttentionItem] = []
     @Published private(set) var attentionLoaded = false
@@ -21,7 +22,8 @@ final class EngineSupervisor: ObservableObject {
     private var recoveryError: String?
     private let allowsFakeRecovery: Bool
     private var loop: Task<Void, Never>?
-    private var reading = false
+    private var refreshTask: Task<Void, Never>?
+    private var pauseRevision = 0
     private var retryAt = Date.distantPast
     private var launchedAt: Date?
     private var seenAttention = Set<String>()
@@ -56,17 +58,41 @@ final class EngineSupervisor: ObservableObject {
     func runNow(_ stage: String) { checkNow() }
 
     func refresh() async {
-        guard !reading, !isSchedulingStopped else { return }
-        reading = true
-        defer { reading = false }
+        guard !isSchedulingStopped else { return }
+        if let refreshTask { await refreshTask.value; return }
+        let read = Task {
+            defer { refreshTask = nil }
+            await readStatus()
+        }
+        refreshTask = read
+        await read.value
+    }
+
+    func recordPauseReceipt(_ paused: Bool?) {
+        guard let paused else { return }
+        pauseRevision += 1
+        globalPaused = paused
+    }
+
+    private struct DesktopStatus: Decodable {
+        let engine: EngineStatusResponse
+        let attention: AttentionResponse
+        let executor: ExecutorStatusDTO
+    }
+
+    private func readStatus() async {
+        let revision = pauseRevision
         do {
-            async let engines = client.run("engine-status", timeout: 10, as: EngineStatusResponse.self)
-            async let inbox = client.run("attention-list", timeout: 10, as: AttentionResponse.self)
-            async let runtime = client.run("executor-status", timeout: 10, as: ExecutorStatusDTO.self)
-            let (e, a, r) = try await (engines, inbox, runtime)
+            let snapshot = try await client.run("desktop-status", timeout: 10, as: DesktopStatus.self)
             guard !isSchedulingStopped else { return }
+            let e = snapshot.engine
+            let a = snapshot.attention
+            let r = snapshot.executor
+            if revision == pauseRevision {
+                status = r
+                if let paused = r.paused?.global { globalPaused = paused }
+            }
             engineStatus = e
-            status = r
             attentionItems = a.items.filter { $0.attentionState == "actionable" }
             attentionLoaded = true
             publishNotifications(attentionItems)
@@ -128,7 +154,7 @@ final class EngineSupervisor: ObservableObject {
     private func ensureObserverRecovery() {
         guard !isSchedulingStopped, recoveryProcess?.isRunning != true,
               Date() >= recoveryCheckAt, let runtime = status,
-              runtime.paused?.global != true else { return }
+              globalPaused != true else { return }
         let pausedStages = Set(runtime.paused?.stages ?? [])
         guard !pausedStages.contains("dispatch"), !pausedStages.contains("monitor"),
               let location = client.location else { return }
@@ -187,7 +213,9 @@ final class EngineSupervisor: ObservableObject {
 
     func setPaused(_ paused: Bool) async {
         do {
-            _ = try await client.run("set-paused", payload: ["stage": NSNull(), "paused": paused], timeout: 10)
+            let response = try await client.run("set-paused", payload: ["stage": NSNull(), "paused": paused],
+                                                timeout: 10, as: SetPausedResponse.self)
+            recordPauseReceipt(response.paused?.global)
             await refresh()
         } catch { self.error = error.coreMessage }
     }
