@@ -29,7 +29,10 @@
 - 快照实测（改后核心，安装版库只读副本）：两张卡 `display_status` 分别为「规划中」「待规划」、`release=null`；同库 2 张 in_review 任务仍返回「等待关联修复」，合法等待未被隐藏。
 - 新增 `core/tests/test_release_delivery.py::test_release_stays_out_of_task_status_until_review_settles`：planning/needs_plan/in_review 三态下 `projection` 仍为 waiting_group、`completion_gate` 仍拦截，而 `display_projection` 与 `task_summary['release']` 为 None、`display_status` 为 规划中/待规划/评审中。
 - 定向回归：`test_release_delivery`、`test_board`、`test_review_delivery`、`test_release_verification_projection`、`test_delivery_completion_projection` 97 项通过。
-- 完整 `core/tests` 套件结果见下（跑完补记）。
+- 派生面回归：board/columns/lifecycle/delivery_status/engine 注意力/release/review/parent_closeout/followup/archive/ai_action 15 个文件 234 项通过。
+- 本机全量 `core/tests` 跑到 74% 时停止：同一提交已在云端 5 分片 × Python 3.11/3.13 跑完全量 core 与集成套件并全绿，本机全量属重复。
+- 云端 [Packages run 45751496280](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/45751496280)：17 个 job success（identity、android、macos-package、macos-fixtures a/b、codex-platforms/native-platforms、checks 1–5 × 3.11/3.13、publish），`macos-session-fulltext-probe` 按条件 skipped。首发 android 因 Maven Central 返回 429（依赖解析失败，与本次改动无关）失败，重跑失败 job 后全绿。
+- 测试版：[v0.6.1-test.468](https://github.com/SakuraLoveSmile/KaneoPilot/releases/tag/v0.6.1-test.468) 预发布、非 draft，资产 `KaneoPilot-0.6.1-test.468-android.apk`、`KaneoPilot-0.6.1-test.468-macos-arm64.dmg`、`manifest.json`、`SHA256SUMS`；构建提交 `283e5f82e12f`。
 
 ## 未验证与遗留
 
