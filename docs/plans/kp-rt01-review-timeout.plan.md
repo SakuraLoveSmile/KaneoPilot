@@ -1,7 +1,7 @@
 # kp-rt01：评审阶段单轮超时可配置
 
 - 项目 / 任务编号：personal-kaneopilot / kp-rt01
-- 状态：实现中
+- 状态：待体验
 - 创建日期（Asia/Taipei）：2026-11-26
 - 权威记录：本文件
 - 主仓库 / 当前工作目录：`/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot`（主检出，未改动）
@@ -28,6 +28,7 @@
 3. 合法范围 300–14400 秒（5 分钟–4 小时），越界 `bad_request` 中文原因；传 `null` 表示恢复「跟随执行端」。
 4. 工作树槽位租约必须覆盖最长评审：`worktree_pool._lease_seconds` 把该键纳入上限计算（+300s 余量），避免长评审期间租约过期被回收。
 5. 提示词只加边界、不改结论口径：新增一条「第三方依赖/框架/SDK 的实现细节只作背景，不逐行核对；优先按 diff 与计划形成结论」。
+6. 不 bump `SCHEMA_VERSION`：新键缺失等价于「跟随执行端上限」（`_review_timeout_seconds` 读不到就回退），既有库无需迁移；`_init_settings` 在新建库与升级路径补种该键。
 
 ## 实现与验收
 
@@ -43,20 +44,25 @@
 
 | 日期 | 代码版本 / 候选差异 | 环境与运行对象 | 命令或实际操作 | 结果 / 证据位置 |
 | --- | --- | --- | --- | --- |
-| 2026-11-26 | `main@04ef4d7` + 本分支实现 | 本机 Python 隔离测试（临时 DB 夹具） | `cd core && python3 -m pytest tests -q` | 待填 |
-| 2026-11-26 | 同上 | GitHub Actions Packages（channel=test） | `gh workflow run packages.yml --ref fix/20261126-kp-rt01-review-timeout -f channel=test -f notes=...` | 待填 |
+| 2026-11-26 | `dd2bc86` | 本机 Python 隔离测试（临时 DB 夹具） | `cd core && python3 -m pytest tests/test_review_timeout.py -q` | **7 passed**（0.55s）：取值/回退/非法值、set-config 边界与 null、overview 暴露、槽位租约 |
+| 2026-11-26 | `dd2bc86` | 本机定向回归 | `pytest tests/test_cmd_config.py tests/test_cli_review.py tests/test_plus_review.py tests/test_plus_controller.py tests/test_review_timeout.py -q` | **90 passed, 24 subtests**（169s） |
+| 2026-11-26 | `dd2bc86` | 本机全量（未跑完） | `cd core && python3 -m pytest tests -q` | 运行 50 分钟后仍在跑（该套件在 CI 分片执行），已主动停止；完整覆盖改由云端 10 个 checks 分片执行 |
+| 2026-11-26 | `dd2bc86` / `45779772339`、`45779792976` | GitHub Actions Packages（push + channel=test 首次尝试） | — | checks 10/10 分片通过；**macos-package 失败**：`AppViewModel.swift:2033 error: type 'Set<AppViewModel.ReadDomain>.ArrayLiteralElement' has no member 'settings'`。已由 `95797b1` 修为 `dataDidChange([.overview])`（设置页可见域本就是 overview） |
+| 2026-11-26 | `95797b1` / `45783592483` | GitHub Actions Packages（push） | `gh run view 45783592483` | **全绿**：identity、checks 10 分片、android、macos-fixtures ×2、macos-package（DMG 构建 + codesign/lipo 核验）、native-platforms |
+| 2026-11-26 | `95797b1` / `45785883289` | GitHub Actions Packages（channel=test） | `gh workflow run packages.yml --ref ... -f channel=test` | **success**，发布预发布 `v0.6.1-test.472`（prerelease，不进 latest）：`KaneoPilot-0.6.1-test.472-macos-arm64.dmg`、`KaneoPilot-0.6.1-test.472-android.apk`、`manifest.json`、`SHA256SUMS`；发布说明因首次 dispatch 转义成字面 `\n`，随后用 `gh release edit --notes-file` 原地修正为正常换行（内容未变） |
 
 ## 提交与集成
 
 | 提交 | 行为变化与原因 | 验证 | 合并 / 发布情况 |
 | --- | --- | --- | --- |
-| 待填 | 评审单轮超时可配 + 提示词收敛 | core 隔离测试 + 云端构建 | 待填 |
+| `dd2bc86` | 新增 `review_timeout_seconds`（核心解析/set-config/overview/槽位租约）+ 设置页「评审单轮上限」+ 提示词收敛；原因见「目标与范围」 | core 定向 90 项、云端 checks 10 分片 | 已推送任务分支；本次随 `v0.6.1-test.472` 发布 |
+| `95797b1` | 修正写入后的刷新域（`ReadDomain` 无 `settings`，首次云端构建失败） | 云端 macos-package 与全套 jobs 全绿（`45783592483`） | 同上 |
 
 ## 交付与恢复
 
 - 体验入口和操作步骤：设置 → 后台与引擎 →「评审单轮上限」，拖动步进后约 0.6 秒自动保存；未改动时该行显示跟随执行端上限（30 分钟）。
-- 尚未完成 / 尚未验证：真实长评审在 60/90 分钟预算下的完整通过（需要下一次实际评审轮次）；macOS 界面人工点击体验。
-- 用户确认（明确确认后才改为已验收）：待用户确认。
+- 尚未完成 / 尚未验证：真实长评审在 60/90 分钟预算下的完整通过（需要下一次实际评审轮次）；macOS 界面人工点击体验（未在本机启动 App）；Android 未涉及。
+- 用户确认（明确确认后才改为已验收）：待用户确认（测试版 `v0.6.1-test.472`，需在客户端开启「接收测试版」）。
 - 下一步和恢复任务时首先核对的内容：`git -C <worktree> status`、`git log --oneline -3`、本文件「执行与验证记录」最后一行。
 - 需要时的回退 / 数据保留方式：`settings.review_timeout_seconds` 置空即回到既有行为；代码回退为 revert 本任务提交，不涉及数据迁移。
 - 本任务 worktree 收尾：尚不满足清理条件（未合入 main）。
