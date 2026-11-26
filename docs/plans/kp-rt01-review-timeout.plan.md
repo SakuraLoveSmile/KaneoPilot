@@ -60,6 +60,8 @@
 
 PR：`#31`（草稿，基 `main`）。测试版：`v0.6.1-test.472`（run `45785883289`，commit `95797b1`）。
 
+本地安装（2026-11-26，用户要求「本地构建并替换原有软件」）：`VERSION_NAME=0.6.1-test.472-local BUILD_NUMBER=472 bash scripts/build_local_macos.sh --build`（脚本自带 `KANPILOT_LOCAL_BUILD=1` 与 `--allow-local-macos`，未伪造 Actions 环境），产物 `build/local-macos/macos-build/KaneoPilot.app`（arm64、adhoc 签名、101M）已 `ditto` 替换到 `/Applications/KaneoPilot.app`：版本 `0.6.1-test.472-local`/472、`codesign --verify --deep --strict` 通过、LaunchServices 已刷新；旧包备份在 `~/Library/Application Support/KaneoPilot/local-build-backup/KaneoPilot-0.6.1-test.469-local.app`。替换前用包内运行时实测：`overview.settings.review_timeout_seconds=null` → `set-config 3600` → 读回 3600 → `120` 被拒；`review_cli.md` 边界句与 Swift 串「评审单轮上限」均在包内。替换时旧实例（pid 28657）仍在运行旧代码，需用户退出后重新打开才生效（未代为关闭）。
+
 ## 交付与恢复
 
 - 体验入口和操作步骤：设置 → 后台与引擎 →「评审单轮上限」，拖动步进后约 0.6 秒自动保存；未改动时该行显示跟随执行端上限（30 分钟）。
