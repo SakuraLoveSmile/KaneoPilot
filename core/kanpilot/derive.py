@@ -837,11 +837,15 @@ def allowed_actions(conn: sqlite3.Connection, task: sqlite3.Row, now) -> list:
             if (cmd_queue.execution_retry_candidate(conn, task)
                     or cmd_queue.codex_preflight_retry_candidate(conn, task)):
                 actions.append("resume")
-            monitor_resume = (code in ("verification_environment_failure", "fix_branch_unavailable")
+            monitor_resume = (code in ("verification_environment_failure", "fix_branch_unavailable",
+                                       "remote_unavailable")
                               and task["failure_stage"] == "monitor")
             if monitor_resume:
                 actions.append("resume")
-            if core.is_automation_managed(task) and code not in ("verification_environment_failure", "fix_branch_unavailable") and (code in cmd_queue._AUTO_RESUME_TARGETS or code in ("fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped", "remote_conflict")):
+            if (core.is_automation_managed(task)
+                    and code not in ("verification_environment_failure", "fix_branch_unavailable",
+                                     "remote_unavailable")
+                    and (code in cmd_queue._AUTO_RESUME_TARGETS or code in ("fix_rounds_exhausted", "auto_budget_exceeded", "automation_stopped", "remote_conflict"))):
                 if code != "remote_conflict" or task["failure_stage"] != "dispatch":
                     actions.append("resume")
             from . import plan_answers
