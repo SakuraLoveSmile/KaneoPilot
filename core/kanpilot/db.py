@@ -188,6 +188,8 @@ DEFAULT_SETTINGS = {
     # executor_timeout_seconds）。
     "planner_inputs_root": "",
     "codex_timeout_seconds": None,
+    # kp-rt01：评审阶段单轮上限（None=回退 executor_timeout_seconds）。
+    "review_timeout_seconds": None,
 }
 
 

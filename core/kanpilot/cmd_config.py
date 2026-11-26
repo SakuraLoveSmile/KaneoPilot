@@ -31,10 +31,13 @@ _PI_DESKTOP_THINKING_LEVELS = (
 def cmd_set_config(ctx, payload: dict) -> dict:
     """Update explicit local workspace/pool configuration atomically."""
     fields = {"worktree_pool_size", "workspace_id",
-              "worktree_concurrency_limit", "worktree_retention_days"}
+              "worktree_concurrency_limit", "worktree_retention_days",
+              # kp-rt01：评审阶段单轮上限（秒；None=恢复「跟随执行端上限」）。
+              "review_timeout_seconds"}
     if not payload or set(payload) - fields:
         raise util.bad_request("set-config 至少提供 workspace_id、worktree_pool_size、"
-                               "worktree_concurrency_limit 或 worktree_retention_days")
+                               "worktree_concurrency_limit、worktree_retention_days 或 "
+                               "review_timeout_seconds")
     if "worktree_pool_size" in payload:
         value = payload["worktree_pool_size"]
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 32:
@@ -47,6 +50,11 @@ def cmd_set_config(ctx, payload: dict) -> dict:
         value = payload["worktree_retention_days"]
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 90:
             raise util.bad_request("worktree_retention_days 必须为1–90整数")
+    if "review_timeout_seconds" in payload:
+        value = payload["review_timeout_seconds"]
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                  or not 300 <= value <= 14400):
+            raise util.bad_request("review_timeout_seconds 必须为空或 300–14400 整数（秒）")
     if "workspace_id" in payload:
         value = payload["workspace_id"]
         if not isinstance(value, str) or not value.strip() or value != value.strip():

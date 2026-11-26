@@ -267,6 +267,13 @@ struct SettingsView: View {
     @State private var maxActiveGeneration = 0
     @State private var maxActiveError: String?
     @State private var backgroundSeeded = false
+    /// kp-rt01：评审单轮上限（分钟）；saved == nil 表示跟随执行端上限。
+    @State private var reviewTimeoutMinutes = 30
+    @State private var savedReviewTimeoutMinutes: Int?
+    @State private var reviewTimeoutCommitTask: Task<Void, Never>?
+    @State private var reviewTimeoutGeneration = 0
+    @State private var reviewTimeoutError: String?
+    @State private var reviewTimeoutSeeded = false
     @State private var intakeDetailOpen = false
     @State private var execChecksOpen = false
     @State private var execChecksAutoOpened = false
@@ -368,6 +375,10 @@ struct SettingsView: View {
         }
         // §4.10：切运行端**只**刷新只读能力/候选，绝不重载配置覆盖草稿。
         .onReceive(AppRuntime.shared.scheduler.$status) { applyExecutorStatus($0) }
+        .onAppear { seedReviewTimeout(model.overview?.settings?.reviewTimeoutSeconds) }
+        .onChange(of: model.overview?.settings?.reviewTimeoutSeconds) { _, seconds in
+            seedReviewTimeout(seconds)
+        }
         .onChange(of: plannerBackend) { _, backend in
             guard backend == "pi_desktop" else { return }
             Task { await model.refreshPlannerConfig() }
@@ -3141,6 +3152,23 @@ struct SettingsView: View {
                 SettingsNotice(text: error, icon: "xmark.circle.fill", tone: Color.kpRed)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            // kp-rt01：评审单轮上限。评审超时按失败转人工，重试从零重跑，
+            // 所以只放宽单轮预算；未设置时跟随执行端上限（缺省 30 分钟）。
+            LabeledContent {
+                Stepper(value: $reviewTimeoutMinutes, in: 5...240, step: 5) {
+                    Text("\(reviewTimeoutMinutes) 分钟").font(.kpBody).monospacedDigit()
+                }
+                .accessibilityLabel("评审单轮上限")
+                .accessibilityValue("\(reviewTimeoutMinutes) 分钟")
+                .disabled(!reviewTimeoutSeeded)
+                .onChange(of: reviewTimeoutMinutes) { _, value in scheduleReviewTimeoutCommit(value) }
+            } label: {
+                SettingsRowLabel(title: "评审单轮上限", detail: reviewTimeoutDetail)
+            }
+            if let error = reviewTimeoutError {
+                SettingsNotice(text: error, icon: "xmark.circle.fill", tone: Color.kpRed)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             ListRule()
             // 状态行：状态词与侧栏、菜单栏同源；说明是最近一次接收的摘要，「检查状态」在右。
             SettingsRow(headline?.text ?? "尚未读取引擎状态", detail: intakeSummaryText,
@@ -3265,6 +3293,59 @@ struct SettingsView: View {
         await refreshExecutorStatus()
         if generation == maxActiveGeneration, maxActiveTasks != savedMaxActiveTasks {
             maxActiveTasks = savedMaxActiveTasks
+        }
+    }
+
+    /// kp-rt01：评审单轮上限的说明随「是否已写独立值」变化，避免误导为已生效值。
+    private var reviewTimeoutDetail: String {
+        if savedReviewTimeoutMinutes == nil {
+            return "未设置，跟随执行端上限（缺省 30 分钟）；调整为 5–240 分钟后即时保存。"
+        }
+        return "评审阶段单轮最长运行时间（5–240 分钟）；超时按失败转人工，重试会从零重跑。"
+    }
+
+    /// kp-rt01：把服务端秒数换算成步进器分钟（5–240）；nil = 跟随执行端上限。
+    private func seedReviewTimeout(_ seconds: Int?) {
+        let minutes = seconds.map { min(240, max(5, Int((Double($0) / 60.0).rounded()))) }
+        let previous = savedReviewTimeoutMinutes
+        savedReviewTimeoutMinutes = minutes
+        if !reviewTimeoutSeeded {
+            reviewTimeoutMinutes = minutes ?? 30
+            reviewTimeoutSeeded = true
+        } else if minutes != previous, reviewTimeoutMinutes == (previous ?? 30) {
+            // 外部（CLI 或另一窗口）改了值且用户没动手：草稿跟随服务端重新落位。
+            reviewTimeoutMinutes = minutes ?? 30
+        }
+    }
+
+    /// 评审单轮上限防抖提交；草稿等于当前生效值（含「跟随执行端 = 30 分钟」）则不提交。
+    private func scheduleReviewTimeoutCommit(_ minutes: Int) {
+        reviewTimeoutCommitTask?.cancel()
+        reviewTimeoutGeneration += 1
+        guard reviewTimeoutSeeded, minutes != (savedReviewTimeoutMinutes ?? 30) else { return }
+        let generation = reviewTimeoutGeneration
+        reviewTimeoutCommitTask = Task {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled, generation == reviewTimeoutGeneration else { return }
+            await commitReviewTimeout(minutes, generation: generation)
+        }
+    }
+
+    /// 提交评审单轮上限；失败保留原文并退回已保存值（跟随执行端时退回 30 分钟）。
+    private func commitReviewTimeout(_ minutes: Int, generation: Int) async {
+        guard minutes != (savedReviewTimeoutMinutes ?? 30) else { return }
+        reviewTimeoutError = nil
+        do {
+            try await model.setReviewTimeoutSeconds(minutes * 60)
+        } catch {
+            reviewTimeoutError = error.coreMessage
+            if generation == reviewTimeoutGeneration {
+                reviewTimeoutMinutes = savedReviewTimeoutMinutes ?? 30
+            }
+            return
+        }
+        if generation == reviewTimeoutGeneration {
+            savedReviewTimeoutMinutes = minutes
         }
     }
 

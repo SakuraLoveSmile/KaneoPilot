@@ -261,6 +261,8 @@ struct OverviewCounts: Decodable {
 /// 这里以可选字段挂在 overview 上——核心若提供则显示，缺失时整段隐藏。
 struct CoreSettingsInfo: Decodable {
     let leaseSeconds: Int?
+    /// kp-rt01：评审阶段单轮上限（秒）；null/缺失 = 跟随执行端上限。
+    let reviewTimeoutSeconds: Int?
     let monitorIntervalSeconds: Int?
     let planScanIntervalHours: Int?
     let planScanAnchor: String?

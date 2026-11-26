@@ -15,6 +15,7 @@ CLI：``python -m kanpilot.executor_runner --stage <dispatch|monitor|review>``
    ``--model <provider>/<model> --thinking <level>``（本轮固化，
    脱敏快照记 ``executor_runs.review``）；
 3. 超时（settings ``executor_timeout_seconds``，缺省 1800s）→ 终止进程组；
+   review 阶段优先取 ``review_timeout_seconds``（kp-rt01；None=回退执行端上限）；
 4. 单飞由调用方保证（ExecutorScheduler 先 executor-status 查在途 pid）。
 
 退出码：0=正常结束（无请求立即结束也属正常）；1=拉起失败/超时/异常。
@@ -110,6 +111,18 @@ def _timeout_seconds(conn) -> int:
         return DEFAULT_TIMEOUT_SECONDS
 
 
+def _review_timeout_seconds(conn) -> int:
+    """评审阶段单轮上限（kp-rt01）：`review_timeout_seconds` 优先。
+
+    None/非法值回退 `executor_timeout_seconds`（再缺省 1800s）；只在
+    `run_stage` 的 review 分支使用，dispatch/monitor/delivery 不受影响。
+    """
+    value = db.get_setting(conn, "review_timeout_seconds")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return _timeout_seconds(conn)
+
+
 def _record_run(conn, stage: str, **fields) -> dict:
     """把本次运行记录合并进 settings ``executor_runs[stage]``（供
     executor-status 读：stage/pid/started_at/log/exit_code）。"""
@@ -130,7 +143,7 @@ def run_stage(stage: str, resume: bool = False) -> int:
         return 2
 
     conn = db.connect(constants.default_db_path())
-    timeout = _timeout_seconds(conn)
+    timeout = _review_timeout_seconds(conn) if stage == "review" else _timeout_seconds(conn)
     log_path = _log_path(stage)
     selected_request_id = None
     selected_review_config = None
