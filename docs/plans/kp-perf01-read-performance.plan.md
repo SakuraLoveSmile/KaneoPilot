@@ -100,11 +100,19 @@ macOS 使用项目支持的本地 `scripts/build_app.sh` 入口独立构建。Xc
 
 用户授权将此次更新合入 `main`。重新核对主仓、任务工作树、索引、未提交文件与远端后，主线为 `64aa8f215216d816083c287251d36a85c25228bf`，比正式 `v0.6.0` 多一笔 UI11 发布记录。`8b22bcb2c7f8d174c508798720d839925255f13d` 无冲突合入该记录，业务源码、测试与构建配置均与公开测试版 `2fafb49` 一致。REL16 仍在独立任务分支。本次合入分支沿用上述发布分支，目标为 `main`。
 
-组合态在本机 Python 3.11.4 上运行运行记录搜索与分页、任务列表、父任务收尾、后台状态、发布日志及 schema 回归，85 项测试与 32 个子测试通过。打包脚本静态及隔离测试在本机 Python 3.14.7 上运行，251 项通过。`git diff --check` 通过。首次调用默认 Python 时缺少真实 pytest，改用本机已安装 pytest 的 Python 3.11 完成检查。独立 reviewer 启动时模型路由返回不可用，由主 agent 核查主线差异与组合结果。PR 的 Packages 云端检查完成后执行合并。
+组合态在本机 Python 3.11.4 上运行运行记录搜索与分页、任务列表、父任务收尾、后台状态、发布日志及 schema 回归，85 项测试与 32 个子测试通过。打包脚本静态及隔离测试在本机 Python 3.14.7 上运行，251 项通过。`git diff --check` 通过。首次调用默认 Python 时缺少真实 pytest，改用本机已安装 pytest 的 Python 3.11 完成检查。独立 reviewer 启动时模型路由返回不可用，由主 agent 核查主线差异与组合结果。PR 的 Packages 云端检查及合并后的主线检查均通过，详见下方记录。
 
 收尾前确认实验产物无打开文件，将两轮已交付的 App 和原始证据迁至主仓的忽略目录，并逐项核对文件 SHA-256、权限与符号链接。第一轮 2,940 个条目、100,381,644 字节，第二轮 2,938 个条目、100,382,687 字节。
 
 - 第一轮保留路径为 `/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot/dist/kp-perf01/`。
 - 第二轮保留路径为 `/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot/dist/kp-perf01-search/`。
 
-主线合并且云端检查通过后移除本任务工作树与已合入的两条本地任务分支，远端任务分支保留。主仓其他分支、未跟踪计划、活跃工作树和用户数据维持原有归属。
+本任务工作树与两条已合入的本地任务分支均已移除，已核对 Git worktree 列表、本地分支及实际目录。远端发布分支 `fix/20261125-kp-perf01-060-test` 继续保留。
+
+
+[PR #30](https://github.com/SakuraLoveSmile/KaneoPilot/pull/30) 已于 2026-11-26 台北时间 11:11 合入 `main`，合并提交为 `eb51ed25eda059d7d95a1d54289c7b779bda1d04`。合并结果的完整文件树与 PR 头提交 `dc01936088a1d16bd347c8309f4fd96ed8f3abf8` 相等。
+
+- [PR Packages #465](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/45745761364) 成功，受测分支头为 `dc01936088a1d16bd347c8309f4fd96ed8f3abf8`。
+- [主线 Packages #466](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/45747315109) 成功，受测提交为 `eb51ed25eda059d7d95a1d54289c7b779bda1d04`。
+
+两轮各 16 个 job 成功，包含 Python 3.11/3.13 全部分片、打包脚本、Android 单测与 lint、两组 macOS 交互夹具、Mac 打包及内置 Python 冒烟、跨平台原生沙箱验证。每轮各有两个按配置跳过的 job，分别为默认关闭的可选会话全文探针和非发布事件下的 publish。
