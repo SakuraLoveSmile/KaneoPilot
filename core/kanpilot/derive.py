@@ -104,11 +104,17 @@ def _release(conn, task):
     return release_delivery.projection(conn, task)
 
 
+def _release_for_display(conn, task):
+    """评审结论之前没有发布计划，发布措辞不得代替任务自身状态。"""
+    from . import release_delivery
+    return release_delivery.display_projection(conn, task)
+
+
 def _release_display(conn, task):
     """A pending release replaces the delivery sub-phase, never execution."""
     if task["status"] != "in_review":
         return None
-    value = _release(conn, task)
+    value = _release_for_display(conn, task)
     if value and value.get("is_historical"):
         return None
     from . import core
@@ -647,7 +653,7 @@ def task_summary(conn: sqlite3.Connection, task: sqlite3.Row, now) -> dict:
         "review_risk": review_risk.projection(task),
         "task_ai_action": task_ai_action.projection(conn, task, now),
         "delivery": task_delivery_view(task),
-        "release": _release(conn, task),
+        "release": _release_for_display(conn, task),
         "review_history": extra.get("review_history") or [],
         "parent_closeout": _parent_closeout(conn, task, now),
         "task_relations": task_relations(conn, task, now),

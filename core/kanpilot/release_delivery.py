@@ -434,6 +434,27 @@ def projection(conn,task):
     return value
 
 
+def review_settled(conn,task):
+    """评审是否已经给出结论：发布问题只在此后才是这个任务的事实。
+
+    规划、待规划、执行中以及评审尚未结束的任务还没有可发布的交付，此时任何发布
+    措辞（典型是「等待关联修复」）都只是把后面才会发生的事提前说出来，会盖掉
+    「规划中」「评审中」这类真实状态。
+    """
+    from . import core, review_risk
+    extra=db.task_extra(task)
+    if extra.get('review_conclusion') in ('pass','changes_requested'):
+        return True
+    if review_risk.identity(task) is not None or core.review_repair_of(task):
+        return True
+    return bool(core.delivery_of(task).get('merged_at'))
+
+
+def display_projection(conn,task):
+    """客户端可见的发布投影；完成门继续用 projection，不受显示口径影响。"""
+    return projection(conn,task) if review_settled(conn,task) else None
+
+
 def move_out_blocked_reason(conn,task):
     """SQL-only removal guard; a blocked observation can hide a live workflow."""
     from . import release_verification

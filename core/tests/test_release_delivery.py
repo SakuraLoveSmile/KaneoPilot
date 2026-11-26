@@ -320,6 +320,26 @@ class ReleaseLifecycleTest(TestCase):
         db.update_task(self.conn,'fix1',self.ctx.now_iso,status='in_review')
         self.assertTrue(delivery.projection(self.conn,self.row())['can_start'])
 
+    def test_release_stays_out_of_task_status_until_review_settles(self):
+        """规划、待规划与评审中的任务显示自己的状态；发布意图与完成门不变。"""
+        from kanpilot import derive
+        self.fixture.add_task('standalone', commands=self.fixture.parent_commands)
+        extra=db.task_extra(self.row('standalone'))
+        for key in ('review_conclusion','review_history'):
+            extra.pop(key,None)
+        extra['delivery']=dict(extra['delivery'],mode='pr',pr_number=None,pr_url=None,merged_at=None)
+        db.update_task(self.conn,'standalone',self.ctx.now_iso,status='planning',
+                       review_key=None,review_report_path=None,review_report_sha256=None,extra_json=extra)
+        for status,label in (('planning','规划中'),('needs_plan','待规划'),('in_review','评审中')):
+            db.update_task(self.conn,'standalone',self.ctx.now_iso,status=status)
+            task=self.row('standalone')
+            # 发布意图仍在：完成门必须继续拦住没有发布证据的任务。
+            self.assertEqual(delivery.projection(self.conn,task)['state'],'waiting_group')
+            self.assertIsNotNone(delivery.completion_gate(self.conn,task))
+            self.assertIsNone(delivery.display_projection(self.conn,task),status)
+            self.assertIsNone(derive.task_summary(self.conn,task,self.ctx.now)['release'],status)
+            self.assertEqual(derive.task_display_status(self.conn,task,self.ctx.now),label,status)
+
     def test_standalone_current_pass_can_release_and_old_done_is_explicit_only(self):
         db.update_task(self.conn,'fix2',self.ctx.now_iso,review_source_task_id=None)
         self.assertEqual(delivery.after_merge(self.ctx,self.row('fix2'))['outcome'],'disabled')
