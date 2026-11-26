@@ -1,6 +1,6 @@
 # KP-PERF01 桌面读取性能实验
 
-状态为待体验。实验分支为 `fix/20261125-kp-perf01-read-performance`。基线为本机已安装的 `0.5.10-test.451` 对应的 `07c7567`。工作树为 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261125-fix-kp-perf01-read-performance`。本次交付目标是独立分支和可本地体验的 macOS 实验包。第二轮按用户指定，针对运行记录搜索无匹配时的等待；最新实验包为 `0.5.10-perf.2`。
+状态为已验收。用户确认性能优化有效，2026-11-26 授权合入 `main`。实验分支为 `fix/20261125-kp-perf01-read-performance`，发布及合入分支为 `fix/20261125-kp-perf01-060-test`。最初基线为本机已安装的 `0.5.10-test.451` 对应的 `07c7567`，公开测试版以正式 `v0.6.0` 为基线。工作树为 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261125-fix-kp-perf01-read-performance`。交付包含两轮 macOS 实验包、公开测试版与主线集成。第二轮按用户指定，针对运行记录搜索无匹配时的等待，最新实验包为 `0.5.10-perf.2`。
 
 | 步骤 | 用户效果与验收 |
 | --- | --- |
@@ -95,3 +95,16 @@ macOS 使用项目支持的本地 `scripts/build_app.sh` 入口独立构建。Xc
 只读挂载两个公开的 Mac DMG，核验签名、版本、构建号以及包内搜索和发布核心源码。用各自内置 Python 在隔离的 53,308 条事件上交替测试，中文无匹配核心查询各预热一次、取七次中位数，正式版 745.99 ms，本测试版 134.86 ms；稀疏命中与后续页结果完全相同。两张镜像已卸载。Android APK 已核对下载哈希及与正式版一致的发布证书指纹记录，实际手机覆盖安装未执行。
 
 本轮公开包复核后的临时下载、验证数据库及日志已清理，共 134,384 KiB。沿用原实验工作树，保留先前交付的本地实验包与其体验路径。
+
+## 2026-11-26 主线集成与收尾
+
+用户授权将此次更新合入 `main`。重新核对主仓、任务工作树、索引、未提交文件与远端后，主线为 `64aa8f215216d816083c287251d36a85c25228bf`，比正式 `v0.6.0` 多一笔 UI11 发布记录。`8b22bcb2c7f8d174c508798720d839925255f13d` 无冲突合入该记录，业务源码、测试与构建配置均与公开测试版 `2fafb49` 一致。REL16 仍在独立任务分支。本次合入分支沿用上述发布分支，目标为 `main`。
+
+组合态在本机 Python 3.11.4 上运行运行记录搜索与分页、任务列表、父任务收尾、后台状态、发布日志及 schema 回归，85 项测试与 32 个子测试通过。打包脚本静态及隔离测试在本机 Python 3.14.7 上运行，251 项通过。`git diff --check` 通过。首次调用默认 Python 时缺少真实 pytest，改用本机已安装 pytest 的 Python 3.11 完成检查。独立 reviewer 启动时模型路由返回不可用，由主 agent 核查主线差异与组合结果。PR 的 Packages 云端检查完成后执行合并。
+
+收尾前确认实验产物无打开文件，将两轮已交付的 App 和原始证据迁至主仓的忽略目录，并逐项核对文件 SHA-256、权限与符号链接。第一轮 2,940 个条目、100,381,644 字节，第二轮 2,938 个条目、100,382,687 字节。
+
+- 第一轮保留路径为 `/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot/dist/kp-perf01/`。
+- 第二轮保留路径为 `/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot/dist/kp-perf01-search/`。
+
+主线合并且云端检查通过后移除本任务工作树与已合入的两条本地任务分支，远端任务分支保留。主仓其他分支、未跟踪计划、活跃工作树和用户数据维持原有归属。
