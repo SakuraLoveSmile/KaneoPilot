@@ -1599,6 +1599,7 @@ _id, created_at}`，提示先核对 Plus 会话。
 - 证据读取、Git 指纹与逐阶段核对受 monitor 租约和 runner 剩余时限约束，在 SQLite 写锁外进行，期间保留心跳与前后身份复校。
 - 有效 diff 非空且 Plus 报告覆盖全部冻结命令并通过 → advance in-review、成本、report succeeded。requires_branch_review 先 delivery-commit，并核对 HEAD 提交树与冻结预期索引；manual detached 保留原未提交成果。旧本机成功回执不能绕过新 Plus 报告门。
 - 环境失败 → verification_environment_failure，提示检查 Plus 执行环境。旧环境失败 resume 将原 run/plan/worktree 排回 monitor，只重新核对已有 Plus 证据，不新增模型调用、派发、执行轮或补救计数。缺失/未知/源码变化等证据未确认进入 attention，不触发自动质量修复；真实测试失败和空转仍沿既有质量阶梯。
+- `remote_unavailable`（Kaneo 写成功、回读校验失败时按 fail-closed 置 needs_user）在 `failure_stage=monitor` 时提供「继续」：把原 run/plan/worktree 排回 monitor 重新对齐远端，已提交的交付与 `engine-verdict` 回执幂等复用，不重跑执行、不新增模型调用；远端状态已等于目标时只补本地状态并排入 Review。其他阶段不开放该操作（dispatch 阶段的远端不可达保持原状、不置 needs_user）。
 - `resolve reverify` 只读重新核对当前 Plus 证据，保留远端状态、轮次、终态、计划及证据复校。`run-verification-checks` 兼容入口拒绝本地执行，历史状态接口可读取旧审计记录。
 - 证据不足时提供独立 `retry_verification` 操作「让 Plus 重新执行并验证」：用户确认当前执行轮次，复用 execution_retry 的全部终态/Plus空闲（含 §5.27.12 的已核验手动继续放行）/远端 In Progress/需求与计划哈希/原工作树指纹守卫，沿用已确认计划及原工作树创建新执行轮次；明确会调用 Plus。身份不可确认不开放此操作，旧发送未知不重发。该操作不自动触发。
 - 不支持在已完成 Plus 会话里任意追加 turn 后直接采纳为原轮次验证；不得宣传手动补验后“同步即可通过”。需通过上条有身份守卫的新执行轮次取得新证据。

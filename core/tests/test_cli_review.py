@@ -2,6 +2,7 @@
 import json
 import subprocess
 import sys
+import time
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -510,3 +511,172 @@ def test_run_stage_keeps_text_frame_source_in_job(runner_scene, tmp_path, monkey
     job = json.loads(jobs[0].read_text())
     assert job['result_format'] == 'review_text_v1'
     assert job['result_normalizations'] == ['removed_text_frame_commentary']
+
+
+CRASH = {"is_error": True, "error": "Codex Review 失败（退出码 101）",
+         "exit_code": 101, "structured_output": None}
+SUCCESS = {"is_error": False, "exit_code": 0, "structured_output": RESULT,
+           "total_cost_usd": None}
+
+
+def _review_job(tmp_path):
+    jobs = list((tmp_path / "support" / "executor-sessions" / "review").glob("*/job.json"))
+    assert len(jobs) == 1
+    return json.loads(jobs[0].read_text())
+
+
+def test_runner_crash_retries_once_and_settles(runner_scene, tmp_path, monkeypatch):
+    """运行器崩溃（101 + 没有最终消息）不是评审结论：自动重试一次后正常结算。
+
+    真实案例：2026-11-27 MediaPlayer 任务两次 Review 都因 codex 进程 panic
+    （退出码 101）结束，`last-message.txt` 为 0 字节，任务被打成「Review 受阻」。
+    """
+    conn, task, calls = runner_scene
+    monkeypatch.setattr(review_config, "snapshot", lambda _conn: {
+        "backend": "codex", "model": "m", "reasoning_effort": "high"})
+    seen = []
+    def process(argv, **kwargs):
+        seen.append({"argv": argv, "cwd": kwargs["cwd"], "out": str(kwargs["out_path"])})
+        return CRASH if len(seen) == 1 else SUCCESS
+    monkeypatch.setattr(cli_review, "run_codex", process)
+    code = cli_review.run_stage("review", conn=conn, db_path=tmp_path / "isolated.db", timeout=3,
+                                log_path=tmp_path / "review.log", record_run=lambda **kwargs: None)
+    assert code == 0
+    assert len(seen) == 2
+    # 重试沿用同一工作根，第二次写独立输出文件，不覆盖首次证据。
+    assert seen[0]["cwd"] == seen[1]["cwd"]
+    assert seen[1]["out"].endswith("last-message-attempt2.txt")
+    assert seen[0]["out"] != seen[1]["out"]
+    job = _review_job(tmp_path)
+    assert [item["exit_code"] for item in job["runner_retries"]] == [101]
+    events = list((tmp_path / "support" / "executor-sessions" / "review").glob("*/events.jsonl"))
+    assert len(events) == 1
+    assert "自动重试" in events[0].read_text()
+    commands = [cmd for cmd, _ in calls]
+    assert "register-review" in commands
+
+
+def test_runner_crash_twice_stays_blocked_and_counts_retry(runner_scene, tmp_path, monkeypatch):
+    """两次都崩溃：仍然 review_blocked，失败原因写明已重试，证据保留两次尝试。"""
+    conn, task, calls = runner_scene
+    monkeypatch.setattr(review_config, "snapshot", lambda _conn: {
+        "backend": "codex", "model": "m", "reasoning_effort": "high"})
+    seen = []
+    def process(argv, **kwargs):
+        seen.append(str(kwargs["out_path"]))
+        return dict(CRASH)
+    monkeypatch.setattr(cli_review, "run_codex", process)
+    code = cli_review.run_stage("review", conn=conn, db_path=tmp_path / "isolated.db", timeout=3,
+                                log_path=tmp_path / "review.log", record_run=lambda **kwargs: None)
+    assert code == 1
+    assert len(seen) == 2
+    job = _review_job(tmp_path)
+    assert [item["exit_code"] for item in job["runner_retries"]] == [101, 101]
+    assert "已自动重试 1 次" in job["detail"]
+    commands = [cmd for cmd, _ in calls]
+    assert "register-review" not in commands
+    report = next(payload for cmd, payload in calls if cmd == "report")
+    assert report["outcome"] == "needs_user"
+    assert "已自动重试 1 次" in report["note"]
+
+
+def test_review_timeout_is_not_retried(runner_scene, tmp_path, monkeypatch):
+    """超时不是运行器崩溃：保持一次尝试就转人工，不自动重发模型调用。"""
+    conn, task, _calls = runner_scene
+    monkeypatch.setattr(review_config, "snapshot", lambda _conn: {
+        "backend": "codex", "model": "m", "reasoning_effort": "high"})
+    seen = []
+    def process(argv, **kwargs):
+        seen.append(str(kwargs["out_path"]))
+        return {"is_error": True, "error": "Codex Review 超时", "exit_code": None,
+                "structured_output": None}
+    monkeypatch.setattr(cli_review, "run_codex", process)
+    code = cli_review.run_stage("review", conn=conn, db_path=tmp_path / "isolated.db", timeout=3,
+                                log_path=tmp_path / "review.log", record_run=lambda **kwargs: None)
+    assert code == 1
+    assert len(seen) == 1
+    job = _review_job(tmp_path)
+    assert "runner_retries" not in job
+
+
+
+def test_codex_stdout_is_a_regular_file_not_a_pipe(tmp_path):
+    """codex 会自己把 stdout 设成 O_NONBLOCK：只有普通文件的写入不会 EAGAIN。
+
+    实测（2026-11-27）：`codex exec` 启动后 fd 1 为 `flags=65541`（含
+    O_NONBLOCK），而 npm 的 node 壳留下的是阻塞写；管道缓冲被 40–65 KB 的
+    单行事件写满时 Rust 的 print! 直接 panic（退出码 101）。
+    """
+    output = tmp_path / "out.json"
+    observed = tmp_path / "mode.txt"
+    script = tmp_path / "mode.py"
+    script.write_text(
+        "import json, os, stat\n"
+        "from pathlib import Path\n"
+        f"Path({str(observed)!r}).write_text(str(bool(stat.S_ISREG(os.fstat(1).st_mode))))\n"
+        f"Path({str(output)!r}).write_text({json.dumps(RESULT)!r})\n"
+        'print(json.dumps({"type": "turn.completed"}), flush=True)\n')
+    result = cli_review.run_codex([sys.executable, str(script)], prompt="", cwd=tmp_path,
+                                  env={}, timeout=5, log_path=tmp_path / "raw.jsonl",
+                                  out_path=output)
+    assert result["is_error"] is False
+    assert observed.read_text() == "True"
+
+
+def test_codex_streams_large_single_event_without_loss(tmp_path):
+    """真实 Review 的 40–65 KB 单行事件必须完整接收，不能靠管道缓冲赌运气。"""
+    output = tmp_path / "out.json"
+    script = tmp_path / "big.py"
+    script.write_text(
+        "import json\n"
+        "from pathlib import Path\n"
+        f"Path({str(output)!r}).write_text({json.dumps(RESULT)!r})\n"
+        "print(json.dumps({'type': 'item.completed', 'item': {'type': 'command_execution',"
+        " 'aggregated_output': 'x' * 200000}}), flush=True)\n"
+        'print(json.dumps({"type": "turn.completed"}), flush=True)\n')
+    stream_log = tmp_path / "raw.jsonl"
+    result = cli_review.run_codex([sys.executable, str(script)], prompt="", cwd=tmp_path,
+                                  env={}, timeout=10, log_path=stream_log, out_path=output)
+    assert result["is_error"] is False
+    assert result["structured_output"] == RESULT
+    assert "command_execution" in stream_log.read_text()
+    assert len(stream_log.read_text()) > 200000
+
+
+def test_codex_timeout_still_terminates_with_file_transport(tmp_path):
+    """换成文件流后超时仍要立刻杀进程、保留原因，不能改成等到进程自然退出。"""
+    script = tmp_path / "slow.py"
+    script.write_text("import time\ntime.sleep(30)\n")
+    started = time.monotonic()
+    result = cli_review.run_codex([sys.executable, str(script)], prompt="", cwd=tmp_path,
+                                  env={}, timeout=1, log_path=tmp_path / "raw.jsonl",
+                                  out_path=tmp_path / "missing.json")
+    assert time.monotonic() - started < 20
+    assert result["is_error"] is True
+    assert "超时" in result["error"]
+
+
+
+def test_codex_nonblocking_stdout_child_still_completes(tmp_path):
+    """复现真实崩溃形态：子进程自己把 stdout 设成 O_NONBLOCK 后写大事件。
+
+    管道传输时这条写入会拿到 EAGAIN（codex 侧 panic、退出码 101）；换成普通
+    文件后同样的写入必然成功，评审不会因为「一次性写出 65 KB」被打断。
+    """
+    output = tmp_path / "out.json"
+    script = tmp_path / "nonblock.py"
+    script.write_text(
+        "import fcntl, json, os\n"
+        "from pathlib import Path\n"
+        "flags = fcntl.fcntl(1, fcntl.F_GETFL)\n"
+        "fcntl.fcntl(1, fcntl.F_SETFL, flags | os.O_NONBLOCK)\n"
+        f"Path({str(output)!r}).write_text({json.dumps(RESULT)!r})\n"
+        "print(json.dumps({'type': 'item.completed', 'item': {'type': 'command_execution',"
+        " 'aggregated_output': 'x' * 200000}}), flush=True)\n"
+        'print(json.dumps({"type": "turn.completed"}), flush=True)\n')
+    result = cli_review.run_codex([sys.executable, str(script)], prompt="", cwd=tmp_path,
+                                  env={}, timeout=10, log_path=tmp_path / "raw.jsonl",
+                                  out_path=output)
+    assert result["is_error"] is False
+    assert result["structured_output"] == RESULT
+

@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
-import select
 import subprocess
 import time
 from pathlib import Path
@@ -41,7 +39,15 @@ def excerpt(text, limit=240):
 
 
 def run_codex(argv, *, prompt, cwd, env, timeout, log_path, out_path, on_event=None):
-    """Stream events while renewing the lease, including silent process intervals."""
+    """Stream events while renewing the lease, including silent process intervals.
+
+    Codex 自己会把 stdout 设成 ``O_NONBLOCK``（实测：``codex exec`` 启动后
+    fd 1 为 ``flags=65541``；npm 的 node 壳本身留下的是阻塞写，与本问题无关）。
+    管道缓冲（macOS 约 16 KB）被一条大事件（真实案例：40–65 KB 的 diff/文件
+    输出）写满时，Rust 的 ``print!`` 拿到 EAGAIN 直接 panic——退出码 101，
+    且来不及写最终消息。因此这里不给 codex 管道：stdout 落到普通临时文件再
+    增量读取。普通文件忽略 ``O_NONBLOCK``，同样的写入不会失败。
+    """
     deadline = time.monotonic() + timeout
     result = {"exit_code": None, "is_error": True, "structured_output": None,
               "total_cost_usd": None, "error": None}
@@ -80,9 +86,24 @@ def run_codex(argv, *, prompt, cwd, env, timeout, log_path, out_path, on_event=N
             completed_after_failure = True
         if on_event:
             on_event(event)
+    stream_path = Path(str(log_path)).with_name(Path(log_path).stem + ".stdout")
+    def pump(reader, log, final=False):
+        """把 stdout 文件里的新增字节按行交给 consume；收尾时交出残行。"""
+        while True:
+            chunk = reader.read(65536)
+            if not chunk:
+                break
+            buffer.extend(chunk)
+        while b"\n" in buffer:
+            line, _, tail = buffer.partition(b"\n")
+            buffer[:] = tail
+            consume(line, log)
+        if final and buffer:
+            consume(bytes(buffer), log)
+            buffer.clear()
     try:
-        with Path(log_path).open("a", encoding="utf-8") as log:
-            proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        with Path(log_path).open("a", encoding="utf-8") as log, stream_path.open("wb") as stream:
+            proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=stream,
                                     stderr=subprocess.STDOUT, cwd=str(cwd), env=env,
                                     start_new_session=True, bufsize=0)
             try:
@@ -90,26 +111,20 @@ def run_codex(argv, *, prompt, cwd, env, timeout, log_path, out_path, on_event=N
                 proc.stdin.close()
             except (OSError, BrokenPipeError):
                 pass
-            while True:
-                if on_event:
-                    on_event(None)
-                if time.monotonic() >= deadline:
-                    result["error"] = "Codex Review 超时"
-                    claude_cli._terminate(proc)
-                    break
-                ready, _, _ = select.select([proc.stdout.fileno()], [], [], 0.25)
-                if not ready:
-                    continue
-                chunk = os.read(proc.stdout.fileno(), 65536)
-                if not chunk:
-                    if buffer:
-                        consume(buffer, log)
-                    break
-                buffer.extend(chunk)
-                while b"\n" in buffer:
-                    line, _, tail = buffer.partition(b"\n")
-                    buffer[:] = tail
-                    consume(line, log)
+            with stream_path.open("rb") as reader:
+                while True:
+                    if on_event:
+                        on_event(None)
+                    if time.monotonic() >= deadline:
+                        result["error"] = "Codex Review 超时"
+                        claude_cli._terminate(proc)
+                        pump(reader, log, final=True)
+                        break
+                    pump(reader, log)
+                    if proc.poll() is not None:
+                        pump(reader, log, final=True)
+                        break
+                    time.sleep(0.25)
             result["exit_code"] = proc.wait(timeout=5)
         result["recovered_error_events"] = recovered
         recovered_final = completed_after_failure and result["exit_code"] == 0
@@ -162,6 +177,43 @@ def run_codex(argv, *, prompt, cwd, env, timeout, log_path, out_path, on_event=N
                 proc.stdout.close()
             if proc.stdin and not proc.stdin.closed:
                 proc.stdin.close()
+        # 原始 stdout 不落证据：日志已按既有规则脱敏，这里只作流式传输的临时
+        # 文件，收尾即删，避免把未脱敏输出留在会话目录。
+        try:
+            stream_path.unlink()
+        except OSError:
+            pass
+
+
+# Rust 进程 panic 的退出码。真实案例：codex 把 stdout 设为 O_NONBLOCK 后，一条
+# 超过管道缓冲的 `--json` 事件写入拿到 EAGAIN（`failed printing to stdout:
+# Resource temporarily unavailable`），进程以 101 结束且不写最终消息。没有最终
+# 消息即证明这一轮没有任何评审结论，可以按运行器故障重跑，而不是把崩溃当成
+# 评审失败；管道这一层已由 run_codex 改用普通文件消除。
+RUNNER_CRASH_EXIT_CODES = (101,)
+RETRY_LIMIT = 1
+
+
+def runner_crash(result, backend):
+    """运行器自身崩溃（不是评审结论）的判定。
+
+    只认「后端是 codex + 没有结构化结果 + 崩溃退出码」：一旦有结构化结果，
+    说明模型已经给出结论，交由既有结算流程判定；超时、格式不符、模型失败、
+    租约失效都不在此列，保持原 fail-closed 行为。
+    """
+    if backend != "codex" or not isinstance(result, dict):
+        return False
+    if result.get("structured_output") is not None:
+        return False
+    return result.get("exit_code") in RUNNER_CRASH_EXIT_CODES
+
+
+def retry_argv(argv, out_path):
+    """重试只换最终消息的输出文件，模型/沙箱/schema/工作根与首次完全一致。"""
+    retried = list(argv)
+    if "-o" in retried:
+        retried[retried.index("-o") + 1] = str(out_path)
+    return retried
 
 
 def _persisted(conn):
@@ -347,32 +399,56 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
             else:
                 etype, ts, fields = mapped
                 log.emit(etype, ts, **fields)
-    result = {}
-    run_error = None
-    try:
-        if backend == "claude":
-            result = claude_cli.run(argv, prompt=instruction, cwd=snapshot, env=claude_cli.child_env(),
-                                    timeout=timeout, log_path=directory / "claude.jsonl", on_event=on_event)
-        elif backend == "qoder":
-            result = qoder_cli.run(argv, prompt=instruction, schema=review_settle.RESULT_SCHEMA,
-                                   cwd=snapshot, env=launch_env, timeout=timeout,
-                                   log_path=directory / "qoder.jsonl", on_event=on_event)
-        else:
-            result = run_codex(argv, prompt=instruction, cwd=snapshot, env=codex_planner.child_env(provider),
-                               timeout=timeout, log_path=directory / "codex.jsonl",
-                               out_path=directory / "last-message.txt", on_event=on_event)
-    except util.KanpilotError as exc:
-        run_error = exc
-    except (OSError, subprocess.SubprocessError) as exc:
-        run_error = exc
-    finally:
+    def attempt(run_argv, run_log, out_path):
+        """跑一次 CLI，返回 (result, run_error)；成本登记位置与既有流程一致。"""
+        outcome, error = {}, None
         try:
-            review.core_call(db_path, "record-cost", {"task_id": job["task_id"], "request_id": job["request_id"],
-                                                     "run_id": job["run_id"], "stage": STAGE, "source": backend,
-                                                     "cost_usd": result.get("total_cost_usd") if backend in ("claude", "qoder") else None})
+            if backend == "claude":
+                outcome = claude_cli.run(run_argv, prompt=instruction, cwd=snapshot,
+                                         env=claude_cli.child_env(), timeout=timeout,
+                                         log_path=run_log, on_event=on_event)
+            elif backend == "qoder":
+                outcome = qoder_cli.run(run_argv, prompt=instruction, schema=review_settle.RESULT_SCHEMA,
+                                        cwd=snapshot, env=launch_env, timeout=timeout,
+                                        log_path=run_log, on_event=on_event)
+            else:
+                outcome = run_codex(run_argv, prompt=instruction, cwd=snapshot,
+                                    env=codex_planner.child_env(provider), timeout=timeout,
+                                    log_path=run_log, out_path=out_path, on_event=on_event)
         except util.KanpilotError as exc:
-            if exc.code not in ("stale_run", "not_found", "conflict"):
-                raise
+            error = exc
+        except (OSError, subprocess.SubprocessError) as exc:
+            error = exc
+        finally:
+            try:
+                review.core_call(db_path, "record-cost", {"task_id": job["task_id"], "request_id": job["request_id"],
+                                                         "run_id": job["run_id"], "stage": STAGE, "source": backend,
+                                                         "cost_usd": outcome.get("total_cost_usd") if backend in ("claude", "qoder") else None})
+            except util.KanpilotError as exc:
+                if exc.code not in ("stale_run", "not_found", "conflict"):
+                    raise
+        return outcome, error
+    output_path = (directory / "last-message.txt" if backend == "codex"
+                   else directory / f"{backend}.jsonl")
+    result, run_error = attempt(argv, directory / f"{backend}.jsonl", output_path)
+    retries = []
+    # 运行器崩溃不是评审结论：同一请求/快照/材料重跑一次，第二次落到独立文件，
+    # 不覆盖首次证据；仍崩溃才转人工。超时、格式不符、租约失效不在此列。
+    while run_error is None and runner_crash(result, backend):
+        retries.append({"attempt": len(retries) + 1, "exit_code": result.get("exit_code"),
+                        "detail": result.get("error")})
+        job["runner_retries"] = list(retries)
+        if len(retries) > RETRY_LIMIT:
+            break
+        log.emit("system", util.now_iso(),
+                 content=f"Review 运行器崩溃（退出码 {result.get('exit_code')}），自动重试一次")
+        save()
+        attempt_no = len(retries) + 1
+        retry_out = directory / f"last-message-attempt{attempt_no}.txt"
+        result, run_error = attempt(retry_argv(argv, retry_out),
+                                    directory / f"codex-attempt{attempt_no}.jsonl", retry_out)
+        output_path = retry_out
+        save()
     # Normal returns and callback KanpilotError both pass the adapter finally
     # block, which terminates and waits its actual handle. A timeout/OSError
     # raised by that cleanup has no such proof and conservatively retains it.
@@ -385,14 +461,18 @@ def run_stage(stage, *, conn, db_path, timeout, log_path, record_run, resume=Fal
                                          detail=run_error.message)
         return blocked(f"CLI Review 无法运行：{run_error}")
     if result.get("is_error"):
-        return blocked(result.get("error") or f"{backend} Review 失败")
+        detail = result.get("error") or f"{backend} Review 失败"
+        retried = max(0, len(retries) - 1)
+        if retried:
+            detail = f"{detail}；已自动重试 {retried} 次"
+        return blocked(detail)
     try:
         validated = review_settle.record_stage_result(job, result.get("structured_output"),
             facts=review._facts(db_path, job["task_id"], job["request_id"]), evidence={
                 "mechanism": "cli_process", "exit_code": result.get("exit_code"),
                 "owner_stopped": job.get("owner_stopped"),
-                "output_path": str(directory / "last-message.txt") if backend == "codex"
-                               else str(directory / f"{backend}.jsonl")})
+                "output_path": str(output_path),
+                "runner_retries": list(retries)})
     except util.KanpilotError as exc:
         if exc.code == "stale_run":
             return review._stop_no_write(job=job, job_path=job_path, log=log,

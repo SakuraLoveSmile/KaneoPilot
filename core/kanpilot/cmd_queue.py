@@ -355,6 +355,10 @@ def _retry_target(conn, task) -> tuple[str, str]:
 
 
 _AUTO_RESUME_TARGETS = {
+    # Kaneo 写成功、回读失败 → remote_unavailable（fail-closed）。「继续」把原 run
+    # 排回 monitor 重新对齐远端：已提交的交付与 engine-verdict 回执幂等复用，
+    # 不重跑执行、不新增模型调用；远端已等于目标时只补本地状态。
+    "remote_unavailable": ("running", "monitor"),
     "verification_environment_failure": ("running", "monitor"),
     "fix_branch_unavailable": ("running", "monitor"),
     "delivery_blocked_files": ("running", "monitor"), "delivery_commit_failed": ("running", "monitor"),
@@ -1128,10 +1132,14 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 core.start_fix_round_inline(conn, task, now, fix_request=fix, actor="user", new_segment=True)
                 target, kind = ("ready" if fix.get("mode") == "direct" else "needs_plan"), None
             else:
-                monitor_resume = (code in ("verification_environment_failure", "fix_branch_unavailable")
+                monitor_resume_codes = ("verification_environment_failure", "fix_branch_unavailable",
+                                        "remote_unavailable")
+                monitor_resume = (code in monitor_resume_codes
                                   and task["failure_stage"] == "monitor")
                 if code in ("verification_environment_failure", "fix_branch_unavailable") and not monitor_resume:
                     raise util.KanpilotError("conflict", "当前失败阶段不允许重新验证本轮")
+                if code == "remote_unavailable" and not monitor_resume:
+                    raise util.KanpilotError("conflict", "远端不可达只在观察阶段允许继续")
                 if not core.is_automation_managed(task) and not monitor_resume:
                     raise util.KanpilotError("conflict", "该任务不受自动化管理")
                 if code == "remote_conflict" and accepted_remote:
