@@ -35,7 +35,7 @@
 - 四个执行端（plan/dispatch/monitor/review/delivery）由 **KaneoPilot App 内置 ExecutorScheduler** 拉起：定时器按错开分钟触发（plan 0/15/30/45、dispatch 4/19/34/49、monitor 8/23/38/53、review 12/27/42/57、delivery 按 `next_sync_at` 动态）。
 - 每次触发：`executor-status` 查单飞（该 stage `running` 非空则跳过）→ `python3 -m kanpilot.executor_runner --stage <stage>`（`python3` 为简写：App 内是内置解释器，见 protocol §1；core 根为 cwd；PATH 注入 `~/.npm-global/bin`）。
 - **常驻菜单栏**：关窗后继续调度，登录项可启用；退出 App 停止调度与本实例 MCP 服务，但不结束 Plus 会话。
-- executor_runner 职责：渲染 `core/executor_prompts/<stage>.md`（`{PREAMBLE}` 展开、路径占位符替换；核心命令写成 `{PYTHON} {KANPILOT} <command>`，`{PYTHON}` 是核心自己的 `sys.executable`（shell 引用），不依赖执行端 shell 的 `PATH` 里有哪个 `python3`；`sys.executable` 为空时渲染失败，不猜解释器）→ 拉起 `pi -p --mode json --session-dir <app_support>/executor-sessions/<stage>/ --no-extensions --no-context-files --no-skills` → 事件流落 `<app_support>/executor-logs/<stage>-<ts>.log` → 超时（settings `executor_timeout_seconds`，缺省 1800s）终止进程组。
+- executor_runner 职责：渲染 `core/executor_prompts/<stage>.md`（`{PREAMBLE}` 展开、路径占位符替换；核心命令写成 `{PYTHON} {KANPILOT} <command>`，`{PYTHON}` 是核心自己的 `sys.executable`（shell 引用），不依赖执行端 shell 的 `PATH` 里有哪个 `python3`；`sys.executable` 为空时渲染失败，不猜解释器）→ 拉起 `pi -p --mode json --session-dir <app_support>/executor-sessions/<stage>/ --no-extensions --no-context-files --no-skills` → 事件流落 `<app_support>/executor-logs/<stage>-<ts>.log` → 超时（settings `executor_timeout_seconds`，缺省 1800s；review 阶段优先 `review_timeout_seconds`，未设置时回退执行端上限，见 kp-rt01）终止进程组。
 - runner 自己把运行记录写 `settings.executor_runs[stage]`（`pid/started_at/log/exit_code/finished_at`）——`executor-status` 读取的唯一数据源。
 - `executor-status {}` → `{"stages": {"<stage>": {"running": <entry>|null, "last": <entry>|null}}}`；`running` = entry.pid 存活探测通过。
 
@@ -338,6 +338,8 @@ claude -p --output-format stream-json --verbose --restricted --tools Read,Grep,G
 - 复用 claude_cli 和 codex_planner 的 `launcher_argv`/`child_env`/`map_event`；Codex 使用只读沙箱，cwd 为 Review 快照。
 - 两者共用新 prompt `review_cli.md`。
 - Codex 成本记为 null（source=codex），token 数只写日志。
+- **单轮上限可配（kp-rt01，2026-11-26）**：CLI Review 与 Plus Review 共用 `settings.review_timeout_seconds`（300–14400 秒；空=回退 `executor_timeout_seconds`，缺省 1800s），由 `executor_runner._review_timeout_seconds` 单点解析，dispatch/monitor/delivery 不受影响；`set-config` 写入、`overview.settings` 只读暴露、设置页「后台与引擎」以分钟步进即时保存。超时仍是 fail-closed：进程组终止、最终 JSON 缺失即 `review_blocked`，不保存部分结论、重试从零重跑。理由：真实长评审（2026-11-26，任务 `woxb5p5ne8f0e1656fb0y9jq`）两次都在 1800s 上限被终止，30 分钟对 Flutter/媒体类 diff 的深度评审不足，且此前的超时没有任何入口可调。
+- **提示词收敛（kp-rt01）**：`review_cli.md` 明确第三方依赖/框架/SDK 的实现细节只作背景，不逐行核对、不读取其安装目录或缓存源码，避免把单轮预算耗在无界上下文探索上。
 - **瞬时错误与成功终态（2026-11-13）**：Codex 事件流先报 `error`/`turn.failed`、之后自行重连并发出 `turn.completed` 时，按最终结果处理——退出码 0 且 `last-message.txt` 是合法结构化结果即接受，`recovered_error_events` 记数量留证；成功终态之后才出现的错误、或从未出现成功终态，仍 fail-closed 判失败。理由：真实 Review 出现 `Reconnecting... waiting for network` 后仍产出完整 JSON 且退出码 0，却被丢弃成「Codex Review 失败（退出码 0）」。
 - **输出帧与兼容解析（2026-11-23，KP-REV01）**：`review_cli.md` 的 JSON 结果是契约；`review_instruction` 对 CLI 后端传 `output_format="json"`，只给 JSON 段要求，不追加 Plus 的 review_text_v1 帧。Codex `last-message.txt` 解析 JSON 失败时，用同一 `pi_desktop_review._text_result` 严格解析合法分段帧并记 `job.result_format=review_text_v1`（`result_normalizations` 同 Plus）；其余仍报「Codex Review 缺少有效最终 JSON」。失败原因同时区分「未写出最终消息」「最终消息为空」与格式不符（附脱敏、截断到 240 字符的消息开头），三种都是 review_blocked，不再只显示 `char 0`。理由：经 Magpie 网关接入的第三方模型不执行 `--output-schema`，按旧提示输出分段文本，把结论为 pass 的评审判成格式失败（2026-11-23 MediaPlayer 实例）。
 

@@ -318,6 +318,10 @@ def cmd_overview(ctx, payload: dict) -> dict:
             "codex_timeout_seconds": db.get_setting(
                 conn, "codex_timeout_seconds"
             ),
+            # kp-rt01：评审单轮上限（None=回退 executor 超时；Settings 页编辑用）。
+            "review_timeout_seconds": db.get_setting(
+                conn, "review_timeout_seconds"
+            ),
         },
         "paths": {
             "db": str(ctx.db_path),

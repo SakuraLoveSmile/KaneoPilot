@@ -2026,6 +2026,14 @@ final class AppViewModel: ObservableObject {
         await loadWorktreeConfig()
     }
 
+    /// kp-rt01：评审阶段单轮上限（秒，300–14400）；写后刷新 overview 设置域。
+    /// 不传 null：界面上「跟随执行端」由不写入保持，恢复缺省等于写执行端缺省值。
+    func setReviewTimeoutSeconds(_ seconds: Int) async throws {
+        _ = try await client.run("set-config", payload: ["review_timeout_seconds": seconds])
+        // 设置页可见域是 overview（AppViewModel.visibleDomains 的 .settings 分支）。
+        dataDidChange([.overview])
+    }
+
     /// 位置迁移走核心的离线 relocate：先预览拿审计指纹，再带 confirm 执行。
     func previewWorktreeRelocate(destination: String, backupDir: String, operationId: String) async throws -> WorktreeRelocatePreviewDTO {
         guard let source = worktreeConfig?.worktreesRoot else {

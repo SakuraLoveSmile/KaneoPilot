@@ -137,7 +137,10 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
         _automation_command("task_workspace", "cmd_repair_review_fix_workspace")),
     "set-config": ({"worktree_pool_size": (False, "int"), "workspace_id": (False, "str"),
                     "worktree_concurrency_limit": (False, "int"),
-                    "worktree_retention_days": (False, "int")}, cmd_config.cmd_set_config),
+                    "worktree_retention_days": (False, "int"),
+                    # kp-rt01：评审单轮上限（秒；null=恢复跟随执行端上限）。
+                    "review_timeout_seconds": (False, "int|null")},
+                   cmd_config.cmd_set_config),
     "worktree-relocate": (
         {"source_root": (True, "str"), "destination_root": (True, "str"),
          "backup_dir": (True, "str"), "operation_id": (True, "str"),
@@ -868,6 +871,8 @@ def _check_type(value: Any, kind: str, field: str) -> None:
         ok = value is None or isinstance(value, str)
     elif kind == "int":
         ok = isinstance(value, int) and not isinstance(value, bool)
+    elif kind == "int|null":
+        ok = value is None or (isinstance(value, int) and not isinstance(value, bool))
     elif kind == "bool":
         ok = isinstance(value, bool)
     elif kind == "dict":

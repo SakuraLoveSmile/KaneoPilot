@@ -284,7 +284,8 @@ def quarantine(conn, slot_id, holder_id, lease_token, reason):
 def _lease_seconds(conn, requested=None):
     # A stale lease cannot expire inside any configured stage's maximum run.
     limits = [constants.DEFAULT_WORKTREE_POOL_LEASE_SECONDS]
-    for key in ("pi_round_timeout_seconds", "codex_timeout_seconds", "executor_timeout_seconds"):
+    for key in ("pi_round_timeout_seconds", "codex_timeout_seconds",
+                "review_timeout_seconds", "executor_timeout_seconds"):
         value = db.get_setting(conn, key)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
             limits.append(value + 300)
