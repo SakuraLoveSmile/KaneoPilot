@@ -64,7 +64,6 @@ class TestLabelsComments(unittest.TestCase):
         client.base_url = "http://127.0.0.1:1/"
         client.token = "fixture-token"
         client.timeout = 1
-        client.read_timeout = 1
         opener = StubOpener(HTTPError(
             "http://127.0.0.1:1/api/label/task/missing", 404, "missing", {}, None
         ))

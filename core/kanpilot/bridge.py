@@ -150,7 +150,6 @@ class Client:
             raise BridgeError("KANEO_TIMEOUT 必须是数字") from exc
         if self.timeout <= 0:
             raise BridgeError("KANEO_TIMEOUT 必须大于 0")
-        self.read_timeout = min(self.timeout, GET_TIMEOUT_CAP)
         self._opener = _build_opener()
 
     def request(self, path: str, method: str = "GET", body: Any = None,
@@ -164,7 +163,9 @@ class Client:
         if retry is None:
             retry = DEFAULT_READ_RETRIES if method == "GET" else 0
         attempts = max(1, int(retry) + 1)
-        timeout = self.read_timeout if method == "GET" else self.timeout
+        # 每次都按当前 self.timeout 取：doctor 之类的调用方会临时调小超时做探针，
+        # 缓存值会让「1 秒探针」变成 8 秒 × 3 次（kp-nx01 集成用例发现的回归）。
+        timeout = min(self.timeout, GET_TIMEOUT_CAP) if method == "GET" else self.timeout
         started = time.monotonic()
         transport_error: Optional[BaseException] = None
         for attempt in range(attempts):

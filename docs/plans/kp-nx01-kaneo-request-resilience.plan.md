@@ -54,6 +54,12 @@
 
 - 待填：隔离测试、全量 `python3 -m pytest tests -q`、云端 `Packages` 测试版。
 
+## 回归与修复（2026-11-27 15:5x）
+
+- 云端 `Packages`（push 触发，run 45958838730）抓到一条真回归：`tests/rehearsal/test_doctor_live.py::test_scenario_doctor_live_kaneo_timeout_vs_failure` 要求「Kaneo 挂起 → 探针 5 秒内返回 timed_out=true」，实测 25.7 秒。原因：GET 重试把 doctor 的 1 秒探针放大成「8 秒 × 3 次」，且 read_timeout 在构造时缓存，探针事后调小 client.timeout 无效。
+- 修复：`bridge.Client.request` 每次按当前 `self.timeout` 计算 GET 超时（去掉缓存的 read_timeout）；`_doctor_kaneo_ping` 显式 `retry=0`（探针只测一次）。新增 `test_lowered_timeout_after_construction_is_used` 固定该行为。
+- 同一次 run 的 `macos-package` 失败是 `hdiutil verify: Resource temporarily unavailable`（DMG 已生成并签名，仅校验步骤在 runner 上抖动），与本次改动无关，重跑确认。
+
 ## 状态
 
-- 实现中（本地隔离测试进行中；未推送、未发测试版）。
+- 实现中（本地隔离测试通过、云端复跑待确认；未发测试版）。
