@@ -53,6 +53,23 @@ def dispatch_document(task, worktree):
     return None
 
 
+def write_once(target, raw):
+    """Exclusive publication; a replay can reuse only byte-identical content."""
+    from . import worktree_pool
+    worktree_pool._no_links(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not os.path.lexists(target):
+        with tempfile.NamedTemporaryFile(dir=target.parent) as tmp:
+            tmp.write(raw)
+            tmp.flush()
+            try:
+                os.link(tmp.name, target)
+            except FileExistsError:
+                pass
+    util.require(target.is_file() and not target.is_symlink() and target.read_bytes() == raw,
+                 "已登记的项目计划内容不同，保留现场", "conflict")
+
+
 def checkout_plan(task, worktree, *, install=False):
     """Materialize the immutable plan before execution freezes its source snapshot."""
     from . import worktree_pool
@@ -64,17 +81,11 @@ def checkout_plan(task, worktree, *, install=False):
     util.require(util.sha256_bytes(raw) == task["plan_sha256"], "冻结计划内容已变化")
     target = Path(worktree) / relative
     worktree_pool._no_links(target)
-    if install and not target.exists():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=target.parent) as tmp:
-            tmp.write(raw)
-            tmp.flush()
-            try:
-                os.link(tmp.name, target)
-            except FileExistsError:
-                pass
-    util.require(target.is_file() and not target.is_symlink() and target.read_bytes() == raw,
-                 "任务工作树中的正式计划缺失或内容已变化")
+    if install:
+        write_once(target, raw)
+    else:
+        util.require(target.is_file() and not target.is_symlink() and target.read_bytes() == raw,
+                     "任务工作树中的正式计划缺失或内容已变化")
     return str(relative)
 
 

@@ -416,12 +416,14 @@ class TestPlanningChain(KanpilotTestCase):
         self.assertEqual(view["status"], "ready")
         self.assertEqual(view["display_status"], "待确认执行")
         self.assertTrue(view["plan_sha256"])
-        # 计划文件落在 plan_root 且含 frontmatter。
+        # 计划证据归属登记仓库并与工作树中的可交付计划一致。
         self.assertTrue(view["plan_path"])
         self.assertTrue(Path(view["plan_path"]).is_file())
-        self.assertTrue(
-            str(Path(view["plan_path"]).resolve()).startswith(
-                str(Path(self.plan_root).resolve())))
+        plan = Path(view["plan_path"]).resolve()
+        self.assertEqual(plan.parent, Path(view["repository"]).resolve() / ".git/kanpilot/plans" / remote_task["id"])
+        delivery = self.call("get-task", {"task_id": remote_task["id"]})["task"]["delivery"]
+        self.assertEqual((Path(delivery["worktree_path"]) / "docs/plans" / remote_task["id"] / plan.name).read_bytes(),
+                         plan.read_bytes())
         meta, _raw = util.read_frontmatter(Path(view["plan_path"]))
         self.assertEqual(meta["task_id"], remote_task["id"])
         self.assertEqual(meta["planner_model"], "gpt-6-astra")

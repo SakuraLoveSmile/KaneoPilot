@@ -340,8 +340,7 @@ def write_plan_file(
             if target_path is not None else
             _plan_file_path(meta.get("project_id"), task.get("title") or task_id or "plan",
                             repository=meta.get("repository"), task_id=task_id))
-    with path.open("x", encoding="utf-8") as stream:
-        stream.write("\n".join(lines) + "\n\n" + body)
+    planfile.write_once(path, ("\n".join(lines) + "\n\n" + body).encode("utf-8"))
     return path
 
 

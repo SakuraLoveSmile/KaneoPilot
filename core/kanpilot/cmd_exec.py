@@ -1084,8 +1084,10 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
         fields["extra_json"] = extra
         delivery = core.delivery_of(task)
         published_task = dict(task_dict, **fields)
+        from . import review_resolution
         if (planfile.project_document(published_task) and delivery.get("worktree_path")
-                and not core.is_user_replan(task)):
+                and not core.is_user_replan(task) and not core.automation_of(task).get("manual_takeover")
+                and not repair and not review_resolution.remediation_of(task)):
             # A held plan is already visible in the task checkout. Dispatch
             # validates the identical bytes again before taking its snapshot.
             from . import git_delivery

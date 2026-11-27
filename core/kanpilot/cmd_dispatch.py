@@ -214,6 +214,13 @@ def cmd_dispatch_confirm(ctx, payload: dict) -> dict:
                 evidence, task, expect_message=True,
                 plan_basename=plan_basename,
             )
+            # A resumed UI dispatch can confirm a send without dispatch-start.
+            # Preserve the same registered branch and plan checks before monitoring.
+            from . import planfile
+            if planfile.project_document(task) and (core.is_pr_delivery(task) or _manual_branch_delivery(task)):
+                worktree, mode = _ensure_worktree(task, task["task_id"], payload["run_id"], conn)
+                if mode == "branch":
+                    planfile.checkout_plan(task, worktree, install=True)
         db.update_task(
             conn, task["task_id"], now,
             status="running", stage="monitor", sent=1, send_state="sent",
