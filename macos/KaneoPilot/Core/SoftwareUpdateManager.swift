@@ -228,7 +228,7 @@ final class SoftwareUpdateManager: ObservableObject {
             guard channel != oldValue else { return }
             defaults.set(channel.rawValue, forKey: Keys.channel)
             channelEpoch += 1
-            if channel.allowsTestBuilds {
+            if channel.followsPrereleases {
                 // The last answer may only have covered a narrower channel; look again as soon as possible.
                 channelNotice = nil
                 forgetLastAttempt()
@@ -305,14 +305,14 @@ final class SoftwareUpdateManager: ObservableObject {
 
     var isPreview: Bool { currentVersion == "0.0.0" }
     /// Whether prereleases of the selected channel take part in checking, downloading and installing.
-    var prereleaseChannelActive: Bool { channel.allowsTestBuilds && !isPreview }
+    var prereleaseChannelActive: Bool { channel.followsPrereleases && !isPreview }
     /// Which kinds a real (non-preview) App may receive from the selected channel.
     var effectiveChannel: SoftwareUpdateChannel { isPreview ? .stable : channel }
     /// The channel picker is locked while a request or the installation hand-off is running.
     var canChangeChannel: Bool {
         allowsNetwork && !isPreview && ![Phase.checking, .preparing, .waitingForExit].contains(phase)
     }
-    var installedIsTestBuild: Bool { (try? SoftwareVersion(currentVersion))?.isTest == true }
+    var installedIsPrerelease: Bool { (try? SoftwareVersion(currentVersion))?.isPrerelease == true }
     var isBusy: Bool { [Phase.checking, .downloading, .preparing, .waitingForExit].contains(phase) }
     /// A prerelease candidate is only usable while the selected channel follows it.
     private var candidateAllowed: Bool { release.map { effectiveChannel.allows($0.kind) } ?? false }
@@ -332,13 +332,11 @@ final class SoftwareUpdateManager: ObservableObject {
         case .current: return "当前已是最新正式版，或当前版本高于已发布版本"
         case .available:
             let version = release?.version ?? ""
-            if let release, release.isPrerelease { return "发现\(release.channel == "dev" ? "开发版" : "测试版") \(version)" }
+            if release?.isPrerelease == true { return "发现开发版 \(version)" }
             return isPreview ? "发现正式版 \(version)；开发预览版请从发布页手动选择" : "发现新版本 \(version)"
         case .downloading: return "正在下载更新 \(Int(progress * 100))%"
         case .ready:
-            if let release, release.isPrerelease {
-                return "\(release.version)（\(release.channel == "dev" ? "开发版" : "测试版")）已下载并校验"
-            }
+            if let release, release.isPrerelease { return "\(release.version)（开发版）已下载并校验" }
             return "更新已下载并校验，等待安装"
         case .preparing: return "正在校验并准备安装…"
         case .waitingForExit: return "正在保存草稿并安全退出，随后安装并重新启动"
@@ -583,7 +581,7 @@ final class SoftwareUpdateManager: ObservableObject {
     private func discardPrereleaseCandidate() {
         guard let candidate = release, candidate.isPrerelease,
               !effectiveChannel.allows(candidate.kind) else { return }
-        let label = candidate.channel == "dev" ? "开发版" : "测试版"
+        let label = "开发版"
         downloadGeneration += 1
         downloadTask?.cancel(); downloadTask = nil
         if pendingInstallation != nil || phase == .waitingForExit {

@@ -139,7 +139,7 @@ def identity(api=None):
     channel = os.environ.get("RELEASE_CHANNEL", "")
     if event == "workflow_dispatch" and ref_type != "branch":
         raise ValueError("Manual builds require a branch; rerun the original tag workflow to recover a release")
-    if channel not in ("", "preview", "test", "dev"):
+    if channel not in ("", "preview", "dev"):
         raise ValueError("Unknown release channel")
     if channel and event != "workflow_dispatch":
         raise ValueError("A release channel can only be selected for a manual build")
@@ -165,12 +165,12 @@ def identity(api=None):
         if contained.returncode != 0:
             raise ValueError("Release commit must be contained in origin/main")
         result = {"release": "true", "version": tag[1:], "sha": source_sha}
-    elif channel in ("test", "dev"):
-        # A manual branch build only: the commit need not be in main, so the tag is made by publish.
-        result = manual_prerelease_identity(api, source_sha, channel)
+    elif channel == "dev":
+        # A manual dev build only: the commit need not be in main, so the tag is made by publish.
+        result = manual_prerelease_identity(api, source_sha, "dev")
     else:
         if os.environ.get("RELEASE_BASE_VERSION", "").strip() or os.environ.get("RELEASE_NOTES", "").strip():
-            raise ValueError("base_version and notes are only used by channel=test/dev")
+            raise ValueError("base_version and notes are only used by channel=dev")
         result = {"release": "false", "version": "0.0.0", "sha": source_sha}
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
         for key, value in result.items():
@@ -357,8 +357,8 @@ def publish(api, directory, tag, source_sha, build_number, channel="stable", not
         raise ValueError("Manifest identity mismatch")
     if tag_channel(tag, build_number) != channel:
         raise ValueError("Tag does not belong to the %s channel" % channel)
-    if channel in ("test", "dev") and not notes.strip():
-        raise ValueError("Test and dev releases require release notes")
+    if channel == "dev" and not notes.strip():
+        raise ValueError("Dev releases require release notes")
     # Recompute from metadata, detecting changed files before any GitHub mutation.
     if prepare(root, tag, source_sha, build_number, branch) != manifest:
         raise ValueError("Manifest does not match build metadata")
@@ -367,8 +367,8 @@ def publish(api, directory, tag, source_sha, build_number, channel="stable", not
     reference = api.request("GET", reference_path)
     if reference:
         notes = verify_remote_tag(api, prefix, reference, tag, source_sha)
-    elif channel in ("test", "dev"):
-        # A prerelease is not tagged by hand: this job creates the annotated tag, after every check below.
+    elif channel == "dev":
+        # A dev build is not tagged by hand: this job creates the annotated tag, after every check below.
         notes = annotation_message(notes, branch, source_sha, build_number, run_url, channel)
     else:
         raise ValueError("Remote tag is missing")
@@ -376,7 +376,7 @@ def publish(api, directory, tag, source_sha, build_number, channel="stable", not
     release = find_release(api, prefix, tag)
     if release is not None and marker not in (release.get("body") or ""):
         raise ValueError("Release belongs to another build; refusing to modify it")
-    prerelease = channel in ("test", "dev")
+    prerelease = channel == "dev"
     if release is not None and (release.get("tag_name") != tag or release.get("prerelease") is not prerelease):
         raise ValueError("Existing release tag or %s channel mismatch" % channel)
     if not prerelease and (release is None or release.get("draft")):
@@ -447,7 +447,7 @@ def main():
         sub = subs.add_parser(command)
         for name in ("directory", "tag", "source-sha", "build-number"):
             sub.add_argument("--" + name, required=True)
-        sub.add_argument("--channel", choices=("stable", "test", "dev"), default="stable")
+        sub.add_argument("--channel", choices=("stable", "dev"), default="stable")
         sub.add_argument("--branch", default="")
     args = parser.parse_args()
     if args.command == "identity":

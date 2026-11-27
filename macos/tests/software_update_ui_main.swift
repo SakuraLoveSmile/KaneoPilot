@@ -7,7 +7,7 @@ import SwiftUI
 private enum UpdateUIScenario: String {
     case ready, downloadFailure = "download-failure", downloading
     /// The switch is on and a test build is the newest release.
-    case testCandidate = "test-candidate"
+    case devCandidate = "dev-candidate"
     /// The App is a test build; turning the switch on offers the next test build.
     case installedTest = "installed-test"
 }
@@ -74,10 +74,10 @@ private actor UpdateUIService: SoftwareUpdateServing {
     func latest(channel: SoftwareUpdateChannel) async throws -> SoftwareRelease {
         log.record("latest_requested", ["network_used": false, "channel": channel.rawValue])
         try await Task.sleep(nanoseconds: 250_000_000)
-        guard channel.allowsTestBuilds else { return updateUIRelease() }
+        guard channel.followsPrereleases else { return updateUIRelease() }
         switch scenario {
-        case .testCandidate: return updateUIRelease(version: "0.2.1-test.70", build: 70)
-        case .installedTest: return updateUIRelease(version: "0.2.1-test.71", build: 71)
+        case .devCandidate: return updateUIRelease(version: "0.2.1-dev.70", build: 70)
+        case .installedTest: return updateUIRelease(version: "0.2.1-dev.71", build: 71)
         case .ready, .downloadFailure, .downloading: return updateUIRelease()
         }
     }
@@ -201,12 +201,12 @@ private final class UpdateUIController: ObservableObject {
         let termination = UpdateUITerminationBridge(log: log)
         self.termination = termination
         // The test-candidate scenario starts on the test channel; every other scenario keeps that default too.
-        defaults.set(scenario == .testCandidate ? SoftwareUpdateChannel.test.rawValue
+        defaults.set(scenario == .devCandidate ? SoftwareUpdateChannel.dev.rawValue
                                                 : SoftwareUpdateChannel.stable.rawValue,
                      forKey: "softwareUpdate.channel")
         let installedTest = scenario == .installedTest
         updater = SoftwareUpdateManager(service: UpdateUIService(scenario: scenario, log: log), installer: installer,
-            defaults: defaults, currentVersion: installedTest ? "0.2.1-test.70" : "0.1.0",
+            defaults: defaults, currentVersion: installedTest ? "0.2.1-dev.70" : "0.1.0",
             currentBuild: installedTest ? "70" : "1",
             targetURL: fixtureRoot.appendingPathComponent("uninstalled/KaneoPilot.app"),
             cacheURL: fixtureRoot.appendingPathComponent("cache"), allowsNetwork: true,
@@ -240,7 +240,7 @@ private final class UpdateUIController: ObservableObject {
             "can_download": updater.canDownload, "can_install": updater.canInstall,
             "receives_test_builds": updater.channel != .stable, "test_channel_active": updater.prereleaseChannelActive,
             "can_change_test_channel": updater.canChangeChannel,
-            "installed_is_test_build": updater.installedIsTestBuild,
+            "installed_is_prerelease": updater.installedIsPrerelease,
             "release_version": updater.release?.version ?? "", "release_is_test": updater.release?.isTest ?? false,
             "release_branch": updater.release?.branch ?? "",
             "installer_prepare_count": counts.0, "helper_launch_count": counts.1,

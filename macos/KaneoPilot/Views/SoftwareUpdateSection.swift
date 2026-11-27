@@ -19,23 +19,21 @@ struct SoftwareUpdateSection: View {
     private var frequencyText: String {
         switch channelBinding.wrappedValue {
         case .stable: return "App 运行期间每 6 小时检查 GitHub 正式版；下载校验完成后，由你确认安装。"
-        case .test: return "App 运行期间每 6 小时检查 GitHub 正式版和测试版；下载校验完成后，由你确认安装。"
-        case .dev: return "App 运行期间每 6 小时检查 GitHub 正式版、测试版和开发版；下载校验完成后，由你确认安装。"
+        case .dev: return "App 运行期间每 6 小时检查 GitHub 正式版和开发版；下载校验完成后，由你确认安装。"
         }
     }
 
     private var channelHint: String {
         switch channelBinding.wrappedValue {
-        case .stable: return "只接收正式版；不会收到测试版或开发版。"
-        case .test: return "接收正式版和测试版；测试版来自任务分支，可能不稳定，也可能升级数据库，无法在 App 内降级。"
-        case .dev: return "接收正式版、测试版和开发版；开发版来自 dev 分支，更新最快、风险最高，同样无法在 App 内降级。"
+        case .stable: return "只接收正式版；不会收到开发版。"
+        case .dev: return "接收正式版和开发版；开发版来自 dev 分支，更新最快、风险最高，可能升级数据库，无法在 App 内降级。"
         }
     }
 
     private var installationWarning: String {
         let base = "将保存回答草稿并安全停止本实例的后台服务，再替换 App 并重新启动。若无法安全退出，安装会取消。任务数据和外部 Plus 会话会保留。"
         guard let release = updater.release, release.isPrerelease else { return base }
-        let label = release.channel == "dev" ? "开发版" : "测试版"
+        let label = "开发版"
         return base + "这是\(label)：可能不稳定，也可能升级数据库，无法在 App 内降级。"
     }
 
@@ -90,8 +88,8 @@ struct SoftwareUpdateSection: View {
                 Text("开发预览版只跟随正式版通道。")
                     .font(.kpSmall).foregroundStyle(.secondary)
             }
-            if updater.installedIsTestBuild && !updater.prereleaseChannelActive {
-                Text("当前是预发布版。把更新通道切到「测试版」或「开发版」可获取后续测试构建；正式版通道只在出现更高的正式版时提示。")
+            if updater.installedIsPrerelease && !updater.prereleaseChannelActive {
+                Text("当前是旧的测试版构建。App 只跟随正式版和开发版：要切到开发版，请手动安装一次开发版安装包；正式版通道只在出现更高的正式版时提示。")
                     .font(.kpSmall).foregroundStyle(.secondary)
             }
             Divider()

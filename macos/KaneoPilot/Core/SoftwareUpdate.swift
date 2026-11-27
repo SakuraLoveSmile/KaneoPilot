@@ -23,24 +23,28 @@ enum SoftwareUpdateKind: Int, Comparable, Sendable {
 
 /// The update channel the App follows. A channel offers its own builds and every more stable one.
 enum SoftwareUpdateChannel: String, CaseIterable, Sendable {
-    case stable, test, dev
+    /// Two lines only: the stable releases from `main`, and the dev builds from `dev`. Task-branch
+    /// `-test.N` builds are no longer published to any channel the App follows.
+    case stable, dev
     var displayName: String {
-        switch self { case .stable: return "正式版"; case .test: return "测试版"; case .dev: return "开发版" }
+        switch self { case .stable: return "正式版"; case .dev: return "开发版" }
     }
-    var allowsTestBuilds: Bool { self != .stable }
-    var allowsDevBuilds: Bool { self == .dev }
+    var followsPrereleases: Bool { self == .dev }
     func allows(_ kind: SoftwareUpdateKind) -> Bool {
         switch kind {
         case .stable: return true
-        case .test: return allowsTestBuilds
-        case .dev: return allowsDevBuilds
+        case .dev: return followsPrereleases
+        case .test: return false
         }
     }
-    /// Stored value: an explicit channel, or the legacy `receivesTestBuilds` switch.
+    /// Stored value: an explicit channel; older records named "test" (a channel the App no longer has)
+    /// and the boolean `receivesTestBuilds` switch both land on the dev line. A missing record keeps the
+    /// dev line, which is what the old build did for a default of "test".
     static func stored(_ raw: String?, legacyTestBuilds: Bool?) -> SoftwareUpdateChannel {
         if let raw, let channel = SoftwareUpdateChannel(rawValue: raw) { return channel }
-        if let legacyTestBuilds { return legacyTestBuilds ? .test : .stable }
-        return .test
+        if let raw, raw == "test" { return .dev }
+        if let legacyTestBuilds { return legacyTestBuilds ? .dev : .stable }
+        return .dev
     }
 }
 

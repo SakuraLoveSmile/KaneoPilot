@@ -64,11 +64,11 @@ class PackagesWorkflowTests(unittest.TestCase):
         self.assertNotIn("paths-ignore", TRIGGERS["workflow_dispatch"])
         self.assertNotIn("paths-ignore", TRIGGERS["pull_request"] or {})
 
-    def test_manual_inputs_select_a_preview_a_test_or_a_dev_release(self):
+    def test_manual_inputs_select_a_preview_or_a_dev_release(self):
         inputs = TRIGGERS["workflow_dispatch"]["inputs"]
         self.assertEqual(set(inputs), {"channel", "base_version", "notes", "probe_session_fulltext"})
         self.assertEqual((inputs["channel"]["type"], inputs["channel"]["options"], inputs["channel"]["default"]),
-                         ("choice", ["preview", "test", "dev"], "preview"))
+                         ("choice", ["preview", "dev"], "preview"))
         for name in ("base_version", "notes"):
             self.assertEqual((inputs[name]["type"], inputs[name]["default"], inputs[name]["required"]), ("string", "", False))
 

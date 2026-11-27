@@ -9,17 +9,17 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: 'preview builds only artifacts; test/dev publish a pre-release for that in-app update channel'
+        description: 'preview builds only artifacts; dev publishes a pre-release for the in-app dev channel'
         type: choice
-        options: [preview, test, dev]
+        options: [preview, dev]
         default: preview
       base_version:
-        description: 'channel=test/dev only: stable X.Y.Z this prerelease heads for (empty: next version above the latest stable and published prerelease bases)'
+        description: 'channel=dev only: stable X.Y.Z this prerelease heads for (empty: next version above the latest stable and published dev bases)'
         type: string
         required: false
         default: ''
       notes:
-        description: 'channel=test/dev only: public release notes (required)'
+        description: 'channel=dev only: public release notes (required)'
         type: string
         required: false
         default: ''

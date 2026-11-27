@@ -17,7 +17,7 @@ STABLE = {"tag_name": "v0.2.0", "draft": False, "prerelease": False}
 
 
 def release(tag, draft=False, prerelease=None):
-    return {"tag_name": tag, "draft": draft, "prerelease": "-test." in tag if prerelease is None else prerelease}
+    return {"tag_name": tag, "draft": draft, "prerelease": "-dev." in tag if prerelease is None else prerelease}
 
 
 class FakeReleases:
@@ -62,7 +62,7 @@ class RepoCase(unittest.TestCase):
     def environment(self, notes="Try the new update channel.", base="", run="70", **extra):
         values = dict(self.env, GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_REF_TYPE="branch",
                       GITHUB_REF_NAME="feat/test-channel", GITHUB_OUTPUT=str(self.output),
-                      GITHUB_RUN_NUMBER=run, RELEASE_CHANNEL="test", RELEASE_BASE_VERSION=base,
+                      GITHUB_RUN_NUMBER=run, RELEASE_CHANNEL="dev", RELEASE_BASE_VERSION=base,
                       RELEASE_NOTES=notes)
         values.update(extra)
         return values
@@ -89,32 +89,32 @@ class ManualTestIdentityTests(RepoCase):
     def test_default_base_is_the_next_patch_above_the_latest_stable(self):
         api = FakeReleases(STABLE)
         result = self.resolve(api)
-        expected = {"release": "true", "version": "0.2.1-test.70", "sha": self.sha,
-                    "channel": "test", "tag": "v0.2.1-test.70"}
+        expected = {"release": "true", "version": "0.2.1-dev.70", "sha": self.sha,
+                    "channel": "dev", "tag": "v0.2.1-dev.70"}
         self.assertEqual(result, expected)
         self.assertEqual(self.written(), expected)
         self.assertEqual({method for method, _ in api.requests}, {"GET"})
         self.assertEqual(len(api.requests), 2)
 
     def test_default_base_follows_the_highest_published_test_base(self):
-        api = FakeReleases(STABLE, [release("v0.2.1-test.9"), release("v0.3.0-test.5"), release("v0.2.5-test.99")])
-        self.assertEqual(self.resolve(api, run="71")["version"], "0.3.0-test.71")
+        api = FakeReleases(STABLE, [release("v0.2.1-dev.9"), release("v0.3.0-dev.5"), release("v0.2.5-dev.99")])
+        self.assertEqual(self.resolve(api, run="71")["version"], "0.3.0-dev.71")
 
     def test_an_obsolete_test_base_does_not_hold_the_default_back(self):
-        api = FakeReleases(STABLE, [release("v0.1.5-test.3"), release("v0.2.0-test.8")])
-        self.assertEqual(self.resolve(api)["version"], "0.2.1-test.70")
+        api = FakeReleases(STABLE, [release("v0.1.5-dev.3"), release("v0.2.0-dev.8")])
+        self.assertEqual(self.resolve(api)["version"], "0.2.1-dev.70")
 
     def test_drafts_prereleases_and_foreign_tags_are_ignored(self):
         api = FakeReleases(STABLE, [
-            release("v9.9.9-test.1", draft=True), release("v8.0.0-test.1", prerelease=False),
+            release("v9.9.9-dev.1", draft=True), release("v8.0.0-dev.1", prerelease=False),
             release("v7.0.0-rc.1", prerelease=True), release("v6.0.0", prerelease=True),
             {"tag_name": None, "draft": False, "prerelease": True}, release("v0.1.0"), release("nightly", prerelease=True)])
-        self.assertEqual(self.resolve(api)["version"], "0.2.1-test.70")
+        self.assertEqual(self.resolve(api)["version"], "0.2.1-dev.70")
 
     def test_explicit_base_may_repeat_the_highest_published_test_base(self):
-        api = FakeReleases(STABLE, [release("v0.3.0-test.5")])
-        self.assertEqual(self.resolve(api, base="0.3.0")["version"], "0.3.0-test.70")
-        self.assertEqual(self.resolve(FakeReleases(STABLE, [release("v0.3.0-test.5")]), base=" 0.4.0 ")["version"], "0.4.0-test.70")
+        api = FakeReleases(STABLE, [release("v0.3.0-dev.5")])
+        self.assertEqual(self.resolve(api, base="0.3.0")["version"], "0.3.0-dev.70")
+        self.assertEqual(self.resolve(FakeReleases(STABLE, [release("v0.3.0-dev.5")]), base=" 0.4.0 ")["version"], "0.4.0-dev.70")
 
     def test_base_must_be_above_the_latest_stable_release(self):
         for base in ("0.2.0", "0.1.9", "0.0.1"):
@@ -122,10 +122,10 @@ class ManualTestIdentityTests(RepoCase):
                 self.assert_rejected("above the latest stable", FakeReleases(STABLE), base=base)
 
     def test_base_must_not_be_below_the_highest_published_test_base(self):
-        self.assert_rejected("below the highest", FakeReleases(STABLE, [release("v0.3.0-test.5")]), base="0.2.5")
+        self.assert_rejected("below the highest", FakeReleases(STABLE, [release("v0.3.0-dev.5")]), base="0.2.5")
 
     def test_malformed_base_is_rejected_before_any_api_call(self):
-        for base in ("0.3", "0.3.0-test.1", "v0.3.0", "01.2.3", "0.3.0.1", "1.2.x", "1.2.3-rc.1", "1000000000.0.0"):
+        for base in ("0.3", "0.3.0-dev.1", "v0.3.0", "01.2.3", "0.3.0.1", "1.2.x", "1.2.3-rc.1", "1000000000.0.0"):
             with self.subTest(base=base):
                 api = FakeReleases(STABLE)
                 self.assert_rejected("stable X.Y.Z", api, base=base)
@@ -134,7 +134,7 @@ class ManualTestIdentityTests(RepoCase):
     def test_without_any_published_release_the_base_must_be_explicit_and_above_zero(self):
         self.assert_rejected("Cannot determine", FakeReleases())
         self.assert_rejected("above 0.0.0", FakeReleases(), base="0.0.0")
-        self.assertEqual(self.resolve(FakeReleases(), base="0.1.0")["version"], "0.1.0-test.70")
+        self.assertEqual(self.resolve(FakeReleases(), base="0.1.0")["version"], "0.1.0-dev.70")
 
     def test_notes_are_required_and_bounded_before_any_api_call(self):
         for notes, expected in (("", "release notes"), (" \n\t ", "release notes"), ("x" * 4001, "at most 4000")):
@@ -142,7 +142,7 @@ class ManualTestIdentityTests(RepoCase):
                 api = FakeReleases(STABLE)
                 self.assert_rejected(expected, api, notes=notes)
                 self.assertEqual(api.requests, [])
-        self.assertEqual(self.resolve(FakeReleases(STABLE), notes="x" * 4000)["channel"], "test")
+        self.assertEqual(self.resolve(FakeReleases(STABLE), notes="x" * 4000)["channel"], "dev")
 
     def test_run_number_must_be_a_build_number(self):
         for run in ("", "0", "01", "-1", "1000000000", "7a"):
@@ -152,7 +152,7 @@ class ManualTestIdentityTests(RepoCase):
                 self.assertEqual(api.requests, [])
 
     def test_an_unrecognizable_latest_release_aborts(self):
-        for tag in ("nightly", "v0.3.0-rc.1", "v01.3.0", "v0.3.0-test.4"):
+        for tag in ("nightly", "v0.3.0-rc.1", "v01.3.0", "v0.3.0-dev.4"):
             with self.subTest(tag=tag):
                 self.assert_rejected("recognizable stable", FakeReleases({"tag_name": tag, "draft": False, "prerelease": False}))
         self.assert_rejected("recognizable stable", FakeReleases({"tag_name": "v0.2.0", "draft": False, "prerelease": True}))
@@ -185,9 +185,9 @@ class IdentityRejectionTests(RepoCase):
         self.assertEqual(self.written(), {})
 
     def test_a_pushed_test_tag_is_never_a_release(self):
-        self.git("tag", "-a", "v1.2.3-test.5", "-m", "Pushed by hand")
+        self.git("tag", "-a", "v1.2.3-dev.5", "-m", "Pushed by hand")
         self.assert_rejected("manual channel=test", GITHUB_EVENT_NAME="push", GITHUB_REF_TYPE="tag",
-                             GITHUB_REF_NAME="v1.2.3-test.5", RELEASE_CHANNEL="", RELEASE_NOTES="")
+                             GITHUB_REF_NAME="v1.2.3-dev.5", RELEASE_CHANNEL="", RELEASE_NOTES="")
 
     def test_a_channel_can_only_be_selected_for_a_manual_build(self):
         for event in ("push", "pull_request"):
@@ -202,7 +202,7 @@ class IdentityRejectionTests(RepoCase):
     def test_test_inputs_on_a_preview_build_are_rejected(self):
         for options in ({"base": "0.3.0", "notes": ""}, {"base": "", "notes": "Looks like a test."}):
             with self.subTest(options=options):
-                self.assert_rejected("only used by channel=test", RELEASE_CHANNEL="preview",
+                self.assert_rejected("only used by channel=dev", RELEASE_CHANNEL="preview",
                                      RELEASE_BASE_VERSION=options["base"], RELEASE_NOTES=options["notes"])
 
     def test_explicit_preview_is_still_the_zero_version_without_a_release(self):

@@ -23,7 +23,7 @@ def load(name, path):
 release_bundle = load("release_bundle", HERE.parent / "release_bundle.py")
 stable_tests = load("stable_release_tests", HERE / "test_release_bundle.py")
 SHA = "a" * 40
-VERSION = "0.2.1-test.42"
+VERSION = "0.2.1-dev.42"
 TAG = "v" + VERSION
 BUILD = 42
 BRANCH = "feat/test-channel"
@@ -81,12 +81,12 @@ class TestChannelPublishTests(unittest.TestCase):
         self.manifest = build_bundle(self.root, VERSION, TAG, BUILD, BRANCH)
 
     def publish(self, **overrides):
-        options = {"channel": "test", "notes": NOTES, "branch": BRANCH, "run_url": RUN_URL}
+        options = {"channel": "dev", "notes": NOTES, "branch": BRANCH, "run_url": RUN_URL}
         options.update(overrides)
         return release_bundle.publish(self.api, self.root, TAG, SHA, BUILD, **options)
 
     def test_manifest_marks_the_test_channel_and_its_source(self):
-        self.assertEqual(self.manifest["channel"], "test")
+        self.assertEqual(self.manifest["channel"], "dev")
         self.assertEqual(self.manifest["base_version"], "0.2.1")
         self.assertEqual(self.manifest["branch"], BRANCH)
         self.assertEqual((self.manifest["version"], self.manifest["tag"], self.manifest["build_number"]), (VERSION, TAG, BUILD))
@@ -104,7 +104,7 @@ class TestChannelPublishTests(unittest.TestCase):
         self.publish()
         tag_object, reference = self.api.created
         self.assertEqual((tag_object["tag"], tag_object["object"], tag_object["type"]), (TAG, SHA, "commit"))
-        for line in (NOTES, "Channel: test", "Branch: " + BRANCH, "Commit: " + SHA, "Build: 42", "Run: " + RUN_URL):
+        for line in (NOTES, "Channel: dev", "Branch: " + BRANCH, "Commit: " + SHA, "Build: 42", "Run: " + RUN_URL):
             self.assertIn(line, tag_object["message"])
         self.assertEqual(tag_object["tagger"]["name"], "github-actions[bot]")
         self.assertRegex(tag_object["tagger"]["date"], r"\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\Z")
@@ -161,7 +161,7 @@ class TestChannelPublishTests(unittest.TestCase):
     def test_remote_lightweight_or_nested_or_renamed_tag_aborts_before_writes(self):
         cases = (({"type": "commit", "sha": SHA}, None, "annotated tag"),
                  ({"type": "tag", "sha": "d" * 40}, {"tag": TAG, "object": {"type": "tag", "sha": "e" * 40}, "message": "Nested"}, "tag no longer"),
-                 ({"type": "tag", "sha": "d" * 40}, {"tag": "v0.2.1-test.41", "object": {"type": "commit", "sha": SHA}, "message": "Renamed"}, "identity mismatch"),
+                 ({"type": "tag", "sha": "d" * 40}, {"tag": "v0.2.1-dev.41", "object": {"type": "commit", "sha": SHA}, "message": "Renamed"}, "identity mismatch"),
                  ({"type": "tag", "sha": "d" * 40}, {"tag": TAG, "object": {"type": "commit", "sha": SHA}, "message": "  \n"}, "release notes"))
         for tag, annotation, expected in cases:
             with self.subTest(expected=expected):
@@ -179,7 +179,7 @@ class TestChannelPublishTests(unittest.TestCase):
 
     def test_a_stable_release_on_the_same_tag_is_a_channel_mismatch(self):
         self.api.release = {"id": 9, "draft": False, "body": MARKER, "tag_name": TAG, "prerelease": False}
-        with self.assertRaisesRegex(ValueError, "test channel mismatch"):
+        with self.assertRaisesRegex(ValueError, "dev channel mismatch"):
             self.publish()
         self.assertEqual(self.api.writes, [])
 
@@ -209,8 +209,8 @@ class TestChannelPublishTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             build_bundle(root, "1.2.3", "v1.2.3", BUILD)
-            with self.assertRaisesRegex(ValueError, "does not belong to the test channel"):
-                release_bundle.publish(self.api, root, "v1.2.3", SHA, BUILD, "test", NOTES, BRANCH, RUN_URL)
+            with self.assertRaisesRegex(ValueError, "does not belong to the dev channel"):
+                release_bundle.publish(self.api, root, "v1.2.3", SHA, BUILD, "dev", NOTES, BRANCH, RUN_URL)
         self.assertEqual(self.api.requests, [])
 
     def test_a_test_serial_must_equal_the_build_number(self):
@@ -247,7 +247,7 @@ class TestChannelPublishTests(unittest.TestCase):
                            GITHUB_TOKEN="unused-fixture-token", RELEASE_NOTES=NOTES, PYTHONDONTWRITEBYTECODE="1")
                 result = subprocess.run([
                     sys.executable, str(HERE.parent / "release_bundle.py"), "publish", "--directory", str(self.root / "does-not-exist"),
-                    "--tag", TAG, "--channel", "test", "--branch", BRANCH, "--source-sha", SHA, "--build-number", str(BUILD),
+                    "--tag", TAG, "--channel", "dev", "--branch", BRANCH, "--source-sha", SHA, "--build-number", str(BUILD),
                 ], env=env, capture_output=True, text=True)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("only supported in GitHub-hosted Actions", result.stderr)
@@ -261,7 +261,7 @@ class TestChannelPublishTests(unittest.TestCase):
             (root / "manifest.json").unlink()
             result = subprocess.run([
                 sys.executable, str(HERE.parent / "release_bundle.py"), "prepare", "--directory", str(root), "--tag", TAG,
-                "--channel", "test", "--branch", BRANCH, "--source-sha", SHA, "--build-number", str(BUILD),
+                "--channel", "dev", "--branch", BRANCH, "--source-sha", SHA, "--build-number", str(BUILD),
             ], env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"), capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads((root / "manifest.json").read_text()), self.manifest)

@@ -263,7 +263,7 @@ private final class ChannelService: SoftwareUpdateServing, @unchecked Sendable {
     func latest(channel: SoftwareUpdateChannel) async throws -> SoftwareRelease {
         flags.append(channel)
         try await Task.sleep(nanoseconds: 20_000_000)
-        guard channel.allowsTestBuilds, let test else { return stable }
+        guard channel.followsPrereleases, let test else { return stable }
         let stableVersion = try SoftwareVersion(stable.version), testVersion = try SoftwareVersion(test.version)
         return testVersion > stableVersion ? test : stable
     }
@@ -310,7 +310,7 @@ private actor GatedService: SoftwareUpdateServing {
     func latest(channel: SoftwareUpdateChannel) async throws -> SoftwareRelease {
         calls += 1
         if calls == 1 { await withCheckedContinuation { gate = $0 } }
-        return channel.allowsTestBuilds ? test : stable
+        return channel.followsPrereleases ? test : stable
     }
 
     func download(_ release: SoftwareRelease, cacheDirectory: URL,
@@ -618,7 +618,8 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         for text in valid {
             let parsed = try SoftwareVersion(text)
             _ = try SoftwareVersion(tag: "v" + text)
-            check(parsed.isTest == text.contains("-test."), "test grammar only for -test.B: \(text)")
+            check(parsed.isTest == text.contains("-test.") && parsed.isDev == text.contains("-dev."),
+                  "prerelease grammar matches the marker: \(text)")
         }
         for text in invalid {
             rejects("reject invalid version \(text.debugDescription)") { _ = try SoftwareVersion(text) }
@@ -654,20 +655,20 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
     }
 
     static func testReleaseParserChecks() throws {
-        let expected = fixtureRelease(version: "0.2.1-test.70", build: 70, branch: "feat/update-channel")
-        check(expected.isTest && expected.channel == "test" && expected.branch == "feat/update-channel", "test fixture shape")
+        let expected = fixtureRelease(version: "0.2.1-dev.70", build: 70, branch: "feat/update-channel")
+        check(expected.isDev && expected.channel == "dev" && expected.branch == "feat/update-channel", "dev fixture shape")
         try expected.validate()
         let (release, manifest) = fixtureObjects(expected)
-        check(release["prerelease"] as? Bool == true && manifest["channel"] as? String == "test"
+        check(release["prerelease"] as? Bool == true && manifest["channel"] as? String == "dev"
               && manifest["base_version"] as? String == "0.2.1", "test fixture objects")
         rejects("the stable-only rule refuses a test pre-release") { _ = try SoftwareReleaseParser.manifestURL(releaseData: json(release)) }
         rejects("the stable-only parse refuses a test pre-release") {
             _ = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(manifest))
         }
-        let manifestURL = try SoftwareReleaseParser.manifestURL(releaseData: json(release), channel: .test)
+        let manifestURL = try SoftwareReleaseParser.manifestURL(releaseData: json(release), channel: .dev)
         check(manifestURL == SoftwareUpdateSource.assetURL(tag: expected.tag, name: "manifest.json"), "test manifest URL")
-        let decoded = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(manifest), channel: .test)
-        check(decoded == expected && decoded.channel == "test" && decoded.branch == "feat/update-channel"
+        let decoded = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(manifest), channel: .dev)
+        check(decoded == expected && decoded.channel == "dev" && decoded.branch == "feat/update-channel"
               && decoded.buildNumber == 70, "test manifest keeps channel, branch and the build number")
 
         // Release-level identity: tag form, draft flag, pre-release flag and release page must agree.
@@ -684,12 +685,12 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         }
         for (label, changed) in releaseChanges {
             rejects("reject release: \(label)") {
-                _ = try SoftwareReleaseParser.parse(releaseData: json(changed), manifestData: json(manifest), channel: .test)
+                _ = try SoftwareReleaseParser.parse(releaseData: json(changed), manifestData: json(manifest), channel: .dev)
             }
         }
         var stableWithPrerelease = fixtureObjects(fixtureRelease()).0; stableWithPrerelease["prerelease"] = true
         rejects("a stable tag marked as pre-release") {
-            _ = try SoftwareReleaseParser.manifestURL(releaseData: json(stableWithPrerelease), channel: .test)
+            _ = try SoftwareReleaseParser.manifestURL(releaseData: json(stableWithPrerelease), channel: .dev)
         }
 
         // Manifest-level identity of a test build.
@@ -719,13 +720,13 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         }
         for (label, changed) in manifestChanges {
             rejects("reject manifest: \(label)") {
-                _ = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(changed), channel: .test)
+                _ = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(changed), channel: .dev)
             }
         }
         var displayBranch = manifest; displayBranch["branch"] = String(repeating: "a", count: 100)
-        _ = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(displayBranch), channel: .test)
+        _ = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(displayBranch), channel: .dev)
         var spacedBranch = manifest; spacedBranch["branch"] = "feat/a b~"
-        _ = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(spacedBranch), channel: .test)
+        _ = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(spacedBranch), channel: .dev)
 
         // A stable manifest must not claim to be a test build, and a stable record carries no test fields.
         let (stableRelease, stableManifest) = fixtureObjects(fixtureRelease())
@@ -757,9 +758,9 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
 
     static func channelServiceChecks() async throws {
         let stable = fixtureRelease(version: "0.2.0", build: 10)
-        let older = fixtureRelease(version: "0.2.1-test.9", build: 9, branch: "feat/older")
-        let newest = fixtureRelease(version: "0.2.1-test.70", build: 70, branch: "feat/newest")
-        let newerBase = fixtureRelease(version: "0.3.0-test.5", build: 5, branch: "feat/base")
+        let older = fixtureRelease(version: "0.2.1-dev.9", build: 9, branch: "feat/older")
+        let newest = fixtureRelease(version: "0.2.1-dev.70", build: 70, branch: "feat/newest")
+        let newerBase = fixtureRelease(version: "0.3.0-dev.5", build: 5, branch: "feat/base")
         let released = fixtureRelease(version: "0.2.1", build: 75)
         let latestURL = SoftwareUpdateSource.latestURL, listURL = SoftwareUpdateSource.releaseListURL
         func manifestURL(_ release: SoftwareRelease) -> URL {
@@ -768,24 +769,24 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
 
         // The newest test pre-release beats an older stable release; builds sort numerically (70 above 9).
         let transport = try ChannelTransport(stable: stable, listed: [stable, older, newest])
-        let selected = try await GitHubSoftwareUpdateService(transport: transport).latest(channel: .test)
+        let selected = try await GitHubSoftwareUpdateService(transport: transport).latest(channel: .dev)
         check(selected == newest, "channel on: the newest test pre-release wins")
         check(transport.requested == [latestURL, listURL, manifestURL(newest)],
               "channel on: stable answer, release list, then only the winner's manifest")
         check(transport.apiRequests == 2, "channel on: two API requests")
         check(transport.requested.allSatisfy { SoftwareUpdateSource.isTransportURLAllowed($0) }, "every request is on the transport whitelist")
         let reversed = try ChannelTransport(stable: stable, listed: [newest, older, stable])
-        let sameWinner = try await GitHubSoftwareUpdateService(transport: reversed).latest(channel: .test)
+        let sameWinner = try await GitHubSoftwareUpdateService(transport: reversed).latest(channel: .dev)
         check(sameWinner == newest, "the list order does not matter")
 
         // A higher base wins whatever its build number; the build rule belongs to the update decision.
         let baseTransport = try ChannelTransport(stable: stable, listed: [newest, newerBase])
-        let baseWinner = try await GitHubSoftwareUpdateService(transport: baseTransport).latest(channel: .test)
+        let baseWinner = try await GitHubSoftwareUpdateService(transport: baseTransport).latest(channel: .dev)
         check(baseWinner == newerBase, "a higher base version wins")
 
         // A stable release above every test build wins, and it equals the channel-off answer.
         let stableTransport = try ChannelTransport(stable: released, listed: [older, newest, released])
-        let stableWinner = try await GitHubSoftwareUpdateService(transport: stableTransport).latest(channel: .test)
+        let stableWinner = try await GitHubSoftwareUpdateService(transport: stableTransport).latest(channel: .dev)
         check(stableWinner == released && stableWinner.channel == nil, "channel on: the stable release can win")
         check(stableTransport.requested == [latestURL, listURL, manifestURL(released)], "the losing test manifest is never read")
         let offTransport = try ChannelTransport(stable: released, listed: [older, newest, released])
@@ -796,7 +797,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
 
         // No test pre-release at all.
         let plainTransport = try ChannelTransport(stable: stable, listed: [stable])
-        let plain = try await GitHubSoftwareUpdateService(transport: plainTransport).latest(channel: .test)
+        let plain = try await GitHubSoftwareUpdateService(transport: plainTransport).latest(channel: .dev)
         check(plain == stable && plainTransport.requested == [latestURL, listURL, manifestURL(stable)], "no test pre-release: stable")
 
         // Entries that are not published test pre-releases are ignored, whatever their version.
@@ -811,26 +812,26 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         }
         let ignored = try ChannelTransport(stable: stable, listed: [older])
         let unusable: [Any] = [
-            entry("0.9.0-test.999", build: 999) { $0["draft"] = true },
-            entry("0.8.0-test.998", build: 998) { $0["prerelease"] = false },
+            entry("0.9.0-dev.999", build: 999) { $0["draft"] = true },
+            entry("0.8.0-dev.998", build: 998) { $0["prerelease"] = false },
             entry("0.7.0", build: 997) { $0["prerelease"] = true },
-            entry("0.6.0-test.996", build: 996, tag: "v0.6.0-rc.1"),
-            entry("0.5.0-test.995", build: 995, tag: "v0.5.0-test.0"),
-            entry("0.5.1-test.995", build: 995, tag: "nightly"),
-            entry("0.4.0-test.994", build: 994) { $0["html_url"] = "https://github.com/other/repo/releases/tag/v0.4.0-test.994" },
+            entry("0.6.0-dev.996", build: 996, tag: "v0.6.0-rc.1"),
+            entry("0.5.0-dev.995", build: 995, tag: "v0.5.0-dev.0"),
+            entry("0.5.1-dev.995", build: 995, tag: "nightly"),
+            entry("0.4.0-dev.994", build: 994) { $0["html_url"] = "https://github.com/other/repo/releases/tag/v0.4.0-dev.994" },
             ["unexpected": 1] as [String: Any],
             "not a release" as Any]
         ignored.listEntries = unusable + [fixtureObjects(older).0 as Any]
-        let usable = try await GitHubSoftwareUpdateService(transport: ignored).latest(channel: .test)
+        let usable = try await GitHubSoftwareUpdateService(transport: ignored).latest(channel: .dev)
         check(usable == older, "drafts, mismatched flags, unknown tags and malformed entries are ignored")
         let listBytes = try JSONSerialization.data(withJSONObject: ignored.listEntries)
-        let newestTag = try SoftwareReleaseParser.newestPrereleaseTag(listData: listBytes, channel: .test)
-        check(newestTag == "v0.2.1-test.9", "newest valid test tag in the list")
-        let unusableTag = try SoftwareReleaseParser.newestPrereleaseTag(listData: JSONSerialization.data(withJSONObject: unusable), channel: .test)
+        let newestTag = try SoftwareReleaseParser.newestPrereleaseTag(listData: listBytes, channel: .dev)
+        check(newestTag == "v0.2.1-dev.9", "newest valid test tag in the list")
+        let unusableTag = try SoftwareReleaseParser.newestPrereleaseTag(listData: JSONSerialization.data(withJSONObject: unusable), channel: .dev)
         check(unusableTag == nil, "no valid test pre-release in a list of unusable entries")
-        rejects("a list that is not an array") { _ = try SoftwareReleaseParser.newestPrereleaseTag(listData: Data("{}".utf8), channel: .test) }
+        rejects("a list that is not an array") { _ = try SoftwareReleaseParser.newestPrereleaseTag(listData: Data("{}".utf8), channel: .dev) }
         rejects("an oversize release list") {
-            _ = try SoftwareReleaseParser.newestPrereleaseTag(listData: Data(repeating: 32, count: SoftwareUpdateSource.releaseListLimit + 1), channel: .test)
+            _ = try SoftwareReleaseParser.newestPrereleaseTag(listData: Data(repeating: 32, count: SoftwareUpdateSource.releaseListLimit + 1), channel: .dev)
         }
 
         // A broken winner is an error, never a silent fall back to another candidate.
@@ -840,32 +841,32 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
             ("channel missing", { $0["channel"] = nil }),
             ("base version", { $0["base_version"] = "0.2.2" }),
             ("branch missing", { $0["branch"] = nil }),
-            ("tag", { $0["tag"] = "v0.2.1-test.71" })]
+            ("tag", { $0["tag"] = "v0.2.1-dev.71" })]
         for (label, change) in breaks {
             let broken = try ChannelTransport(stable: stable, listed: [older, newest])
             var manifest = fixtureObjects(newest).1; change(&manifest)
             broken.manifests[manifestURL(newest)] = try json(manifest)
             let service = GitHubSoftwareUpdateService(transport: broken)
-            await rejectsAsync("winner manifest: \(label)") { _ = try await service.latest(channel: .test) }
+            await rejectsAsync("winner manifest: \(label)") { _ = try await service.latest(channel: .dev) }
             check(!broken.requested.contains(manifestURL(stable)) && !broken.requested.contains(manifestURL(older)),
                   "no fallback after a bad winner manifest: \(label)")
         }
         let missing = try ChannelTransport(stable: stable, listed: [older, newest])
         missing.manifests[manifestURL(newest)] = nil
         let missingService = GitHubSoftwareUpdateService(transport: missing)
-        await rejectsAsync("winner manifest cannot be read") { _ = try await missingService.latest(channel: .test) }
+        await rejectsAsync("winner manifest cannot be read") { _ = try await missingService.latest(channel: .dev) }
         check(!missing.requested.contains(manifestURL(stable)), "no fallback when the winner's manifest is unreadable")
 
         // Any failing request fails the whole check: no partial result.
         let noLatest = try ChannelTransport(stable: stable, listed: [newest])
         noLatest.failing = [latestURL]
         let noLatestService = GitHubSoftwareUpdateService(transport: noLatest)
-        await rejectsAsync("stable answer fails") { _ = try await noLatestService.latest(channel: .test) }
+        await rejectsAsync("stable answer fails") { _ = try await noLatestService.latest(channel: .dev) }
         check(noLatest.requested == [latestURL], "a failing stable answer ends the check at once")
         let noList = try ChannelTransport(stable: stable, listed: [newest])
         noList.failing = [listURL]
         let noListService = GitHubSoftwareUpdateService(transport: noList)
-        await rejectsAsync("release list fails") { _ = try await noListService.latest(channel: .test) }
+        await rejectsAsync("release list fails") { _ = try await noListService.latest(channel: .dev) }
         check(noList.requested == [latestURL, listURL], "a failing release list ends the check before any manifest")
         let noLatestOff = try ChannelTransport(stable: stable, listed: [])
         noLatestOff.failing = [latestURL]
@@ -876,7 +877,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         let wrongLatest = try ChannelTransport(stable: stable, listed: [newest])
         wrongLatest.latestObject = fixtureObjects(newest).0
         let wrongLatestService = GitHubSoftwareUpdateService(transport: wrongLatest)
-        await rejectsAsync("a test build as the latest stable release") { _ = try await wrongLatestService.latest(channel: .test) }
+        await rejectsAsync("a test build as the latest stable release") { _ = try await wrongLatestService.latest(channel: .dev) }
         await rejectsAsync("a test build as the latest stable release, channel off") { _ = try await wrongLatestService.latest(channel: .stable) }
     }
 
@@ -885,38 +886,38 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
     static func armPackageChecks() throws {
         check(SoftwareUpdateSource.macArchitectures == ["arm64"], "the Mac architecture set is arm64 only")
         check(SoftwareUpdateSource.macPackageName(version: "0.3.0") == "KaneoPilot-0.3.0-macos-arm64.dmg"
-              && SoftwareUpdateSource.macPackageName(version: "0.3.0-test.80") == "KaneoPilot-0.3.0-test.80-macos-arm64.dmg",
+              && SoftwareUpdateSource.macPackageName(version: "0.3.0-dev.80") == "KaneoPilot-0.3.0-dev.80-macos-arm64.dmg",
               "the Mac package carries the arm64 suffix")
-        for version in ["0.2.0", "0.3.0-test.80"] {
-            let isTest = version.contains("-test.")
-            let expected = fixtureRelease(version: version, build: isTest ? 80 : 10)
+        for version in ["0.2.0", "0.3.0-dev.80"] {
+            let isPrerelease = version.contains("-dev.")
+            let expected = fixtureRelease(version: version, build: isPrerelease ? 80 : 10)
             check(expected.name == "KaneoPilot-\(version)-macos-arm64.dmg", "the fixture names the arm64 package: \(version)")
             try expected.validate()
             let (release, manifest) = fixtureObjects(expected)
-            let parsed = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(manifest), channel: isTest ? .test : .stable)
+            let parsed = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(manifest), channel: isPrerelease ? .dev : .stable)
             check(parsed == expected, "an arm64 release parses: \(version)")
 
             rejects("a Universal record: \(version)") { try retiredUniversalRecord(expected).validate() }
             let (universalRelease, universalManifest) = retiredUniversalObjects(expected)
             rejects("a Universal release: \(version)") {
-                _ = try SoftwareReleaseParser.parse(releaseData: json(universalRelease), manifestData: json(universalManifest), channel: isTest ? .test : .stable)
+                _ = try SoftwareReleaseParser.parse(releaseData: json(universalRelease), manifestData: json(universalManifest), channel: isPrerelease ? .dev : .stable)
             }
             var onlyUniversalAsset = release
             onlyUniversalAsset["assets"] = universalRelease["assets"]
             rejects("only the Universal package on the release page: \(version)") {
-                _ = try SoftwareReleaseParser.parse(releaseData: json(onlyUniversalAsset), manifestData: json(manifest), channel: isTest ? .test : .stable)
+                _ = try SoftwareReleaseParser.parse(releaseData: json(onlyUniversalAsset), manifestData: json(manifest), channel: isPrerelease ? .dev : .stable)
             }
             var universalNamed = manifest
             universalNamed["artifacts"] = universalManifest["artifacts"]
             rejects("a Universal package named in the manifest: \(version)") {
-                _ = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(universalNamed), channel: isTest ? .test : .stable)
+                _ = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(universalNamed), channel: isPrerelease ? .dev : .stable)
             }
             for architectures in [["arm64", "x86_64"], ["x86_64", "arm64"], ["x86_64"], ["arm64", "arm64"], ["ARM64"], [String]()] {
                 var changed = manifest
                 var artifacts = changed["artifacts"] as! [[String: Any]]
                 artifacts[0]["architectures"] = architectures; changed["artifacts"] = artifacts
                 rejects("architectures \(architectures): \(version)") {
-                    _ = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(changed), channel: isTest ? .test : .stable)
+                    _ = try SoftwareReleaseParser.parse(releaseData: json(release), manifestData: json(changed), channel: isPrerelease ? .dev : .stable)
                 }
             }
         }
@@ -926,14 +927,14 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
     /// like, so the retired Universal releases never turn a check into an error and are never read.
     static func versionFirstServiceChecks() async throws {
         let retired = fixtureRelease(version: "0.2.0", build: 10)
-        let retiredTest = fixtureRelease(version: "0.3.0-test.75", build: 75, branch: "feat/update-channel")
-        let test80 = fixtureRelease(version: "0.3.0-test.80", build: 80, branch: "feat/update-channel")
+        let retiredTest = fixtureRelease(version: "0.3.0-dev.75", build: 75, branch: "feat/update-channel")
+        let test80 = fixtureRelease(version: "0.3.0-dev.80", build: 80, branch: "feat/update-channel")
         let release030 = fixtureRelease(version: "0.3.0", build: 90)
         let latestURL = SoftwareUpdateSource.latestURL, listURL = SoftwareUpdateSource.releaseListURL
         func manifestURL(_ release: SoftwareRelease) -> URL {
             SoftwareUpdateSource.assetURL(tag: release.tag, name: "manifest.json")
         }
-        let installed = try SoftwareVersion("0.3.0-test.76")
+        let installed = try SoftwareVersion("0.3.0-dev.76")
 
         // The latest stable release is the Universal v0.2.0, older than the installed build: no update, manifest unread.
         let stableOnly = try ChannelTransport(stable: retired, listed: [])
@@ -949,7 +950,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         try serveRetired(retired, in: channelOn)
         try serveRetired(retiredTest, in: channelOn, listIndex: 0)
         let olderBuilds = try await GitHubSoftwareUpdateService(transport: channelOn)
-            .latestUpdate(channel: .test, newerThan: installed)
+            .latestUpdate(channel: .dev, newerThan: installed)
         check(olderBuilds == nil && channelOn.requested == [latestURL, listURL],
               "channel on: older Universal builds are no update and no manifest is read")
 
@@ -958,7 +959,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         try serveRetired(retired, in: newer)
         try serveRetired(retiredTest, in: newer, listIndex: 0)
         let offered = try await GitHubSoftwareUpdateService(transport: newer)
-            .latestUpdate(channel: .test, newerThan: installed)
+            .latestUpdate(channel: .dev, newerThan: installed)
         check(offered == test80 && newer.requested == [latestURL, listURL, manifestURL(test80)],
               "channel on: a newer arm64 test build is offered and the Universal manifests stay unread")
         check(newer.requested.allSatisfy { SoftwareUpdateSource.isTransportURLAllowed($0) }, "every request is on the transport whitelist")
@@ -993,8 +994,8 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
     @MainActor static func versionFirstManagerChecks(root: URL) async throws {
         let releaseKey = "softwareUpdate.release", channelKey = "softwareUpdate.channel"
         let retired = fixtureRelease(version: "0.2.0", build: 10)
-        let retiredTest = fixtureRelease(version: "0.3.0-test.75", build: 75, branch: "feat/update-channel")
-        let test80 = fixtureRelease(version: "0.3.0-test.80", build: 80, branch: "feat/update-channel")
+        let retiredTest = fixtureRelease(version: "0.3.0-dev.75", build: 75, branch: "feat/update-channel")
+        let test80 = fixtureRelease(version: "0.3.0-dev.80", build: 80, branch: "feat/update-channel")
         let latestURL = SoftwareUpdateSource.latestURL, listURL = SoftwareUpdateSource.releaseListURL
         let fm = FileManager.default
 
@@ -1011,7 +1012,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         @MainActor func makeManager(_ name: String, _ service: any SoftwareUpdateServing,
                                     defaults: UserDefaults) -> SoftwareUpdateManager {
             SoftwareUpdateManager(service: service, installer: FixtureInstaller(), defaults: defaults,
-                currentVersion: "0.3.0-test.76", currentBuild: "76",
+                currentVersion: "0.3.0-dev.76", currentBuild: "76",
                 targetURL: root.appendingPathComponent("arm-target-\(name)/KaneoPilot.app"),
                 cacheURL: root.appendingPathComponent("arm-\(name)", isDirectory: true),
                 allowsNetwork: true, requestTermination: { })
@@ -1039,7 +1040,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         let oldLine = try ChannelTransport(stable: retired, listed: [retiredTest])
         try serveRetired(retired, in: oldLine)
         try serveRetired(retiredTest, in: oldLine, listIndex: 0)
-        let oldDefaults = freshDefaults(channel: .test)
+        let oldDefaults = freshDefaults(channel: .dev)
         let old = makeManager("old-line", GitHubSoftwareUpdateService(transport: oldLine), defaults: oldDefaults)
         let universalFolder = try save(retiredUniversalRecord(retiredTest), in: oldDefaults, cache: old.cacheURL)
         await old.restoreCachedRelease()
@@ -1051,9 +1052,9 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
               "channel on: the retired Universal builds leave the installed arm64 build current")
 
         // A saved arm64 candidate that the installed build has caught up with is dropped the same way.
-        let caughtDefaults = freshDefaults(channel: .test)
+        let caughtDefaults = freshDefaults(channel: .dev)
         let caught = makeManager("caught-up", ChannelService(stable: retired), defaults: caughtDefaults)
-        let caughtFolder = try save(fixtureRelease(version: "0.3.0-test.75", build: 75, branch: "feat/update-channel"),
+        let caughtFolder = try save(fixtureRelease(version: "0.3.0-dev.75", build: 75, branch: "feat/update-channel"),
                                     in: caughtDefaults, cache: caught.cacheURL)
         await caught.restoreCachedRelease()
         check(caught.release == nil && caught.phase == .idle && caught.errorMessage == nil
@@ -1061,7 +1062,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
               "a saved candidate that is not newer than the installed build is dropped with its package")
 
         // A saved arm64 candidate above the installed build still comes back verified.
-        let keptDefaults = freshDefaults(channel: .test)
+        let keptDefaults = freshDefaults(channel: .dev)
         let kept = makeManager("kept", ChannelService(stable: retired), defaults: keptDefaults)
         let keptFolder = try save(test80, in: keptDefaults, cache: kept.cacheURL)
         await kept.restoreCachedRelease()
@@ -1073,7 +1074,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         let offer = try ChannelTransport(stable: retired, listed: [retiredTest, test80])
         try serveRetired(retired, in: offer)
         try serveRetired(retiredTest, in: offer, listIndex: 0)
-        let offering = makeManager("offer", GitHubSoftwareUpdateService(transport: offer), defaults: freshDefaults(channel: .test))
+        let offering = makeManager("offer", GitHubSoftwareUpdateService(transport: offer), defaults: freshDefaults(channel: .dev))
         offering.automaticallyDownloads = false
         await offering.check()
         check(offering.phase == .available && offering.release == test80 && offering.errorMessage == nil
@@ -1085,11 +1086,11 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
     /// KP-U02: the opt-in switch, its effect on checking, downloading and installing, and the races around it.
     @MainActor static func channelManagerChecks(root: URL) async throws {
         let releaseKey = "softwareUpdate.release", channelKey = "softwareUpdate.channel"
-        let closeNotice = "更新通道已收窄，已移除待安装的测试版。"
+        let closeNotice = "更新通道已收窄，已移除待安装的开发版。"
         let stable = fixtureRelease(version: "0.2.0", build: 10)
         let released = fixtureRelease(version: "0.2.1", build: 75)
-        let test70 = fixtureRelease(version: "0.2.1-test.70", build: 70, branch: "feat/update-channel")
-        let test71 = fixtureRelease(version: "0.2.1-test.71", build: 71, branch: "feat/update-channel")
+        let test70 = fixtureRelease(version: "0.2.1-dev.70", build: 70, branch: "feat/update-channel")
+        let test71 = fixtureRelease(version: "0.2.1-dev.71", build: 71, branch: "feat/update-channel")
         let fm = FileManager.default
 
         var suites: [String] = []
@@ -1125,11 +1126,11 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
 
         // Preferences: the test channel is the default, persisted, and never active in a development preview.
         let plain = makeManager("defaults", ChannelService(stable: stable, test: test70))
-        check(plain.channel == .test && plain.prereleaseChannelActive && plain.canChangeChannel,
+        check(plain.channel == .dev && plain.prereleaseChannelActive && plain.canChangeChannel,
               "the test channel is the default")
         let previewService = ChannelService(stable: stable, test: test70)
-        let preview = makeManager("preview", previewService, channel: .test, version: "0.0.0", build: "1")
-        check(preview.channel == .test && !preview.prereleaseChannelActive && !preview.canChangeChannel,
+        let preview = makeManager("preview", previewService, channel: .dev, version: "0.0.0", build: "1")
+        check(preview.channel == .dev && !preview.prereleaseChannelActive && !preview.canChangeChannel,
               "a development preview keeps the stored value but never takes part")
         await preview.check()
         check(previewService.flags == [.stable] && preview.release == stable && preview.phase == .available
@@ -1140,8 +1141,8 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         let persistDefaults = freshDefaults(channel: .stable)
         let writer = makeManager("persist-a", ChannelService(stable: stable), defaults: persistDefaults)
         writer.automaticallyChecks = false
-        writer.channel = .test
-        check(persistDefaults.string(forKey: channelKey) == "test", "turning the channel on is saved")
+        writer.channel = .dev
+        check(persistDefaults.string(forKey: channelKey) == "dev", "turning the channel on is saved")
         let reader = makeManager("persist-b", ChannelService(stable: stable), defaults: persistDefaults)
         check(reader.channel != .stable && reader.prereleaseChannelActive, "a new App start reads the choice back")
         writer.channel = .stable
@@ -1155,35 +1156,35 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
               "channel off: the stable release is checked and downloaded")
         check(off.statusText == "更新已下载并校验，等待安装", "channel off: stable ready text")
         let onService = ChannelService(stable: stable, test: test70)
-        let on = makeManager("on", onService, channel: .test)
+        let on = makeManager("on", onService, channel: .dev)
         on.automaticallyDownloads = false
         await on.check()
-        check(onService.flags == [.test] && on.release == test70 && on.phase == .available
+        check(onService.flags == [.dev] && on.release == test70 && on.phase == .available
               && on.canDownload && !on.canInstall, "channel on: the newer test build is offered")
-        check(on.statusText == "发现测试版 0.2.1-test.70", "available test build text")
+        check(on.statusText == "发现开发版 0.2.1-dev.70", "available test build text")
         await on.download()
         check(on.phase == .ready && on.canInstall && on.downloadedPackage == test70.packageURL(in: on.cacheURL),
               "the test build downloads into its own package folder")
-        check(on.statusText == "0.2.1-test.70（测试版）已下载并校验", "ready test build text")
+        check(on.statusText == "0.2.1-dev.70（开发版）已下载并校验", "ready test build text")
 
         // The update decision at the manager follows the shared rule, including build numbers.
         typealias Rule = (name: String, installed: String, build: String, channelOn: Bool,
                           stable: SoftwareRelease, test: SoftwareRelease?, offered: SoftwareRelease?)
         let rules: [Rule] = [
-            ("installed test, next test", "0.2.1-test.70", "70", true, stable, test71, test71),
-            ("installed test, same test", "0.2.1-test.71", "71", true, stable, test71, nil),
-            ("installed test with a non-integer build", "0.2.1-test.70", "abc", true, stable, test71, nil),
+            ("installed test, next test", "0.2.1-dev.70", "70", true, stable, test71, test71),
+            ("installed test, same test", "0.2.1-dev.71", "71", true, stable, test71, nil),
+            ("installed test with a non-integer build", "0.2.1-dev.70", "abc", true, stable, test71, nil),
             ("installed stable, test of the same base", "0.2.1", "75", true, stable, test70, nil),
-            ("installed test, stable of the same base", "0.2.1-test.70", "70", true, released, test71, released),
-            ("installed test, stable built earlier", "0.2.1-test.70", "70", true,
+            ("installed test, stable of the same base", "0.2.1-dev.70", "70", true, released, test71, released),
+            ("installed test, stable built earlier", "0.2.1-dev.70", "70", true,
              fixtureRelease(version: "0.2.1", build: 60), nil, nil),
-            ("channel off, installed test, newer stable", "0.2.1-test.70", "70", false, released, test71, released),
-            ("channel off, installed test, lower stable", "0.2.1-test.70", "70", false, stable, test71, nil),
+            ("channel off, installed test, newer stable", "0.2.1-dev.70", "70", false, released, test71, released),
+            ("channel off, installed test, lower stable", "0.2.1-dev.70", "70", false, stable, test71, nil),
             ("installed stable, test with a newer build", "0.2.0", "10", true, stable, test70, test70),
             ("installed stable, test with an older build", "0.2.0", "80", true, stable, test70, nil)]
         for (index, rule) in rules.enumerated() {
             let ruled = makeManager("rule-\(index)", ChannelService(stable: rule.stable, test: rule.test),
-                                    channel: rule.channelOn ? .test : .stable,
+                                    channel: rule.channelOn ? .dev : .stable,
                                     version: rule.installed, build: rule.build)
             ruled.automaticallyDownloads = false
             await ruled.check()
@@ -1194,8 +1195,8 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
             }
         }
         let installedTest = makeManager("installed-test", ChannelService(stable: stable), channel: .stable,
-                                        version: "0.2.1-test.70", build: "70")
-        check(installedTest.installedIsTestBuild && !installedTest.prereleaseChannelActive && !on.installedIsTestBuild,
+                                        version: "0.2.1-dev.70", build: "70")
+        check(installedTest.installedIsPrerelease && !installedTest.prereleaseChannelActive && !on.installedIsPrerelease,
               "an installed test build is recognised, whatever the switch says")
         let rogue = makeManager("rogue", HeldDownloadService(release: test70), channel: .stable)
         await rogue.check()
@@ -1203,7 +1204,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
               "a test build is never accepted while the channel is off")
 
         // Closing the channel withdraws a pending test build: candidate, package and saved record.
-        let closeDefaults = freshDefaults(channel: .test)
+        let closeDefaults = freshDefaults(channel: .dev)
         let closeService = ChannelService(stable: stable, test: test70)
         let closing = makeManager("closing", closeService, defaults: closeDefaults)
         await closing.check()
@@ -1218,26 +1219,26 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
               "closing the channel removes the package and the saved record")
         check(closing.statusText == closeNotice, "closing the channel explains the withdrawal")
         await closing.check()
-        check(closeService.flags == [.test, .stable] && closing.release == stable && closing.channelNotice == nil,
+        check(closeService.flags == [.dev, .stable] && closing.release == stable && closing.channelNotice == nil,
               "the next check follows the stable channel only")
         let keepService = ChannelService(stable: released, test: test70)
-        let keeping = makeManager("keeping", keepService, channel: .test)
+        let keeping = makeManager("keeping", keepService, channel: .dev)
         await keeping.check()
         check(keeping.release == released && keeping.phase == .ready, "the stable release beats a test build of its own base")
         keeping.channel = .stable
         check(keeping.release == released && keeping.phase == .ready && keeping.downloadedPackage != nil
               && keeping.channelNotice == nil, "closing the channel leaves a stable candidate alone")
-        let noticed = makeManager("noticed", ChannelService(stable: stable, test: test70), channel: .test)
+        let noticed = makeManager("noticed", ChannelService(stable: stable, test: test70), channel: .dev)
         await noticed.check()
         noticed.automaticallyChecks = false
         noticed.channel = .stable
         check(noticed.statusText == closeNotice, "the notice replaces the idle status")
-        noticed.channel = .test
+        noticed.channel = .dev
         check(noticed.channelNotice == nil && noticed.statusText == "尚未检查更新", "turning the channel on again clears the notice")
 
         // Closing the channel stops the running download of a test build.
         let held = HeldDownloadService(release: test70)
-        let holder = makeManager("held", held, channel: .test)
+        let holder = makeManager("held", held, channel: .dev)
         holder.automaticallyDownloads = false
         await holder.check()
         check(holder.phase == .available && holder.release == test70, "the held fixture offers a test build")
@@ -1254,7 +1255,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
 
         // Switching the channel while a check runs: the old answer is dropped, the next check follows the new setting.
         let closeGate = GatedService(stable: stable, test: test70)
-        let gatedClose = makeManager("gated-close", closeGate, channel: .test)
+        let gatedClose = makeManager("gated-close", closeGate, channel: .dev)
         gatedClose.automaticallyDownloads = false
         let closeCheck = Task { @MainActor in await gatedClose.check() }
         let closeWaiting = await eventually { await closeGate.isWaiting() }
@@ -1275,7 +1276,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         let openCheck = Task { @MainActor in await gatedOpen.check() }
         let openWaiting = await eventually { await openGate.isWaiting() }
         check(openWaiting && gatedOpen.phase == .checking, "the stable check is running")
-        gatedOpen.channel = .test
+        gatedOpen.channel = .dev
         // The check that turning the channel on starts finds the running one and ends at once.
         for _ in 0..<5 { await Task.yield() }
         await openGate.open()
@@ -1288,7 +1289,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         let prepInstaller = GatedInstaller()
         var prepTerminations = 0
         let preparing = makeManager("preparing", ChannelService(stable: stable, test: test70), installer: prepInstaller,
-                                    channel: .test, requestTermination: { prepTerminations += 1 })
+                                    channel: .dev, requestTermination: { prepTerminations += 1 })
         await preparing.check()
         check(preparing.phase == .ready && preparing.release == test70, "the test build is ready to install")
         let preparation = Task { @MainActor in await preparing.installAndRestart() }
@@ -1303,7 +1304,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         let exitInstaller = FixtureInstaller()
         var exitTerminations = 0
         let exiting = makeManager("exiting", ChannelService(stable: stable, test: test70), installer: exitInstaller,
-                                  channel: .test, requestTermination: { exitTerminations += 1 })
+                                  channel: .dev, requestTermination: { exitTerminations += 1 })
         await exiting.check()
         await exiting.installAndRestart()
         check(exiting.phase == .waitingForExit && exiting.pendingInstallation != nil && exitTerminations == 1
@@ -1323,28 +1324,28 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         switching.automaticallyDownloads = false
         await switching.check()
         check(switchService.flags == [.stable] && switching.release == stable, "the switch fixture starts on the stable channel")
-        switching.channel = .test
-        let switched = await eventually { switchService.flags == [.stable, .test] && switching.release == test70 }
+        switching.channel = .dev
+        let switched = await eventually { switchService.flags == [.stable, .dev] && switching.release == test70 }
         check(switched && switching.phase == .available, "turning the channel on looks for test builds at once")
-        switching.channel = .test
+        switching.channel = .dev
         for _ in 0..<5 { await Task.yield() }
-        check(switchService.flags == [.stable, .test], "setting the same value again does not check again")
+        check(switchService.flags == [.stable, .dev], "setting the same value again does not check again")
         switching.channel = .stable
         check(switching.release == nil && switching.phase == .idle, "closing withdraws the offered test build")
         await switching.checkIfDue()
-        check(switchService.flags == [.stable, .test, .stable] && switching.release == stable,
+        check(switchService.flags == [.stable, .dev, .stable] && switching.release == stable,
               "after closing, the next due check finds the stable release again")
         let quietService = ChannelService(stable: stable, test: test70)
         let quiet = makeManager("quiet", quietService)
         quiet.automaticallyChecks = false
-        quiet.channel = .test
+        quiet.channel = .dev
         for _ in 0..<5 { await Task.yield() }
         check(quietService.flags.isEmpty && quiet.prereleaseChannelActive, "with automatic checking off, nothing is checked by itself")
         await quiet.check()
-        check(quietService.flags == [.test] && quiet.release == test70, "a manual check follows the channel")
+        check(quietService.flags == [.dev] && quiet.release == test70, "a manual check follows the channel")
 
         // A saved test build comes back only while the channel is on, and never in a development preview.
-        let restoreDefaults = freshDefaults(channel: .test)
+        let restoreDefaults = freshDefaults(channel: .dev)
         let producer = makeManager("restore", ChannelService(stable: stable, test: test70), defaults: restoreDefaults)
         await producer.check()
         check(producer.phase == .ready && restoreDefaults.data(forKey: releaseKey) != nil, "a test build was saved")
@@ -1358,7 +1359,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
         check(orphan.release == nil && orphan.phase == .idle && restoreDefaults.data(forKey: releaseKey) == nil
               && !fm.fileExists(atPath: test70.packageURL(in: orphan.cacheURL).deletingLastPathComponent().path),
               "a test build saved while the channel was on is dropped when it is off")
-        let previewRestoreDefaults = freshDefaults(channel: .test)
+        let previewRestoreDefaults = freshDefaults(channel: .dev)
         let previewProducer = makeManager("restore-preview", ChannelService(stable: stable, test: test70),
                                           defaults: previewRestoreDefaults)
         await previewProducer.check()
@@ -1376,7 +1377,7 @@ private actor GatedInstaller: SoftwareUpdateInstalling {
             try Data("old package".utf8).write(to: folder.appendingPathComponent("KaneoPilot.dmg"))
             return folder
         }
-        let cleaning = makeManager("cleanup", ChannelService(stable: stable, test: test70), channel: .test)
+        let cleaning = makeManager("cleanup", ChannelService(stable: stable, test: test70), channel: .dev)
         let cache = cleaning.cacheURL
         try fm.createDirectory(at: cache, withIntermediateDirectories: true)
         let installedFolder = try plant("v0.1.0-\(hex)", in: cache)
