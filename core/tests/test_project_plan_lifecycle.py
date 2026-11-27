@@ -16,6 +16,7 @@ def project(tmp_path, monkeypatch):
     monkeypatch.setenv("KANPILOT_APP_SUPPORT", str(tmp_path / "support"))
     monkeypatch.setenv("KANPILOT_PLAN_ROOT", str(tmp_path / "old-plans"))
     monkeypatch.setattr(cleanup.audit, "_cwd_listing", lambda: [])
+    monkeypatch.setattr(cleanup, "_check_file_users", lambda path: None)
     repo = tmp_path / "MediaPlayer"
     repo.mkdir()
     git(repo, "init", "-q", "-b", "main")
@@ -23,7 +24,7 @@ def project(tmp_path, monkeypatch):
     git(repo, "config", "user.name", "Fixture")
     git(repo, "config", "commit.gpgsign", "false")
     (repo / "README").write_text("base\n")
-    (repo / ".gitignore").write_text("android/local.properties\n")
+    (repo / ".gitignore").write_text("android/local.properties\n.dart_tool/\n")
     git(repo, "add", "README", ".gitignore")
     git(repo, "commit", "-qm", "base")
     conn = db.connect(tmp_path / "test.db")
@@ -88,6 +89,7 @@ def test_merge_cleanup_preserves_plan_and_remote(project):
     git(repo, "remote", "add", "origin", str(remote))
     git(repo, "push", "origin", "main", identity["branch"])
     ref = "refs/remotes/origin/" + identity["branch"]
+    (run / ".dart_tool/hooks_runner/empty/out").mkdir(parents=True)
     (run / "android").mkdir()
     (run / "android" / "local.properties").write_bytes(b"sdk.dir=/fixture/sdk\n")
     (run / ".pi").mkdir()
@@ -127,3 +129,31 @@ def test_registered_old_task_remains_at_its_original_root(project):
     db.update_task(conn, tid, util.now_iso(), extra_json={
         "delivery": {"branch": "kaneo/" + tid, "worktree_path": str(old / tid / "run")}})
     assert pool.project_root(conn, repo, tid) == old
+
+
+def test_selected_historical_task_requires_confirmed_pr_and_exact_head(project, monkeypatch):
+    from kanpilot import cli, core, gh_client
+    repo, conn, tid, _ = project
+    _, _, run, identity = plan_and_merge(project)
+    delivery = core.delivery_of(db.require_task(conn, tid))
+    delivery.pop(cleanup.KEY)
+    url = "https://github.com/example/MediaPlayer/pull/21"
+    delivery.update(pushed_sha=identity["head"], pr_url=url)
+    db.update_task(conn, tid, util.now_iso(), extra_json={"delivery": delivery})
+    git(repo, "remote", "add", "origin", "https://github.com/example/MediaPlayer.git")
+    pr = dict(state="MERGED", mergedAt=identity["merged_at"], number=21, url=url,
+              baseRefName="main", headRefName=identity["branch"], isCrossRepository=False,
+              headRefOid=identity["head"], mergeCommit={"oid": git(repo, "rev-parse", "main")})
+    monkeypatch.setattr(gh_client, "pr_view", lambda *args, **kwargs: pr)
+    args = {"task_id": tid, "expected_head_sha": identity["head"]}
+    db_path = repo.parent / "test.db"
+    def call(**changes):
+        return cli.run("close-merged-worktrees", dict(args, **changes), db_path)
+    assert call()["dry_run"] and run.is_dir()
+    assert cleanup.KEY not in core.delivery_of(db.require_task(conn, tid))
+    with pytest.raises(util.KanpilotError):
+        call(expected_head_sha="0" * 40, confirm=True)
+    assert run.is_dir()
+    result = call(confirm=True)
+    assert len(result["paths"]) == 3 and not run.exists()
+    assert call(confirm=True)["paths"] == result["paths"]

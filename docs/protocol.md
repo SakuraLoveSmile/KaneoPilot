@@ -2072,7 +2072,7 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 
 **项目计划与工作树收尾（KP-WS03）**。统一目录中的新任务使用 `Project Worktree/<仓库名>/managed-worktrees/<task_id>/{plan,run,review}`。原已登记的任务固定在原根；显式配置的独立管理根继续生效。Plus 以阶段树为工作目录、使用任务项目名。Git 仓库保留冻结计划原文；任务分支中的文档在发布计划时写入，重新规划的已冻结工作区延至执行前写入。交付核对文档字节与登记哈希，执行产生的代码和计划走同一条 PR。
 
-新确认合并的标准任务分支登记本地收尾。引擎在维护周期内核实任务完成、关联发布门已通过且没有活动请求，再逐项核对本地 Git 登记、工作目录占用和文件。已知运行材料、构建产物及 Git 忽略的文件逐文件归档核验；遇到独有改动或身份不符时保留现场并记录原因。移除标准阶段树和已用完的发布验证树之后，仅删除与已合并提交一致的本地任务分支。远端分支由仓库维护者管理。
+新确认合并的标准任务分支登记本地收尾。引擎在维护周期内核实任务完成、关联发布门已通过且没有活动请求，再逐项核对本地 Git 登记、工作目录占用和文件。已知运行材料、构建产物及 Git 忽略的文件逐文件归档核验；遇到独有改动或身份不符时保留现场并记录原因。移除标准阶段树和已用完的发布验证树之后，仅删除与已合并提交一致的本地任务分支。远端分支由仓库维护者管理。历史任务可用 `close-merged-worktrees {task_id,expected_head_sha,confirm?}` 单项预览；确认时重读 GitHub 同仓 PR、验证合并提交包含本地来源提交，随后使用相同的归档及删除流程。
 
 **保留与回收**：任务终态满 `worktree_retention_days` 后，把阶段树打包到 `<worktrees_root>/.archives/<task_id>-<YYYYMMDD>.tar.gz`，再删除 `plan/`、`review/`；`run/` 仅按任务已合并、来源分支已清理的既有规则处理。`meta.json` 与 `artifacts/<stage>/<run_id>/` 保留并可重建；删除前逐项复核工作树身份与干净状态，脏树转为隔离而不删除。命令 `worktree-retention {days?,dry_run?:true,confirm?}` 默认只预览，执行要求 `dry_run:false,confirm:true`；回执 scope `worktree-retention`，同操作重放返回 `deduplicated`。引擎在 live tick 中每小时自动执行一次，间隔由 `last_worktree_retention_at` 约束；归档失败或拦截项不中断引擎。
 
