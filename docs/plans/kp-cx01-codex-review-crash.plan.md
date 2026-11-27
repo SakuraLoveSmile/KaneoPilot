@@ -3,7 +3,7 @@
 - 任务：kp-cx01（项目 `personal-kaneopilot`）
 - 分支 / 工作树：`fix/20261127-kp-cx01-codex-native-runner` → `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261127-fix-kp-cx01-codex-native-runner`
 - 合入目标：`main`（PR）
-- 状态：实现中
+- 状态：待体验（云端构建与测试版已发布，等真实 Review 复跑确认）
 - 依据规格：`docs/automation-contract.md`「Claude/Codex Review（包 H）」
 
 ## 1. 现象
@@ -74,8 +74,9 @@ MediaPlayer 任务 `at2yszvfk2ow5uxjfkl1i4uh`（播放页快进快退按钮点�
 - 真实传输：用真实 `codex exec`（空 CODEX_HOME，不调用模型）走新通道，事件流落盘正常、超时按原规则终止（exit −15）、临时 `.stdout` 收尾删除。
 - 云端 core 隔离测试：run `45969002948` 的 10 个 checks 分片（3.11 / 3.13 各 5 片）全部 success。
 - 云端其余门禁：push 触发的 run `45967606355` 在分片 `checks (2, 3.11)` 上因既有偶发用例 `tests/test_process_owner.py::test_pi_owned_shutdown_reaps_term_ignoring_local_cli_before_app_escalation`（pid 文件读到空串）失败，与本次改动无关；同一分片在 `45969002948` 中通过。
-- 测试版发布：（待补）
-- 真实 Review 复跑：（待补，需装上测试版后在真实任务上观察）
+- 测试版：run `45969002948` 全绿（含 macOS 打包、fixtures、codex-platforms 原生沙箱夹具），发布预发布 `v0.6.1-test.504`（commit `a5a54a2`，资产 dmg/apk/manifest/SHA256SUMS）。
+- PR：#34（draft → 合入 main）。
+- 真实 Review 复跑：待装上测试版后在真实任务（MediaPlayer `at2yszvfk2ow5uxjfkl1i4uh`）点击「重新 Review」确认不再出现退出码 101。
 
 ## 8. 遗留与未验证
 
