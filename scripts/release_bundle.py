@@ -447,7 +447,7 @@ def main():
         sub = subs.add_parser(command)
         for name in ("directory", "tag", "source-sha", "build-number"):
             sub.add_argument("--" + name, required=True)
-        sub.add_argument("--channel", choices=("stable", "test"), default="stable")
+        sub.add_argument("--channel", choices=("stable", "test", "dev"), default="stable")
         sub.add_argument("--branch", default="")
     args = parser.parse_args()
     if args.command == "identity":
