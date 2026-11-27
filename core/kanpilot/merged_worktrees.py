@@ -92,8 +92,9 @@ def _remove_tree(repo, path, branch, head, check, record_archive):
     if not _check_tree(repo, path, branch, head, audit._cwd_listing()):
         return
     extras = audit._file_plan(path)
-    _require(all(item["rel"].startswith(".pi/") or git_delivery.is_build_artifact(item["rel"])
-                 for item in extras), "工作树有未确认归属的未跟踪或忽略文件")
+    _require(all(item["group"] == "ignored" or item["rel"].startswith(".pi/")
+                 or git_delivery.is_build_artifact(item["rel"]) for item in extras),
+             "工作树有未确认归属的未跟踪文件")
     if extras:
         day = util.now_iso()[:10]
         archive_id = uuid.uuid4().hex

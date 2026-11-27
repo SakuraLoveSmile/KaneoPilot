@@ -23,7 +23,8 @@ def project(tmp_path, monkeypatch):
     git(repo, "config", "user.name", "Fixture")
     git(repo, "config", "commit.gpgsign", "false")
     (repo / "README").write_text("base\n")
-    git(repo, "add", "README")
+    (repo / ".gitignore").write_text("android/local.properties\n")
+    git(repo, "add", "README", ".gitignore")
     git(repo, "commit", "-qm", "base")
     conn = db.connect(tmp_path / "test.db")
     unified = tmp_path / "Project Worktree"
@@ -87,6 +88,8 @@ def test_merge_cleanup_preserves_plan_and_remote(project):
     git(repo, "remote", "add", "origin", str(remote))
     git(repo, "push", "origin", "main", identity["branch"])
     ref = "refs/remotes/origin/" + identity["branch"]
+    (run / "android").mkdir()
+    (run / "android" / "local.properties").write_bytes(b"sdk.dir=/fixture/sdk\n")
     (run / ".pi").mkdir()
     (run / ".pi" / "evidence.txt").write_text("session evidence")
     cleanup.sweep(conn, util.now_iso())
@@ -95,7 +98,9 @@ def test_merge_cleanup_preserves_plan_and_remote(project):
     assert git(repo, "rev-parse", ref) == identity["head"]
     assert git(remote, "rev-parse", identity["branch"]) == identity["head"]
     assert (repo / rel).read_bytes() == planfile.load_plan(str(frozen), tid, repository=repo)[1]
-    assert list((constants.app_support() / "KaneoPilot-archives").rglob("evidence.txt"))
+    archive_dir = constants.app_support() / "KaneoPilot-archives"
+    assert next(archive_dir.rglob("evidence.txt")).read_text() == "session evidence"
+    assert next(archive_dir.rglob("local.properties")).read_bytes() == b"sdk.dir=/fixture/sdk\n"
     cleanup.sweep(conn, util.now_iso())
     assert conn.execute("SELECT COUNT(*) FROM events WHERE kind='merged_worktrees_removed'").fetchone()[0] == 1
 
