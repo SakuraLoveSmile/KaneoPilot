@@ -337,6 +337,33 @@ def _new_cycle_request(
     )
 
 
+def _release_claimed_dispatch(conn, task, now, actor, via) -> None:
+    """重排派发前释放残留的 claimed dispatch 请求（kp-nx01）。
+
+    begin-send 失败后队列里常留着 claimed（现场：2026-11-27 14:24 那次），
+    `dispatch:{task_id}` 幂等键会挡住新请求，任务回到 ready 也领不到活。
+    """
+    if not task["run_id"]:
+        return
+    stale = conn.execute(
+        "SELECT * FROM requests WHERE task_id=? AND kind='dispatch' "
+        "AND status='claimed' AND run_id=? ORDER BY rowid DESC LIMIT 1",
+        (task["task_id"], task["run_id"]),
+    ).fetchone()
+    if stale is None:
+        return
+    core.finish_request(
+        conn, stale, now, "cancelled", "cancelled",
+        result={"outcome": "cancelled", "via": via},
+        note="replace stale claimed dispatch request",
+    )
+    db.add_event(
+        conn, now, "request_cancelled", task_id=task["task_id"],
+        request_id=stale["request_id"], actor=actor,
+        detail={"run_id": stale["run_id"], "via": via},
+    )
+
+
 def _retry_target(conn, task) -> tuple[str, str]:
     """Decide (task_status, request kind) for resolve retry."""
     last = conn.execute(
@@ -353,6 +380,9 @@ def _retry_target(conn, task) -> tuple[str, str]:
         return "running", "monitor"
     return "needs_plan", "plan"
 
+
+# 派发中途的状态：写入 Kaneo 后回读断链会停在这里（kp-nx01）。
+_DISPATCH_STAGES = ("dispatch", "dispatching", "prepared", "submitting")
 
 _AUTO_RESUME_TARGETS = {
     # Kaneo 写成功、回读失败 → remote_unavailable（fail-closed）。「继续」把原 run
@@ -884,8 +914,6 @@ def _accept_remote_for_resolution(ctx, payload):
                 round_snapshot = dict(refreshed)
     from . import remote, bridge
     stage = task["failure_stage"] or task["stage"]
-    if stage == "dispatch" and payload["action"] == "resume":
-        raise util.KanpilotError("conflict", "派发中途需使用发送恢复动作")
     try:
         live = remote.get_task(remote.get_client(), task["task_id"])
     except bridge.BridgeError as exc:
@@ -896,6 +924,12 @@ def _accept_remote_for_resolution(ctx, payload):
     if plus_preflight and (t.get("id") != task["task_id"] or t.get("status") != constants.IN_PROGRESS_SLUG
                            or live.get("requirements_sha256") != task["requirements_sha256"]):
         raise util.KanpilotError("remote_conflict", "Plus 未发送恢复要求原任务、需求不变且远端仍为 In Progress")
+    if payload["action"] == "resume" and stage in _DISPATCH_STAGES:
+        # 派发写入后不明（kp-nx01）：只认"远端确实已切到 in-progress"这一种情况；
+        # 否则要求用户先在 Kaneo 调整，避免本地重发与远端已在跑错位。
+        if t.get("status") != constants.IN_PROGRESS_SLUG:
+            raise util.KanpilotError(
+                "conflict", "派发中途需先在 Kaneo 把任务切到 In Progress 再继续")
     if payload["action"] == "resume":
         required = {"monitor": {"in-progress", "in-review", "done"}, "delivery": {"in-review", "done"}, "review": {"in-review", "done"}}.get(stage)
         if required and t.get("status") not in required:
@@ -1079,6 +1113,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             task = db.require_task(conn, task["task_id"])
         resolution = {"action": requested_action, "note": note, "at": now, "actor": actor}
         new_request = None
+        send_reset = {}
 
         if action in ("resume", "accept_verification"):
             if status != "needs_user":
@@ -1144,9 +1179,21 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                     raise util.KanpilotError("conflict", "该任务不受自动化管理")
                 if code == "remote_conflict" and accepted_remote:
                     kind = accepted_remote["stage"]
-                    target = {"monitor": "running", "delivery": "in_review", "review": "in_review", "plan": "needs_plan"}.get(kind)
-                    kind = None if kind == "plan" else kind
-                    if target is None: raise util.KanpilotError("conflict", "请使用发送恢复动作")
+                    if kind in _DISPATCH_STAGES:
+                        # 派发写入后不明（kp-nx01）：远端已确认 in-progress，按
+                        # "未发送"重排一次派发；begin-send 幂等，不会重复写远端。
+                        target, kind = "ready", "dispatch"
+                        send_reset = {"sent": 0, "send_state": "not_sent",
+                                      "sent_at": None, "lock_retained": 0,
+                                      "transition_started_at": None,
+                                      "transition_verified_at": None,
+                                      "dispatch_lease_expires_at": None}
+                        _release_claimed_dispatch(conn, task, now, actor,
+                                                  "resolve resume")
+                    else:
+                        target = {"monitor": "running", "delivery": "in_review", "review": "in_review", "plan": "needs_plan"}.get(kind)
+                        kind = None if kind == "plan" else kind
+                        if target is None: raise util.KanpilotError("conflict", "请使用发送恢复动作")
                 elif code in _AUTO_RESUME_TARGETS:
                     target, kind = _AUTO_RESUME_TARGETS[code]
                 else:
@@ -1160,6 +1207,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
             task = db.require_task(conn, task["task_id"])
             fields = core.clear_block_fields()
             fields["resolution"] = resolution
+            fields.update(send_reset)
             if execution_retry:
                 core.release_dispatch_serial(conn, task["run_id"])
                 fields.update(sent=0, send_state=None, sent_at=None, lock_retained=0,
@@ -1226,6 +1274,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 conn, task, "ready", now, "user",
                 detail={"via": "resolve restore"}, **fields,
             )
+            _release_claimed_dispatch(conn, task, now, "user", "resolve restore")
             new_request, _ = _new_cycle_request(conn, now, task, "dispatch")
 
         elif action == "accept_duplicate":
@@ -1245,6 +1294,7 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                         "duplicate_risk_accepted": True},
                 **fields,
             )
+            _release_claimed_dispatch(conn, task, now, "user", "resolve accept_duplicate")
             new_request, _ = _new_cycle_request(conn, now, task, "dispatch")
 
         elif action == "mark_sent":

@@ -395,7 +395,8 @@ v2 起 `request_id`/`run_id`/`planner_input_sha256` 为必填；旧三字段形�
 均要求 `{task_id, run_id}` 匹配 task.run_id 且该 task 有 `claimed` dispatch 请求（同一 run）。
 
 - `dispatch-prepare {..., evidence}` → §4.6 校验 → task `prepared`，存 `ui_evidence` → `{"status":"prepared"}`
-- `dispatch-begin-send {task_id, run_id}` → 要求 `prepared`；`lifecycle` 串行位（settings 内布尔，事务内检查）下：`get-task` 验 projectId/status=original_todo_slug/requirements → task `submitting` + `transition_started_at` → bridge `update-status in-progress` → `get-task` 复验 → 存 `transition_verified_at` → `{"status":"submitting","action":"click visible Send once; verify message and attachment"}`。远端冲突 → `remote_conflict`（task→`needs_user`，`failure_stage` 记录）。
+- `dispatch-begin-send {task_id, run_id}` → 要求 `prepared`；`lifecycle` 串行位（settings 内布尔，事务内检查）下：`get-task` 验 projectId/status ∈ {original_todo_slug, in-progress}/requirements → task `submitting` + `transition_started_at` → 远端仍是 original_todo_slug 才 bridge `update-status in-progress`（**已是 in-progress 则跳过写入**，`kaneo_transition` 记 `reused:true`）→ `get-task` 复验（连接层失败按 0/0.5/1.5s 退避重读）→ 存 `transition_verified_at` → `{"status":"submitting","action":"click visible Send once; verify message and attachment"}`。失败分三类（kp-nx01）：① 复读成功且远端仍在 original_todo_slug → `remote_unavailable` + `send_state=not_sent`（写入确定未生效，可直接重试）；② 复读失败或读到别的状态 → `remote_conflict` + `send_state=unknown`（结果不明，保留占用，`failure_stage` 记录）；③ 预检不符（项目/需求/状态）→ `remote_conflict` + `send_state=unknown`，未写入。
+- 远端传输（kp-nx01）：bridge **默认直连** Kaneo——忽略继承的 `http_proxy/https_proxy`，只有显式 `KANEO_PROXY=http(s)://host:port` 才走代理；幂等 GET 的连接层失败重试 2 次（0.3s/1.2s 退避，单次超时 `min(KANEO_TIMEOUT, 8s)`），写操作不自动重试；失败文案形如 `Kaneo 请求失败: URLError(timed out) GET /api/column（尝试 3 次，21.4s）`，不得只写异常类名。
 - `dispatch-confirm {..., evidence}` → §4.6 全校验（`message_visible`）+ `transition_verified_at` 存在 → task `running`、`sent=true`、`send_state='sent'`、`sent_at`、session_*；请求→succeeded；建 monitor 请求；释放 dispatch 串行位 → `{"status":"running"}`
 - `dispatch-fail {..., send_state: not_sent|unknown, reason}` → task `needs_user`，`send_state`/`sent`/`failure_reason`/`failure_stage` 记录；请求→failed；`not_sent` 释放占用，`unknown` 保留占用标记（`lock_retained`）；释放 dispatch 串行位 → `{"status":"needs_user","send_state":...}`
 
@@ -1444,6 +1445,7 @@ _id, created_at}`，提示先核对 Plus 会话。
  | review_recovery | resolve {action:"recover_review"} | review_blocked 历史误退 | 恢复 in_review + 新 review 请求 |
  | revert_engine_fix | resolve {action:"revert_engine_fix", expected_execution_run_id, expected_plan_sha256} | §5.27.12 候选成立 | needs_user/monitor，退还一次自动补救；不重新执行、不改工作树 |
  | 重新验证本轮 | resolve {action:"resume"} | failure_stage=monitor，verification_environment_failure（不限托管）或 fix_branch_unavailable | 原 run/plan/worktree → running + 可领取 monitor 请求，不重新 dispatch |
+ | 继续派发（写入后不明） | resolve {action:"resume"} | failure_stage ∈ {dispatch, dispatching, prepared, submitting} 且远端已 in-progress、项目/需求未变 | 清阻塞 → `ready` + 新 dispatch 请求；begin-send 幂等复验（不重复写远端）；远端未切到 in-progress 时明确拒绝，需先在 Kaneo 调整 |
 | answer_execution_questions | submit-execution-answers | §5.28 当前可答请求 | 回答同一 Plus 工具调用 |
 | skip_execution_questions | submit-execution-answers {skip_all:true} | §5.28 当前可答请求 | 全部跳过，继续同一 turn |
 | stop_execution | stop-execution | §5.28 当前轮次；界面二次确认 | 停止本轮，由观察者收尾 |

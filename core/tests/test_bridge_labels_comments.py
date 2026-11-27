@@ -18,11 +18,22 @@ from __future__ import annotations
 
 import copy
 import unittest
-from unittest.mock import patch
 from urllib.error import HTTPError
 
 from helpers import KanpilotTestCase
 from kanpilot import bridge, remote
+
+
+class StubOpener:
+    """Transport seam for Client.request (直连 opener 注入点，kp-nx01)."""
+
+    def __init__(self, error):
+        self.error = error
+        self.calls = 0
+
+    def open(self, request, timeout=None):
+        self.calls += 1
+        raise self.error
 
 
 class FixtureClient:
@@ -53,12 +64,15 @@ class TestLabelsComments(unittest.TestCase):
         client.base_url = "http://127.0.0.1:1/"
         client.token = "fixture-token"
         client.timeout = 1
-        with patch.object(bridge, "urlopen", side_effect=HTTPError(
+        client.read_timeout = 1
+        opener = StubOpener(HTTPError(
             "http://127.0.0.1:1/api/label/task/missing", 404, "missing", {}, None
-        )) as request:
-            with self.assertRaisesRegex(bridge.BridgeError, "HTTP 404"):
-                remote.get_task_labels(client, "missing")
-            self.assertEqual(request.call_count, 1)
+        ))
+        client._opener = opener
+        with self.assertRaisesRegex(bridge.BridgeError, "HTTP 404"):
+            remote.get_task_labels(client, "missing")
+        # HTTP 状态错误不重试：注入点只调用一次。
+        self.assertEqual(opener.calls, 1)
 
     def test_invalid_labels_fail_closed(self):
         for value in (None, {}, [None], [{"id": "l1"}], [{"name": None}]):

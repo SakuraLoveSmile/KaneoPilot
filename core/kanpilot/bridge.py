@@ -14,18 +14,19 @@ import hashlib
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urljoin, urlparse
 import urllib.request
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 import ssl
 def _ssl_context():
     """HTTPS CA 兜底（v1.6）：优先 certifi（嵌入/Framework Python 常缺系统
-    CA 包），无 certifi 回退系统默认。返回 context 供 urlopen 使用。"""
+    CA 包），无 certifi 回退系统默认。返回 context 供 HTTPSHandler 使用。"""
     try:
         import certifi  # type: ignore
         return ssl.create_default_context(cafile=certifi.where())
@@ -35,13 +36,17 @@ def _ssl_context():
         return ssl.create_default_context()
     except Exception:
         return None
-    except Exception:
-        return None
 
 
 MAX_RESPONSE = 10 * 1024 * 1024
 MAX_CREATE_PAYLOAD = 1024 * 1024
 DEFAULT_TIMEOUT = 10.0
+# 幂等 GET 的连接层重试（kp-nx01）：单次链路抖动不再等于一次流程失败。
+DEFAULT_READ_RETRIES = 2
+READ_RETRY_DELAYS = (0.3, 1.2)
+# GET 用更短的超时，保证 3 次尝试的最坏耗时可接受（KANEO_TIMEOUT 仍可整体调低）。
+GET_TIMEOUT_CAP = 8.0
+ERROR_DETAIL_LIMIT = 200
 VALID_PRIORITIES = {"no-priority", "low", "medium", "high", "urgent"}
 TODO_SLUGS = ("to-do", "todo")
 
@@ -53,6 +58,48 @@ class BridgeError(Exception):
 def fail(message: str) -> None:
     print(message, file=sys.stderr)
     raise SystemExit(1)
+
+
+def _proxy_from_env() -> str:
+    """显式代理才用：KANEO_PROXY=http(s)://host:port（kp-nx01）。"""
+    raw = (os.environ.get("KANEO_PROXY") or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise BridgeError("KANEO_PROXY 必须是 http(s)://host:port 形式的代理地址")
+    return raw
+
+
+def _build_opener(*extra_handlers):
+    """Kaneo 默认直连；只有显式 KANEO_PROXY 才走代理。
+
+    继承来的 http_proxy/https_proxy 会把每次 Kaneo 请求塞进本机代理隧道：代理
+    或假 IP 解析一抖动，就变成整条流水线的偶发失败（现场：写状态成功、回读断
+    链）。Kaneo 服务端本身可达，没必要把链路安全押在代理上。
+    """
+    proxy = _proxy_from_env()
+    handler = (
+        urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        if proxy
+        else urllib.request.ProxyHandler({})
+    )
+    handlers = [handler, *extra_handlers]
+    context = _ssl_context()
+    if context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    return urllib.request.build_opener(*handlers)
+
+
+def _transport_message(exc: BaseException, method: str, path: str,
+                       attempts: int, elapsed: float) -> str:
+    """把连接层失败写成可判断的一句话：原因 + 目标 + 尝试次数（kp-nx01）。"""
+    reason = getattr(exc, "reason", None)
+    text = str(reason if reason is not None else exc).strip() or type(exc).__name__
+    text = " ".join(text.split())[:ERROR_DETAIL_LIMIT]
+    target = path.split("?", 1)[0]
+    suffix = f"（尝试 {attempts} 次，{elapsed:.1f}s）" if attempts > 1 else ""
+    return f"Kaneo 请求失败: {type(exc).__name__}({text}) {method} {target}{suffix}"
 
 
 def load_credentials() -> tuple[str, str]:
@@ -80,6 +127,20 @@ def load_credentials() -> tuple[str, str]:
     return base_url.rstrip("/") + "/", token
 
 
+def _read_response(response) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = response.read(min(65536, MAX_RESPONSE - size + 1))
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > MAX_RESPONSE:
+            raise BridgeError("Kaneo 响应超过 10 MiB 限制")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 class Client:
     def __init__(self) -> None:
         self.base_url, self.token = load_credentials()
@@ -89,33 +150,41 @@ class Client:
             raise BridgeError("KANEO_TIMEOUT 必须是数字") from exc
         if self.timeout <= 0:
             raise BridgeError("KANEO_TIMEOUT 必须大于 0")
+        self.read_timeout = min(self.timeout, GET_TIMEOUT_CAP)
+        self._opener = _build_opener()
 
-    def request(self, path: str, method: str = "GET", body: Any = None) -> Any:
+    def request(self, path: str, method: str = "GET", body: Any = None,
+                retry: Optional[int] = None) -> Any:
+        """单次请求。连接层失败按幂等性重试：GET 默认 2 次，写操作不重试。"""
         url = urljoin(self.base_url, path.lstrip("/"))
         request = Request(url, method=method, headers={"Authorization": f"Bearer {self.token}", "Accept": "application/json"})
         if body is not None:
             request.data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             request.add_header("Content-Type", "application/json")
-        try:
-            with urlopen(request, timeout=self.timeout,
-                         context=_ssl_context()) as response:
-                chunks: list[bytes] = []
-                size = 0
-                while True:
-                    chunk = response.read(min(65536, MAX_RESPONSE - size + 1))
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    if size > MAX_RESPONSE:
-                        raise BridgeError("Kaneo 响应超过 10 MiB 限制")
-                    chunks.append(chunk)
-        except HTTPError as exc:
-            if exc.code == 401:
-                raise BridgeError("Kaneo 登录已失效，请刷新 Kaneo 登录凭据") from exc
-            raise BridgeError(f"Kaneo 请求失败: HTTP {exc.code}") from exc
-        except (URLError, TimeoutError, OSError) as exc:
-            raise BridgeError(f"Kaneo 请求失败: {type(exc).__name__}") from exc
-        raw = b"".join(chunks)
+        if retry is None:
+            retry = DEFAULT_READ_RETRIES if method == "GET" else 0
+        attempts = max(1, int(retry) + 1)
+        timeout = self.read_timeout if method == "GET" else self.timeout
+        started = time.monotonic()
+        transport_error: Optional[BaseException] = None
+        for attempt in range(attempts):
+            if attempt:
+                time.sleep(READ_RETRY_DELAYS[min(attempt - 1, len(READ_RETRY_DELAYS) - 1)])
+            try:
+                with self._opener.open(request, timeout=timeout) as response:
+                    raw = _read_response(response)
+                break
+            except HTTPError as exc:
+                if exc.code == 401:
+                    raise BridgeError("Kaneo 登录已失效，请刷新 Kaneo 登录凭据") from exc
+                raise BridgeError(f"Kaneo 请求失败: HTTP {exc.code}") from exc
+            except (URLError, TimeoutError, OSError) as exc:
+                transport_error = exc
+        else:
+            raise BridgeError(_transport_message(
+                transport_error, method, path, attempts,
+                time.monotonic() - started,
+            )) from transport_error
         if not raw:
             return None
         try:
@@ -615,10 +684,7 @@ def download_attachment(
                 "Accept": "*/*",
             },
         )
-        opener = urllib.request.build_opener(
-            _NoRedirect(),
-            urllib.request.HTTPSHandler(context=_ssl_context()),
-        )
+        opener = _build_opener(_NoRedirect())
         try:
             response = opener.open(request, timeout=timeout)
         except HTTPError as exc:
