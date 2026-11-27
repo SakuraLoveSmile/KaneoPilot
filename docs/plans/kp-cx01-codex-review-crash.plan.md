@@ -67,11 +67,15 @@ MediaPlayer 任务 `at2yszvfk2ow5uxjfkl1i4uh`（播放页快进快退按钮点�
 
 ## 7. 实测记录
 
-- `core/tests/test_cli_review.py`：39 条通过（含 A1–A4 共 5 条新增用例）。
+- 本地 `core/tests/test_cli_review.py`：39 条全部通过（含新增 7 条）。
+- 本地定向套件（cli_review / review_timeout / review_stage_recovery / review_settle / codex_verdict / plus_review / plus_review_text / review_resolution）：181 passed，41 subtests passed（244s）。
 - A1 的 A/B 证据：把 `cli_review.py` 换回改动前版本，`test_codex_nonblocking_stdout_child_still_completes` 失败（`is_error=True`）；换回新版本通过。
 - 机制取证：真实 `codex.js` 壳 + 探针二进制 → fd 1 `flags=1`（阻塞）；`codex exec` 启动 1.5 秒后观察者 → `flags=65541`（含 `O_NONBLOCK`）。
-- 云端构建 / 测试版：（待补）
-- 真实 Review 复跑：（待补）
+- 真实传输：用真实 `codex exec`（空 CODEX_HOME，不调用模型）走新通道，事件流落盘正常、超时按原规则终止（exit −15）、临时 `.stdout` 收尾删除。
+- 云端 core 隔离测试：run `45969002948` 的 10 个 checks 分片（3.11 / 3.13 各 5 片）全部 success。
+- 云端其余门禁：push 触发的 run `45967606355` 在分片 `checks (2, 3.11)` 上因既有偶发用例 `tests/test_process_owner.py::test_pi_owned_shutdown_reaps_term_ignoring_local_cli_before_app_escalation`（pid 文件读到空串）失败，与本次改动无关；同一分片在 `45969002948` 中通过。
+- 测试版发布：（待补）
+- 真实 Review 复跑：（待补，需装上测试版后在真实任务上观察）
 
 ## 8. 遗留与未验证
 
