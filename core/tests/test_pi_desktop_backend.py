@@ -882,6 +882,35 @@ class TestPiDesktopCatalog(PiDesktopCase):
         self.assertEqual(model["thinking_levels"], ["high"])
         self.assertIsNone(model["default_thinking_level"])
 
+    def test_resolved_default_uses_plus_default_while_legacy_uuids_stay_disabled(self):
+        self.server.providers = [
+            {"id": "c43106c3-legacy", "name": "StepFun Plan", "enabled": False,
+             "defaultModelId": "step-5-preview"},
+            {"id": "plugin:local.magpie-piplus:magpie", "enabled": True,
+             "defaultModelId": "piplus-selected",
+             "models": [{"id": "piplus-selected",
+                         "thinkingLevels": ["off", "low", "high", "max"],
+                         "defaultThinkingLevel": "high"}]},
+        ]
+        self.server.settings = {
+            "defaultProviderId": "plugin:local.magpie-piplus:magpie",
+            "defaultModelId": "piplus-selected",
+        }
+        self.server.models = [{"id": "piplus-selected", "name": "alias"}]
+        result = self.call("pi-desktop-catalog", {
+            "connection_file": str(self.write_connection()),
+        })
+        self.assertEqual(result["resolved_default"], {
+            "provider_id": "plugin:local.magpie-piplus:magpie",
+            "model_id": "piplus-selected",
+            "thinking_level": "high",
+        })
+        self.assertIsNone(result["default_detail"])
+        legacy = [item for item in result["providers"]
+                  if item["id"] == "c43106c3-legacy"][0]
+        self.assertFalse(legacy["enabled"])
+        self.assertEqual(legacy["models"], [])
+
 
 class TestBackendProbe(PiDesktopCase):
     def test_probe_ok_full_chain(self):

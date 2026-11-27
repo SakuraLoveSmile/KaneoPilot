@@ -1221,6 +1221,7 @@ _id, created_at}`，提示先核对 Plus 会话。
 - `pi_desktop` 五字段沿用 §5.23.3：`connection_file/provider_id/model_id/thinking_level/permission_mode`；`permission_mode`：新规划固定 `auto`，Review 固定 `auto`，执行/控制端仍须用户显式保存；默认连接路径仍是 `~/.pi-desktop-plus/mcp-control.json`，不扫描 `.pi-desktop` 或其他 HOME。
 - Codex 规划字段（`standard`/`review_fix` 的 `planner_model`/`reasoning_effort`）与 `default_method` 保留，切回 codex 时原样生效；Plus 分支使用 `thinking_level`（Plus 枚举），**不**把 codex `reasoning_effort` 当 Plus 思考等级。
 - `review_config.mode`（inherit/custom）仅对 `backend="pi"` 生效；`backend="pi_desktop"` 必须有完整五字段，`mode` 不参与生效。
+- `model_source="inherit"` 的 `pi_desktop` 块（kp-mag06，2026-11-23）只保存 `connection_file`/`permission_mode`（加 `model_source`）：`provider_id`/`model_id`/`thinking_level` 读取时一律丢弃、保存时不再写入；生效值由 §5.23.3 的目录探针解析 Plus 当前默认。`custom` 才是显式钉住，provider 被停用仍按目录校验报错（不静默换服务商）。
 - 三个配置命令（`get/set-planner-config`、`get/set-exec-config`、`get/set-review-config`）的保存语义不变——原子保存、结构/枚举校验、**服务离线仍可保存**、切换后端不删除另一分支已存字段、失败 `bad_request` 且旧值不变；只扩展字段集合与返回形状。`get-*-config` 的 `config` 含各自 `backend`，未保存 → `null`（生效值取缺省）。
 - 切换后端不改变已排队请求、已固化轮次与已启动控制轮：快照按 §5.22.6/§5.23.3 固定，保存只影响之后创建的请求与控制轮。
 
@@ -2347,6 +2348,12 @@ failed 最终 JSON 仍按既有身份、终态、原生证据和源码快照门�
   Magpie 接管后该默认即插件服务商 `plugin:local.magpie-piplus:magpie` + 别名
   `piplus-selected`，换模型不必改 KaneoPilot 配置。`custom` 五字段保留给显式钉住；
   钉住的 provider 被停用时仍按既有目录校验报错（不静默换服务商）。
+  **inherit 语义（kp-mag06）**：接管前后留下的 `provider_id`/`model_id`/`thinking_level`
+  属于残留，读配置即丢弃、探针与 `pi-desktop-catalog` 都不再使用；保存 inherit 只写
+  `connection_file`/`permission_mode`。因此「`model_source=inherit` 却仍带旧 UUID」的块
+  按纯 inherit 处理，不再报「provider 已禁用」。面板两种模式：**跟随 Plus 当前模型**
+  （由 Magpie Agents 页决定）与**临时指定模型**（`custom`，只对该角色生效，从 Plus
+  本地缓存目录选 provider/model/thinking）。
 
 ### 5.33.5 命令
 

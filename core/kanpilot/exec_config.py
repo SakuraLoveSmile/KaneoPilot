@@ -112,6 +112,12 @@ def _merge_pi_desktop(block: Optional[dict]) -> Optional[dict]:
         else:
             model_source = "inherit"
     cleaned["model_source"] = model_source
+    if model_source == "inherit":
+        # kp-mag06：inherit 只跟随 Plus 当前默认配置。历史残留的钉住字段
+        # （provider_id/model_id/thinking_level）一律丢弃，否则探针会拿已停用
+        # 的服务商去校验（Magpie 接管后旧 UUID 全部 disabled）。
+        for key in ("provider_id", "model_id", "thinking_level"):
+            cleaned.pop(key, None)
     if not cleaned.get("connection_file"):
         cleaned["connection_file"] = constants.DEFAULT_PI_DESKTOP_CONNECTION_FILE
     return cleaned
@@ -570,7 +576,11 @@ def _probe_pi_desktop(block: dict, timeout: int = 10,
     provider_id = block.get("provider_id")
     model_id = block.get("model_id")
 
-    if model_source == "inherit" and (not provider_id or not model_id):
+    if model_source == "inherit":
+        # kp-mag06：inherit 由 Plus 当前默认解析，忽略块里残留的旧 provider/model
+        # （Magpie 接管前钉住的服务商如今已全部停用），不再据此报「已禁用」。
+        provider_id = None
+        model_id = None
         resolved, err = pi_desktop_backend.resolve_plus_default(conn_file, timeout=timeout)
         if err is not None or resolved is None:
             base_probe = pi_desktop_backend.probe_connection(
