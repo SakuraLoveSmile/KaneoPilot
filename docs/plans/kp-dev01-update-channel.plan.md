@@ -32,7 +32,12 @@
 - 本地构建并以 `0.6.1-dev.1-local` 替换 `/Applications/KaneoPilot.app`，设置页出现三档通道选择（本次实测）。
 - 未验证：真实 dev 版在线更新（需发布后从「开发版」通道实机确认）；Android 开发版（本次不做）。
 
+## 发布
+
+- 首个开发版：`v0.6.1-dev.492`（run `45931717336`，dev 分支提交 `dea569a`），GitHub 预发布，资产 APK/DMG/manifest.json/SHA256SUMS 齐全；manifest `channel="dev"`、`base_version=0.6.1`、`branch=dev`、`build_number=492`，注释标签写明 `Channel: dev`。
+- 本地安装包为 `0.6.1-dev.1`（build 1）：通道切到「开发版」后应提示升级到 `0.6.1-dev.492`。
+
 ## 分支与状态
 
-- 分支 `feat/20261127-kp-dev01-update-channel`，合入目标 `dev`（再回 `main`）。
-- 实现中 → 待体验：代码、测试与本地安装已完成，等发布 dev 版与用户验收。
+- 分支 `feat/20261127-kp-dev01-update-channel`（提交 `3a1df3e`、`b502803`、`dea569a`），已合入并推送 `dev`（`dea569a`）；尚未回 `main`。
+- 实现中 → 待体验：代码、测试、本地安装与首个开发版发布已完成，等界面验收与实机通道切换确认。
