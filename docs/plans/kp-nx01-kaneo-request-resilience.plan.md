@@ -65,7 +65,14 @@
 - 修复：`bridge.Client.request` 每次按当前 `self.timeout` 计算 GET 超时（去掉缓存的 read_timeout）；`_doctor_kaneo_ping` 显式 `retry=0`（探针只测一次）。新增 `test_lowered_timeout_after_construction_is_used` 固定该行为。
 - 同一次 run 的 `macos-package` 失败是 `hdiutil verify: Resource temporarily unavailable`（DMG 已生成并签名，仅校验步骤在 runner 上抖动），与本次改动无关，重跑确认。
 
+## 通道纠正（2026-11-27 17:0x）
+
+- 用户指出走错通道：kp-dev01 已把更新通道收紧为「正式版 / 开发版」两档（默认开发版），任务分支的 test 预发布不再提供给客户端，因此 `v0.6.1-test.500` 客户端收不到（该预发布保留但不使用）。
+- 处理：把 3 个提交 rebase 到 `origin/dev`（dev 领先 main 7 个提交，含通道改造），无冲突；本地复跑 46 passed（bridge/dispatch/queue 相关）+ `tests/rehearsal/test_doctor_live.py` 15 passed；快进推送 `dev`（b751d4d → 2f6849a），PR #33 随之自动标记 merged。
+- 开发版：`gh workflow run packages.yml --ref dev -f channel=dev` → run 45970416775 全部 job 通过，预发布 **v0.6.2-dev.508**（Android APK / macOS arm64 DMG / manifest.json / SHA256SUMS，commit 2f6849a，channel dev）。客户端「开发版」通道可收；Android 仍只跟随正式版。
+- 注意：dev 随后又合入其他任务（kp-cx01 等），dev.508 不含那些改动；我的修复已在 dev 上，后续任何开发版都会带上。
+
 ## 状态
 
-- 待体验：代码已推分支、PR #33 草稿、测试版 `v0.6.1-test.500` 已发布；等用户开启「接收测试版」后更新体验。
-- 分支 `fix/20261127-kp-nx01-kaneo-request-resilience`（HEAD 37ef20c），未合入 main。
+- 待体验：修复已在 `dev`（2f6849a 起），开发版 `v0.6.2-dev.508` 已发布；等用户装开发版后体验。
+- `main` 尚未含该修复（按通道模型，先走 dev 验证，之后 dev → main 回合）。
