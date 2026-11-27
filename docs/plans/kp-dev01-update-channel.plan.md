@@ -37,6 +37,13 @@
 - 首个开发版：`v0.6.1-dev.492`（run `45931717336`，dev 分支提交 `dea569a`），GitHub 预发布，资产 APK/DMG/manifest.json/SHA256SUMS 齐全；manifest `channel="dev"`、`base_version=0.6.1`、`branch=dev`、`build_number=492`，注释标签写明 `Channel: dev`。
 - 本地安装包为 `0.6.1-dev.1`（build 1）：通道切到「开发版」后应提示升级到 `0.6.1-dev.492`。
 
+## 两档收紧（2026-11-27 用户决定）
+
+- 问题：`test` 与 `dev` 两条预发布线同基础版时，SemVer 下 `test > dev`，`v0.6.1-test.484` 压住了 `v0.6.1-dev.492`，开发版永远拿不到。
+- 决定：客户端只保留「正式版（main）/ 开发版（dev）」两档；任务分支的 `-test.N` 不再发布、也不被任何通道接收（历史 Release 保留供查阅）；开发版基础版抬到 `0.6.2`，已装测试版的机器切到开发版后可自动升级。
+- 实现：`SoftwareUpdateChannel` 只剩 stable/dev（`-test.N` 一律拒绝，旧值 test→dev）；`release_bundle` 只接受 channel=dev；workflow 选项收为 preview/dev；文档与 AGENTS 同步。
+- 验证：scripts/tests 252 passed / 512 subtests；macOS 更新夹具 439 assertions；UI 夹具编译通过；本地装 `0.6.2-dev.1` 后设置页只有两档。
+
 ## 分支与状态
 
 - 分支 `feat/20261127-kp-dev01-update-channel`（提交 `3a1df3e`、`b502803`、`dea569a`），已合入并推送 `dev`（`dea569a`）；尚未回 `main`。
