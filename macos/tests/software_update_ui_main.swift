@@ -53,7 +53,7 @@ private let updateUIPackage = Data("KaneoPilot isolated update UI package; never
 /// The stable fixture release, or a test build when `version` ends in `-test.B` (then `build` is B).
 private func updateUIRelease(version: String = "0.2.0", build: Int = 10) -> SoftwareRelease {
     let tag = "v\(version)", name = SoftwareUpdateSource.macPackageName(version: version)
-    let isTest = version.contains("-test.")
+    let kind: SoftwareUpdateKind = version.contains("-test.") ? .test : (version.contains("-dev.") ? .dev : .stable)
     let digest = SHA256.hash(data: updateUIPackage).map { String(format: "%02x", $0) }.joined()
     return SoftwareRelease(version: version, tag: tag, sourceSHA: String(repeating: "a", count: 40),
         buildNumber: build, name: name, size: Int64(updateUIPackage.count), sha256: digest,
@@ -61,7 +61,7 @@ private func updateUIRelease(version: String = "0.2.0", build: Int = 10) -> Soft
         downloadURL: SoftwareUpdateSource.assetURL(tag: tag, name: name),
         pageURL: SoftwareUpdateSource.pageURL(tag: tag),
         notes: "隔离夹具更新说明：复用生产设置组件核对下载、失败重试与安装确认。此内容不是实际 Release。",
-        channel: isTest ? "test" : nil, branch: isTest ? "feat/update-channel" : nil)
+        channel: kind == .stable ? nil : kind.name, branch: kind == .stable ? nil : "feat/update-channel")
 }
 
 private actor UpdateUIService: SoftwareUpdateServing {
@@ -71,12 +71,10 @@ private actor UpdateUIService: SoftwareUpdateServing {
 
     init(scenario: UpdateUIScenario, log: UpdateUIEventLog) { self.scenario = scenario; self.log = log }
 
-    func latest() async throws -> SoftwareRelease { try await latest(includingTestBuilds: false) }
-
-    func latest(includingTestBuilds: Bool) async throws -> SoftwareRelease {
-        log.record("latest_requested", ["network_used": false, "includes_test_builds": includingTestBuilds])
+    func latest(channel: SoftwareUpdateChannel) async throws -> SoftwareRelease {
+        log.record("latest_requested", ["network_used": false, "channel": channel.rawValue])
         try await Task.sleep(nanoseconds: 250_000_000)
-        guard includingTestBuilds else { return updateUIRelease() }
+        guard channel.allowsTestBuilds else { return updateUIRelease() }
         switch scenario {
         case .testCandidate: return updateUIRelease(version: "0.2.1-test.70", build: 70)
         case .installedTest: return updateUIRelease(version: "0.2.1-test.71", build: 71)
@@ -202,8 +200,10 @@ private final class UpdateUIController: ObservableObject {
         self.installer = installer
         let termination = UpdateUITerminationBridge(log: log)
         self.termination = termination
-        // The switch starts on in the test-candidate scenario; every other scenario starts with the default (off).
-        if scenario == .testCandidate { defaults.set(true, forKey: "softwareUpdate.receivesTestBuilds") }
+        // The test-candidate scenario starts on the test channel; every other scenario keeps that default too.
+        defaults.set(scenario == .testCandidate ? SoftwareUpdateChannel.test.rawValue
+                                                : SoftwareUpdateChannel.stable.rawValue,
+                     forKey: "softwareUpdate.channel")
         let installedTest = scenario == .installedTest
         updater = SoftwareUpdateManager(service: UpdateUIService(scenario: scenario, log: log), installer: installer,
             defaults: defaults, currentVersion: installedTest ? "0.2.1-test.70" : "0.1.0",
@@ -238,8 +238,8 @@ private final class UpdateUIController: ObservableObject {
             "status": updater.statusText, "progress": updater.progress,
             "error": updater.errorMessage ?? "", "can_check": !updater.isBusy,
             "can_download": updater.canDownload, "can_install": updater.canInstall,
-            "receives_test_builds": updater.receivesTestBuilds, "test_channel_active": updater.testChannelActive,
-            "can_change_test_channel": updater.canChangeTestChannel,
+            "receives_test_builds": updater.channel != .stable, "test_channel_active": updater.prereleaseChannelActive,
+            "can_change_test_channel": updater.canChangeChannel,
             "installed_is_test_build": updater.installedIsTestBuild,
             "release_version": updater.release?.version ?? "", "release_is_test": updater.release?.isTest ?? false,
             "release_branch": updater.release?.branch ?? "",

@@ -11,7 +11,7 @@ Worktree-Root: /Users/sakurasep/Documents/Code/Project/Project Worktree/personal
 
 ## 统一开发流程（2026-10-24）
 
-- 项目标识：`personal-kaneopilot`。整项工作使用项目内唯一任务编号，已有外部编号优先；计划内 T1/T2 是步骤编号。新 worktree 使用 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/<YYYYMMDD>-<type>-<task-id>-<slug>/`，分支使用 `<type>/<YYYYMMDD>-<task-id>-<slug>`。日期取创建时台北日期，跨天不改；英文段小写连字符。已有工作树、自动化运行资源不迁移或改名。
+- 项目标识：`personal-kaneopilot`。整项工作使用项目内唯一任务编号，已有外部编号优先；计划内 T1/T2 是步骤编号。新 worktree 使用 `/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/<YYYYMMDD>-<type>-<task-id>-<slug>/`，分支使用 `<type>/<YYYYMMDD>-<task-id>-<slug>`。日期取创建时台北日期，跨天不改；英文段小写连字符。已有工作树、自动化运行资源不迁移或改名。`dev` 是常驻集成分支（不受任务分支命名约束）：未发布改动先合入 `dev`，从它发开发版验证，验证通过后再回 `main`。
 - 一任务一份权威记录，优先复用已有计划，新记录放 `docs/plans/`。写清目标与范围、已确认决定、分支/worktree/合入目标、验收场景、代码版本、实测与未验证项、遗留及必要运行资源。恢复前核对路径、HEAD、索引、未提交改动与下一步，旧的通过记录不能直接当成当前结果。
 - 普通实现选择自主完成；超出授权的业务、公共接口、重要兼容、数据或费用变化先说明影响并解决决定。不顺手扩大重构，不为迁就实现改验收目标。
 - 正式提交围绕一个可解释的功能变化，说明行为前后差异、原因、关键实现和实际验证；暂存前后核对范围，保留无关改动。提交、推送、合并、发布、生产操作沿已有授权，本段不新增操作权限。
@@ -32,6 +32,7 @@ Worktree-Root: /Users/sakurasep/Documents/Code/Project/Project Worktree/personal
  - 验证由固化的执行端运行，Pilot 只核对报告与证据并推进状态。Plus verdict 沿 protocol §5.27.11；Codex CLI 沿 §5.31，统一核对结构化报告、原生命令退出码和源码快照。冻结计划的每条 verify 必须有通过记录，源码快照排除 `.pi/**` 与交付构建产物；任何入口均不得在 Pilot 本地代跑 verify。旧转录证据回执仅留审计，不因历史模式降低验证门禁。 受阻 Pi Goal 的显式用户接受按 protocol §5.23.12：仅作为独立评审准入授权，保持未验证和原缺项，不作为验证通过或直接完成的凭据。
  - 外部副作用先写 `runtime_operations` 回执再执行；远端写只经核心命令；服务端无 CAS，不声称本地锁阻止远端竞争。
 - **修复完成即发测试版（2026-11-08 用户固定流程）**：缺陷修复完成且适用验证通过后，推送任务分支并以 `channel=test` 手动触发 `Packages`，发布 `vX.Y.Z-test.<run>` GitHub 预发布（不进入 latest；客户端需开启「接收测试版」）。此后不再逐次询问是否发测试版；正式版本仍由维护者明确定版本，按 annotated `vX.Y.Z` 标签发布。发布说明写明用户可见变化、修复与恢复方式，发布标签与 run 记入任务记录。
+- **开发版（dev 通道）**：合入 `dev` 的改动可用 `gh workflow run packages.yml --ref dev -f channel=dev -f notes='…'` 发布 `vX.Y.Z-dev.<run>` 预发布；客户端把更新通道切到「开发版」才会收到，Android 目前没有该通道（忽略 `-dev.N`）。发布仍属对外副作用，按需在当次确认；`dev` 不取代任务分支测试版，也未合入 `dev` 的改动不得从 `dev` 发布。
  
  ## 布局与归属
  

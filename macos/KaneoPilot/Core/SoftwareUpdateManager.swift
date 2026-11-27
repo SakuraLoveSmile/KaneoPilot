@@ -206,7 +206,7 @@ final class SoftwareUpdateManager: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var lastCheckedAt: Date?
     @Published private(set) var installationResult: String?
-    /// Explains why a pending test build disappeared when the test channel was closed.
+    /// Explains why a pending prerelease disappeared when a narrower channel was selected.
     @Published private(set) var channelNotice: String?
     @Published var automaticallyChecks: Bool {
         didSet {
@@ -222,19 +222,19 @@ final class SoftwareUpdateManager: ObservableObject {
             }
         }
     }
-    /// Opt-in for test pre-releases (default off). A development preview ignores it.
-    @Published var receivesTestBuilds: Bool {
+    /// The update channel (default: test). A development preview ignores it.
+    @Published var channel: SoftwareUpdateChannel {
         didSet {
-            guard receivesTestBuilds != oldValue else { return }
-            defaults.set(receivesTestBuilds, forKey: Keys.testBuilds)
+            guard channel != oldValue else { return }
+            defaults.set(channel.rawValue, forKey: Keys.channel)
             channelEpoch += 1
-            if receivesTestBuilds {
-                // The last answer only covered stable releases; look again as soon as possible.
+            if channel.allowsTestBuilds {
+                // The last answer may only have covered a narrower channel; look again as soon as possible.
                 channelNotice = nil
                 forgetLastAttempt()
                 if automaticallyChecks && !isPreview { Task { await check() } }
             } else {
-                discardTestCandidate()
+                discardPrereleaseCandidate()
             }
         }
     }
@@ -267,6 +267,7 @@ final class SoftwareUpdateManager: ObservableObject {
         static let checks = "softwareUpdate.automaticallyChecks"
         static let downloads = "softwareUpdate.automaticallyDownloads"
         static let testBuilds = "softwareUpdate.receivesTestBuilds"
+        static let channel = "softwareUpdate.channel"
         static let checked = "softwareUpdate.lastCheckedAt"
         static let attempted = "softwareUpdate.lastAttemptAt"
         static let release = "softwareUpdate.release"
@@ -291,25 +292,30 @@ final class SoftwareUpdateManager: ObservableObject {
         self.targetURL = targetURL; self.cacheURL = cacheURL; self.allowsNetwork = allowsNetwork
         self.now = now; self.requestTermination = requestTermination
         self.exitHandshakeTimeout = exitHandshakeTimeout
-        defaults.register(defaults: [Keys.checks: true, Keys.downloads: true, Keys.testBuilds: false])
+        defaults.register(defaults: [Keys.checks: true, Keys.downloads: true])
         automaticallyChecks = defaults.bool(forKey: Keys.checks)
         automaticallyDownloads = defaults.bool(forKey: Keys.downloads)
-        receivesTestBuilds = defaults.bool(forKey: Keys.testBuilds)
+        // Records saved before the channel existed kept the test switch; a fresh install starts on the test
+        // channel, so a missing record means "test" rather than "stable".
+        channel = SoftwareUpdateChannel.stored(defaults.string(forKey: Keys.channel),
+                                               legacyTestBuilds: defaults.object(forKey: Keys.testBuilds) as? Bool)
         lastCheckedAt = defaults.object(forKey: Keys.checked) as? Date
         lastAttemptAt = defaults.object(forKey: Keys.attempted) as? Date
     }
 
     var isPreview: Bool { currentVersion == "0.0.0" }
-    /// Whether test pre-releases take part in checking, downloading and installing.
-    var testChannelActive: Bool { receivesTestBuilds && !isPreview }
-    /// The switch is locked while a request or the installation hand-off is running.
-    var canChangeTestChannel: Bool {
+    /// Whether prereleases of the selected channel take part in checking, downloading and installing.
+    var prereleaseChannelActive: Bool { channel.allowsTestBuilds && !isPreview }
+    /// Which kinds a real (non-preview) App may receive from the selected channel.
+    var effectiveChannel: SoftwareUpdateChannel { isPreview ? .stable : channel }
+    /// The channel picker is locked while a request or the installation hand-off is running.
+    var canChangeChannel: Bool {
         allowsNetwork && !isPreview && ![Phase.checking, .preparing, .waitingForExit].contains(phase)
     }
     var installedIsTestBuild: Bool { (try? SoftwareVersion(currentVersion))?.isTest == true }
     var isBusy: Bool { [Phase.checking, .downloading, .preparing, .waitingForExit].contains(phase) }
-    /// A test candidate is only usable while the test channel is on.
-    private var candidateAllowed: Bool { release?.isTest != true || testChannelActive }
+    /// A prerelease candidate is only usable while the selected channel follows it.
+    private var candidateAllowed: Bool { release.map { effectiveChannel.allows($0.kind) } ?? false }
     var canDownload: Bool {
         allowsNetwork && !isPreview && release != nil && !isBusy && phase != .ready && candidateAllowed
     }
@@ -326,11 +332,13 @@ final class SoftwareUpdateManager: ObservableObject {
         case .current: return "当前已是最新正式版，或当前版本高于已发布版本"
         case .available:
             let version = release?.version ?? ""
-            if release?.isTest == true { return "发现测试版 \(version)" }
+            if let release, release.isPrerelease { return "发现\(release.channel == "dev" ? "开发版" : "测试版") \(version)" }
             return isPreview ? "发现正式版 \(version)；开发预览版请从发布页手动选择" : "发现新版本 \(version)"
         case .downloading: return "正在下载更新 \(Int(progress * 100))%"
         case .ready:
-            if let release, release.isTest { return "\(release.version)（测试版）已下载并校验" }
+            if let release, release.isPrerelease {
+                return "\(release.version)（\(release.channel == "dev" ? "开发版" : "测试版")）已下载并校验"
+            }
             return "更新已下载并校验，等待安装"
         case .preparing: return "正在校验并准备安装…"
         case .waitingForExit: return "正在保存草稿并安全退出，随后安装并重新启动"
@@ -367,7 +375,7 @@ final class SoftwareUpdateManager: ObservableObject {
         guard allowsNetwork, !isBusy else { return }
         let prior = phase
         let epoch = channelEpoch
-        let includesTestBuilds = testChannelActive
+        let activeChannel = effectiveChannel
         phase = .checking; errorMessage = nil; channelNotice = nil
         lastAttemptAt = now(); defaults.set(lastAttemptAt, forKey: Keys.attempted)
         do {
@@ -375,7 +383,7 @@ final class SoftwareUpdateManager: ObservableObject {
             // Asked for "newer than the installed version" first: a release that is not newer is no update
             // whatever its package looks like, so the Universal releases of the retired scheme (v0.2.0 and
             // the older test builds) end in `.current` instead of an error about their package.
-            let answer = try await service.latestUpdate(includingTestBuilds: includesTestBuilds, newerThan: installed)
+            let answer = try await service.latestUpdate(channel: activeChannel, newerThan: installed)
             guard epoch == channelEpoch else {
                 // The channel was switched while this request ran, so its answer no longer applies.
                 phase = settledPhase(); forgetLastAttempt()
@@ -387,8 +395,8 @@ final class SoftwareUpdateManager: ObservableObject {
                 return
             }
             try candidate.validate()
-            guard includesTestBuilds || !candidate.isTest else {
-                throw SoftwareUpdateError.invalid("未开启接收测试版，却收到了测试版")
+            guard activeChannel.allows(candidate.kind) else {
+                throw SoftwareUpdateError.invalid("当前更新通道不会收到该版本的更新")
             }
             let newer = try SoftwareVersion(candidate.version)
             lastCheckedAt = now(); defaults.set(lastCheckedAt, forKey: Keys.checked)
@@ -531,19 +539,19 @@ final class SoftwareUpdateManager: ObservableObject {
         exitWatchdog = nil
     }
 
-    /// Brings back the candidate saved by the last check, unless it is a test build and the test channel is off.
+    /// Brings back the candidate saved by the last check, unless the selected channel no longer follows it.
     func restoreCachedRelease() async {
         // A saved record that cannot be offered any more is dropped quietly with its package: a Universal package
-        // of the retired scheme, a record that the installed version has caught up with, or a test build while the
-        // test channel is off.
+        // of the retired scheme, a record that the installed version has caught up with, or a prerelease while the
+        // channel that follows it is off.
         guard !isBusy, let data = defaults.data(forKey: Keys.release),
               let cached = try? JSONDecoder().decode(SoftwareRelease.self, from: data) else { return }
         guard (try? cached.validate()) != nil else {
             discardCachedRelease(cached)
             return
         }
-        guard !cached.isTest || testChannelActive else {
-            // A test build saved while the channel was on must not outlive it.
+        guard !cached.isPrerelease || effectiveChannel.allows(cached.kind) else {
+            // A prerelease saved while its channel was on must not outlive it.
             discardCachedRelease(cached)
             return
         }
@@ -569,23 +577,25 @@ final class SoftwareUpdateManager: ObservableObject {
         }
     }
 
-    /// Closing the test channel removes everything that exists only for a test candidate: the candidate,
-    /// its cached package, a running download of it, the saved record and the install entry. A stable
-    /// candidate and the installed build are not touched.
-    private func discardTestCandidate() {
-        guard let candidate = release, candidate.isTest else { return }
+    /// Narrowing the channel removes everything that exists only for the dropped prerelease: the candidate,
+    /// its cached package, a running download of it, the saved record and the install entry. A candidate the
+    /// new channel still follows and the installed build are not touched.
+    private func discardPrereleaseCandidate() {
+        guard let candidate = release, candidate.isPrerelease,
+              !effectiveChannel.allows(candidate.kind) else { return }
+        let label = candidate.channel == "dev" ? "开发版" : "测试版"
         downloadGeneration += 1
         downloadTask?.cancel(); downloadTask = nil
         if pendingInstallation != nil || phase == .waitingForExit {
-            cancelInstallation("已关闭接收测试版，已取消测试版安装")
+            cancelInstallation("更新通道已收窄，已取消\(label)安装")
         }
         removeCachedPackage(for: candidate)
         defaults.removeObject(forKey: Keys.release)
         release = nil; downloadedPackage = nil; progress = 0; errorMessage = nil
         // A check or hand-off that is still running settles the phase itself when it returns.
         if phase != .checking && phase != .preparing { phase = .idle }
-        channelNotice = "已关闭接收测试版，已移除待安装的测试版。"
-        // The stable candidate was not stored, so look for it again at the next due check.
+        channelNotice = "更新通道已收窄，已移除待安装的\(label)。"
+        // The narrower channel's candidate was not stored, so look for it again at the next due check.
         forgetLastAttempt()
     }
 

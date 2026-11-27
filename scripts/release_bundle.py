@@ -24,8 +24,12 @@ SERIAL = r"[1-9][0-9]{0,8}"
 _STABLE = r"(%s)\.(%s)\.(%s)" % (NUMBER, NUMBER, NUMBER)
 STABLE_VERSION = re.compile(_STABLE)
 TEST_VERSION = re.compile(_STABLE + r"-test\.(%s)" % SERIAL)
+DEV_VERSION = re.compile(_STABLE + r"-dev\.(%s)" % SERIAL)
 STABLE_TAG = re.compile("v" + _STABLE)
 TEST_TAG = re.compile("v" + _STABLE + r"-test\.(%s)" % SERIAL)
+DEV_TAG = re.compile("v" + _STABLE + r"-dev\.(%s)" % SERIAL)
+# A dev build sorts below the test build of the same base, which sorts below the stable release.
+CHANNEL_RANK = {"stable": 2, "test": 1, "dev": 0}
 MAX_NOTES = 4000
 MAX_BRANCH = 100
 TAGGER = {"name": "github-actions[bot]", "email": "41898282+github-actions[bot]@users.noreply.github.com"}
@@ -36,31 +40,32 @@ MACOS_ARCHITECTURES = ["arm64"]
 
 
 def parse_version(text):
-    """Return (major, minor, patch, serial); serial is None for a stable version."""
-    for pattern in (STABLE_VERSION, TEST_VERSION):
+    """Return (major, minor, patch, channel, serial); channel is stable/test/dev and serial is None for stable."""
+    for channel, pattern in (("stable", STABLE_VERSION), ("test", TEST_VERSION), ("dev", DEV_VERSION)):
         match = pattern.fullmatch(text) if isinstance(text, str) else None
         if match:
-            numbers = tuple(int(part) for part in match.groups())
-            return numbers if len(numbers) == 4 else numbers + (None,)
+            numbers = tuple(int(part) for part in match.groups()[:3])
+            return numbers + (channel, None if channel == "stable" else int(match.groups()[3]))
     raise ValueError("Invalid version: " + repr(text))
 
 
 def version_key(text):
-    """Order versions: a test build sorts below the stable version it is a candidate for."""
-    major, minor, patch, serial = parse_version(text)
-    return (major, minor, patch, 1, 0) if serial is None else (major, minor, patch, 0, serial)
+    """Order versions: a dev build sorts below a test build, which sorts below its own stable release."""
+    major, minor, patch, channel, serial = parse_version(text)
+    return (major, minor, patch, CHANNEL_RANK[channel], serial or 0)
 
 
 def tag_channel(tag, build_number):
-    """'stable' or 'test' for a publishable tag. A test serial is the run's build number."""
+    """'stable', 'test' or 'dev' for a publishable tag. A prerelease serial is the run's build number."""
     if STABLE_TAG.fullmatch(tag):
         return "stable"
-    match = TEST_TAG.fullmatch(tag)
-    if match:
-        if int(match.group(4)) != int(build_number):
-            raise ValueError("Test tag serial must equal the build number")
-        return "test"
-    raise ValueError("Only stable vX.Y.Z or test vX.Y.Z-test.N tags can publish")
+    for channel, pattern in (("test", TEST_TAG), ("dev", DEV_TAG)):
+        match = pattern.fullmatch(tag)
+        if match:
+            if int(match.group(4)) != int(build_number):
+                raise ValueError("Prerelease tag serial must equal the build number")
+            return channel
+    raise ValueError("Only stable vX.Y.Z, test vX.Y.Z-test.N or dev vX.Y.Z-dev.N tags can publish")
 
 
 def clean_branch(value):
@@ -83,17 +88,18 @@ def published_versions(api):
         stable = tuple(int(part) for part in match.groups())
     highest = None
     for item in api.request("GET", prefix + "/releases?per_page=100") or []:
-        match = TEST_TAG.fullmatch(item.get("tag_name") or "")
+        match = TEST_TAG.fullmatch(item.get("tag_name") or "") or DEV_TAG.fullmatch(item.get("tag_name") or "")
         if match and item.get("draft") is False and item.get("prerelease") is True:
             base = tuple(int(part) for part in match.groups()[:3])
             highest = base if highest is None else max(highest, base)
     return stable, highest
 
 
-def manual_test_identity(api, source_sha):
+def manual_prerelease_identity(api, source_sha, channel):
+    """Identity of a manual test or dev build; the tag is created by publish after the build."""
     notes = os.environ.get("RELEASE_NOTES", "").strip()
     if not notes:
-        raise ValueError("Test releases require release notes")
+        raise ValueError("Test and dev releases require release notes")
     if len(notes) > MAX_NOTES:
         raise ValueError("Release notes must be at most %d characters" % MAX_NOTES)
     serial = os.environ.get("GITHUB_RUN_NUMBER", "")
@@ -121,8 +127,8 @@ def manual_test_identity(api, source_sha):
         raise ValueError("base_version must be above the latest stable release; a test build sorts below its own stable version")
     if highest is not None and base < highest:
         raise ValueError("base_version must not be below the highest published test base")
-    version = "%d.%d.%d-test.%s" % (base + (serial,))
-    return {"release": "true", "version": version, "sha": source_sha, "channel": "test", "tag": "v" + version}
+    version = "%d.%d.%d-%s.%s" % (base + (channel, serial))
+    return {"release": "true", "version": version, "sha": source_sha, "channel": channel, "tag": "v" + version}
 
 
 def identity(api=None):
@@ -133,15 +139,15 @@ def identity(api=None):
     channel = os.environ.get("RELEASE_CHANNEL", "")
     if event == "workflow_dispatch" and ref_type != "branch":
         raise ValueError("Manual builds require a branch; rerun the original tag workflow to recover a release")
-    if channel not in ("", "preview", "test"):
+    if channel not in ("", "preview", "test", "dev"):
         raise ValueError("Unknown release channel")
     if channel and event != "workflow_dispatch":
         raise ValueError("A release channel can only be selected for a manual build")
     source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     release = event == "push" and ref_type == "tag"
     if release:
-        if TEST_TAG.fullmatch(tag):
-            raise ValueError("Test releases are created only by a manual channel=test build; a pushed test tag is not a release")
+        if TEST_TAG.fullmatch(tag) or DEV_TAG.fullmatch(tag):
+            raise ValueError("Test and dev releases are created only by a manual channel=test/dev build; a pushed prerelease tag is not a release")
         if not STABLE_TAG.fullmatch(tag):
             raise ValueError("Only stable vX.Y.Z tags are supported")
         ref = "refs/tags/" + tag
@@ -159,12 +165,12 @@ def identity(api=None):
         if contained.returncode != 0:
             raise ValueError("Release commit must be contained in origin/main")
         result = {"release": "true", "version": tag[1:], "sha": source_sha}
-    elif channel == "test":
+    elif channel in ("test", "dev"):
         # A manual branch build only: the commit need not be in main, so the tag is made by publish.
-        result = manual_test_identity(api, source_sha)
+        result = manual_prerelease_identity(api, source_sha, channel)
     else:
         if os.environ.get("RELEASE_BASE_VERSION", "").strip() or os.environ.get("RELEASE_NOTES", "").strip():
-            raise ValueError("base_version and notes are only used by channel=test")
+            raise ValueError("base_version and notes are only used by channel=test/dev")
         result = {"release": "false", "version": "0.0.0", "sha": source_sha}
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
         for key, value in result.items():
@@ -188,9 +194,9 @@ def metadata(args):
     path = Path(args.package)
     if not re.fullmatch(r"[0-9a-f]{64}", args.fingerprint):
         raise ValueError("Signature fingerprint must be lowercase SHA256")
-    serial = parse_version(args.version)[3]
-    if serial is not None and serial != int(args.build_number):
-        raise ValueError("Test version serial must equal the build number")
+    channel, serial = parse_version(args.version)[3:]
+    if channel != "stable" and serial != int(args.build_number):
+        raise ValueError("Test and dev version serials must equal the build number")
     architectures = args.architectures.split(",")
     if args.platform == "macos" and architectures != MACOS_ARCHITECTURES:
         raise ValueError("macOS packages are Apple Silicon (arm64) only")
@@ -232,9 +238,9 @@ def prepare(directory, tag, source_sha, build_number, branch=""):
     manifest = {"version": tag[1:], "tag": tag, "source_sha": source_sha,
                 "build_number": int(build_number), "artifacts": artifacts,
                 "macos_requirements": "macOS 14+, Apple Silicon only; bundled Python runtime; Git/Plus as configured; ad-hoc signed, not notarized"}
-    if channel == "test":
+    if channel in ("test", "dev"):
         # Stable manifests keep their exact historical shape: no channel key.
-        manifest.update({"channel": "test", "base_version": tag[1:].split("-", 1)[0], "branch": clean_branch(branch)})
+        manifest.update({"channel": channel, "base_version": tag[1:].split("-", 1)[0], "branch": clean_branch(branch)})
     write_json(root / "manifest.json", manifest)
     names = [item["name"] for item in artifacts] + ["manifest.json"]
     (root / "SHA256SUMS").write_text("".join(sha256(root / name) + "  " + name + "\n" for name in names))
@@ -328,9 +334,9 @@ def find_release(api, prefix, tag):
         page += 1
 
 
-def annotation_message(notes, branch, source_sha, build_number, run_url):
-    """Public annotation of a test tag: the person's notes, then where the build came from."""
-    lines = [notes.strip(), "", "Channel: test", "Branch: " + clean_branch(branch),
+def annotation_message(notes, branch, source_sha, build_number, run_url, channel="test"):
+    """Public annotation of a prerelease tag: the person's notes, then where the build came from."""
+    lines = [notes.strip(), "", "Channel: " + channel, "Branch: " + clean_branch(branch),
              "Commit: " + source_sha, "Build: " + str(int(build_number))]
     if run_url:
         lines.append("Run: " + run_url)
@@ -351,8 +357,8 @@ def publish(api, directory, tag, source_sha, build_number, channel="stable", not
         raise ValueError("Manifest identity mismatch")
     if tag_channel(tag, build_number) != channel:
         raise ValueError("Tag does not belong to the %s channel" % channel)
-    if channel == "test" and not notes.strip():
-        raise ValueError("Test releases require release notes")
+    if channel in ("test", "dev") and not notes.strip():
+        raise ValueError("Test and dev releases require release notes")
     # Recompute from metadata, detecting changed files before any GitHub mutation.
     if prepare(root, tag, source_sha, build_number, branch) != manifest:
         raise ValueError("Manifest does not match build metadata")
@@ -361,16 +367,16 @@ def publish(api, directory, tag, source_sha, build_number, channel="stable", not
     reference = api.request("GET", reference_path)
     if reference:
         notes = verify_remote_tag(api, prefix, reference, tag, source_sha)
-    elif channel == "test":
-        # A test build is not tagged by hand: this job creates the annotated tag, after every check below.
-        notes = annotation_message(notes, branch, source_sha, build_number, run_url)
+    elif channel in ("test", "dev"):
+        # A prerelease is not tagged by hand: this job creates the annotated tag, after every check below.
+        notes = annotation_message(notes, branch, source_sha, build_number, run_url, channel)
     else:
         raise ValueError("Remote tag is missing")
     marker = "<!-- kaneopilot-ci:%s:%s -->" % (source_sha, build_number)
     release = find_release(api, prefix, tag)
     if release is not None and marker not in (release.get("body") or ""):
         raise ValueError("Release belongs to another build; refusing to modify it")
-    prerelease = channel == "test"
+    prerelease = channel in ("test", "dev")
     if release is not None and (release.get("tag_name") != tag or release.get("prerelease") is not prerelease):
         raise ValueError("Existing release tag or %s channel mismatch" % channel)
     if not prerelease and (release is None or release.get("draft")):
@@ -381,8 +387,12 @@ def publish(api, directory, tag, source_sha, build_number, channel="stable", not
         create_test_tag(api, prefix, tag, source_sha, notes)
         verify_remote_tag(api, prefix, api.request("GET", reference_path), tag, source_sha)
     if release is None:
-        install = ("测试版（预发布）：来自分支构建，仅供开发验证；不会成为 latest，App 内只有开启「接收测试版」后才会提供。\n\nAndroid 8.0+：正式密钥签名 APK（与正式版同一证书和包名）。"
-                   if prerelease else "Android 8.0+：固定密钥签名 APK。")
+        if channel == "dev":
+            install = ("开发版（预发布）：来自 dev 分支构建，仅供开发验证；不会成为 latest，App 内只有把更新通道切到「开发版」后才会提供。\n\nAndroid 8.0+：正式密钥签名 APK（与正式版同一证书和包名）。")
+        elif channel == "test":
+            install = ("测试版（预发布）：来自分支构建，仅供开发验证；不会成为 latest，App 内只有把更新通道切到「测试版」或「开发版」后才会提供。\n\nAndroid 8.0+：正式密钥签名 APK（与正式版同一证书和包名）。")
+        else:
+            install = "Android 8.0+：固定密钥签名 APK。"
         release = api.request("POST", prefix + "/releases", {
             "tag_name": tag, "target_commitish": source_sha, "name": "KaneoPilot " + tag,
             "draft": True, "prerelease": prerelease,

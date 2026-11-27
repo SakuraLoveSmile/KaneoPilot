@@ -31,6 +31,7 @@ bash scripts/build_local_macos.sh --preview 1180x760 dark
 | 分支 push / PR | Python 隔离检查通过后，两端分别检查并生成 Debug APK、Apple Silicon（arm64）DMG | 不创建 Release |
 | Actions → Packages → Run workflow，选择分支（`channel=preview`，默认） | 与分支构建相同；版本为 `0.0.0`，build 为 run number | 不创建 Release；手动选择标签会被拒绝 |
 | Actions → Packages → Run workflow，选择已推送的任务分支，`channel=test` | 固定密钥签名 APK、arm64 DMG，版本为 `X.Y.Z-test.<run number>` | 全部必需 job 成功后创建注释标签并发布 **GitHub 预发布**（测试版），不会成为 latest；见[测试版通道](#测试版通道) |
+| Actions → Packages → Run workflow，选择 `dev` 分支，`channel=dev` | 与 `channel=test` 相同，版本为 `X.Y.Z-dev.<run number>` | 同样发布 GitHub 预发布（开发版）；客户端把更新通道切到「开发版」才会收到，见[开发版通道](#开发版通道) |
 | 推送合规的 annotated `vX.Y.Z` 标签 | 固定密钥签名 APK、arm64 DMG，版本由标签注入 | 全部必需 job 成功后发布正式 Release |
 
 同一分支较新的 push 会取消较旧的 push 运行（PR 同理）；手动运行（可能正在发布测试版）和标签运行从不被取消。只改 `docs/plans/**` 的分支 push 不启动运行，手动运行与标签推送不受这条过滤影响。
@@ -71,18 +72,19 @@ git push origin refs/tags/v1.2.3
 ### 版本与排序规范（唯一规范）
 
 ```text
-版本   := 稳定 | 测试
+版本   := 稳定 | 测试 | 开发
 稳定   := N "." N "." N           N := 0 | [1-9][0-9]{0,8}      每段至多 9 位
 测试   := 稳定 "-test." B          B := [1-9][0-9]{0,8}          B 就是该次 Actions run number
+开发   := 稳定 "-dev." B           B := [1-9][0-9]{0,8}
 tag    := "v" 版本
-排序键 := (major, minor, patch, 稳定 ? 1 : 0, B)                元组逐项按数值比较
+排序键 := (major, minor, patch, 稳定 ? 2 : 测试 ? 1 : 0, B)      元组逐项按数值比较
 ```
 
-- 其它形式一律无效：`-rc.N`、`-beta.N`、缺 B 的 `-test`、`-test.0`、前导零、`+build`、空白、非 ASCII 数字、超过 9 位的数字段。排序例：`0.2.0 < 0.2.1-test.9 < 0.2.1-test.70 < 0.2.1 < 0.3.0-test.1 < 0.3.0`（B 按数值比较，不是字符串）。「每段至多 9 位」是对旧 Kotlin 端宽松解析的有意收紧：三端一致，且 B 必须放得进 `versionCode`。
+- 其它形式一律无效：`-rc.N`、`-beta.N`、缺 B 的 `-test`/`-dev`、`-test.0`、`-dev.0`、前导零、`+build`、空白、非 ASCII 数字、超过 9 位的数字段。排序例：`0.2.0 < 0.2.1-dev.9 < 0.2.1-dev.70 < 0.2.1-test.1 < 0.2.1-test.70 < 0.2.1 < 0.3.0-test.1 < 0.3.0`（B 按数值比较，不是字符串）。开发版永远排在同一个基础版的测试版之下。「每段至多 9 位」是对旧 Kotlin 端宽松解析的有意收紧：三端一致，且 B 必须放得进 `versionCode`。
 - 提供更新当且仅当候选排序键严格大于已装版本。候选或已装任一方是测试版时，另要求构建号严格增大（Android 是 `versionCode`，Mac 是 `CFBundleVersion`，必须是整数），防止「基础版更高但源码更旧」的测试构建被装上去。两个正式版之间只比版本，同版本不因 build 变化更新。
 - 测试版的 B 等于 `build_number`、Android `versionCode`、Mac `CFBundleVersion`。每次构建有自己的 B，所以同一源码重复发布也是不同的测试版。
 - **SemVer 陷阱**：`X.Y.Z-任何后缀` 都小于 `X.Y.Z`。基础版若不高于最新正式版，该版本的用户永远收不到，所以发布时强制基础版严格高于最新正式版。
-- 共享向量文件 `scripts/tests/fixtures/update-version-vectors.json`（有效/无效字符串、升序序列和更新判定）由 Python 测试、macOS 夹具、Android 单测共同读取。规则变化先改这里和本节，不得三份实现各改各的。
+- 共享向量文件 `scripts/tests/fixtures/update-version-vectors.json`（有效/无效字符串、升序序列和更新判定）由 Python 测试、macOS 夹具、Android 单测共同读取；开发版的向量在独立的 `dev` 段，由 Python 测试与 macOS 夹具读取，Android 在出现开发版通道之前按「无效候选」忽略 `-dev.N`。规则变化先改这里和本节，不得实现各改各的。
 
 ### 发布测试版
 
@@ -102,6 +104,20 @@ jq -n --rawfile notes notes.md '{channel: "test", base_version: "0.2.1", notes: 
 - 检查与打包同正式版：Android 用 `assembleRelease` 和固定正式密钥签名（同一证书、同一包名 `com.sakurasep.kaneopilot`），macOS 仍是 ad-hoc 未公证；版本串写入 `versionName` 与 `MARKETING_VERSION`。云端 Debug 包每次 run 的签名证书都不同，不能用于测试通道。
 
 测试 Release：`tag_name=vX.Y.Z-test.B`，`prerelease=true`，非 draft，资产同样四项：`KaneoPilot-X.Y.Z-test.B-android.apk`、`KaneoPilot-X.Y.Z-test.B-macos-arm64.dmg`、`manifest.json`、`SHA256SUMS`（文件名必须与此完全一致）。测试版 manifest 沿用正式字段，另含 `channel:"test"`、`base_version` 和仅供显示的 `branch`（不超过 100 个可打印 ASCII 字符，权威来源是注释标签）；正式版 manifest 不含 `channel`，保持原样。
+
+### 发布开发版
+
+开发版与测试版同一条发布路径，只是 `channel=dev`、从常驻的 `dev` 分支构建、版本为 `<base>-dev.<run number>`：
+
+```sh
+git push origin dev
+gh workflow run packages.yml --ref dev -f channel=dev -f base_version=0.2.1 -f notes="本次开发版要点"
+```
+
+- `dev` 是累积未发布改动的集成分支；任务分支先合入 `dev`，验证通过后再回 `main`。开发版不要求提交已合入 `main`。
+- tag 为 `v<base>-dev.<run number>`，注释标签由发布 job 创建，标注 `Channel: dev`；不要手推 `-dev.` 标签。
+- manifest 的 `channel` 为 `"dev"`，其余字段与测试版相同；资产命名为 `KaneoPilot-X.Y.Z-dev.B-android.apk` / `KaneoPilot-X.Y.Z-dev.B-macos-arm64.dmg`。
+- Android 目前没有开发版通道：它的解析器把 `-dev.N` 当成无效候选忽略，所以开发版实际上只有 Mac 客户端会收到。
 
 发布 job 与正式版共用并发锁，一次只有一个发布 job 写 Release。它依次：复核产物与 manifest（含 B 等于 `build_number`）；幂等创建注释标签（已存在则必须是指向构建提交的注释标签，否则用 API 创建标签对象与引用）；查找或创建自己的 draft 预发布（正文带 `kaneopilot-ci:<sha>:<run>` 标记）；逐个核验或上传四个资产并读回哈希；最后 `PATCH {draft:false, prerelease:true}` 公开。不带 `make_latest`，也不读取 latest。他人的 draft、同名异包、被移动的标签、轻量或嵌套标签、空说明都在任何写入前中止；已公开的预发布缺资产不静默修补。
 
@@ -195,8 +211,18 @@ Android 下载后先核对 APK 包名、版本、`versionCode`、发布证书指
 - 自动下载仅在「通道开启 + 自动下载开启」时进行，Android 另需非计费网络；安装前仍需用户确认，界面显示「测试版」标记和来源分支。
 - 关闭通道：待安装的测试候选清除、已缓存的测试包删除、进行中的测试下载取消、持久化的测试候选记录丢弃、安装入口失效；正式候选不受影响；已装测试版保持不动，等待更高的正式版。已装测试版而开关关闭时，设置区提示当前是测试版。
 - 缓存：每次成功检查或安装后，清理已安装或被取代的更新包，只限 App 自己的更新缓存目录。
+
 - 测试版 Mac App 的 `CFBundleShortVersionString` 是 `X.Y.Z-test.B`、`CFBundleVersion` 是 B；安装助手按同一排序规范只安装更高的版本，涉及测试版时构建号也须更高，其余校验、挂载、原子交换、备份和回滚不变。
 - 首次进入测试通道，两端都要手动安装一次：Mac 的 `0.0.0` 开发预览没有更新器；Android 云端 Debug 包的证书与正式密钥不同，不能覆盖，需先卸载（会丢失配对，之后重新配对）。真实的「正式版 ↔ 测试版」更新要等出现带更新器的正式版才能实机验证。Mac 从 Universal 安装版本（包括 `v0.4.0`）迁到 arm64 包同样要手动安装一次，见[内置 Python 运行时与架构](#内置-python-运行时与架构)。
+
+### 开发版通道
+
+- Mac 的更新通道是三档选择（正式版 / 测试版 / 开发版），保存在 `softwareUpdate.channel`；旧版本只存了布尔开关 `softwareUpdate.receivesTestBuilds` 的记录按其值迁移（`true`→测试版，`false`→正式版），完全没有记录的全新安装默认「测试版」。
+- 通道决定接受哪些版本形态：正式版只收 `X.Y.Z`；测试版收 `X.Y.Z` 与 `-test.N`；开发版三档全收。候选筛选离线按 tag 形态完成，不增加请求。
+- 开发版候选来自同一次 `GET /releases?per_page=100`，只保留 `prerelease=true`、`-dev.N` 形态的条目；胜出候选的 `manifest.json` 必须 `channel="dev"`、`build_number` 等于 B、`base_version` 与 `branch` 合规。
+- 把通道从开发版收窄到测试版或正式版时，待安装的开发版候选、缓存包、进行中的下载和持久化记录一并清除，与关闭测试版通道一致；已装开发版保持不动，等待更高版本。
+- 传输白名单同时放行 `…/releases/download/vX.Y.Z-dev.B/<manifest.json 或对应安装包>`。
+
 
 分支构建的 `update-acceptance/` 仅用于授权后的真机隔离验收：独立包名 `com.sakurasep.kaneopilot.updateacceptance`、显示名「KaneoPilot 更新验证」，正式主包的包名与身份规则保持固定。预览/跨版本包及匹配测试 APK 由同一 job 生成，不加入正式 Release；不通过卸载现有主包或复用其数据来取得测试通过。任务记录给出各包身份、执行入口和实际设备结果。
 

@@ -27,9 +27,11 @@ MAX_PACKAGE_SIZE = 1024 ** 3
 FIELDS = {"package_path", "target_path", "cache_path", "version", "build_number",
           "source_sha", "sha256", "size", "signature_sha256"}
 # One version grammar for every platform (docs/build-release.md and the shared vectors in
-# scripts/tests/fixtures/update-version-vectors.json): X.Y.Z, or X.Y.Z-test.B for a test build.
+# scripts/tests/fixtures/update-version-vectors.json): X.Y.Z, X.Y.Z-test.B for a test build or
+# X.Y.Z-dev.B for a dev build. A dev build sorts below a test build of the same base.
 NUMBER = r"(?:0|[1-9][0-9]{0,8})"
-VERSION = re.compile(r"(%s)\.(%s)\.(%s)(?:-test\.([1-9][0-9]{0,8}))?\Z" % (NUMBER, NUMBER, NUMBER))
+VERSION = re.compile(r"(%s)\.(%s)\.(%s)(?:-(test|dev)\.([1-9][0-9]{0,8}))?\Z" % (NUMBER, NUMBER, NUMBER))
+CHANNEL_RANK = {"stable": 2, "test": 1, "dev": 0}
 BUILD = re.compile(r"[0-9]{1,18}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 # How long install() waits for leftovers of the old app (detached workers still shutting down) before refusing.
@@ -52,17 +54,24 @@ def require(condition, message, code="update_invalid_package"):
         raise UpdateError(message, code)
 
 
-def version_key(value):
-    """Sort key: a test build sorts below the stable version it is a candidate for."""
+def version_channel(value):
+    """'stable', 'test' or 'dev'; the grammar accepts exactly these three forms."""
     match = VERSION.fullmatch(value) if isinstance(value, str) else None
     require(match, "版本格式无效")
-    major, minor, patch, serial = match.groups()
-    numbers = (int(major), int(minor), int(patch))
-    return numbers + (1, 0) if serial is None else numbers + (0, int(serial))
+    return match.group(4) or "stable"
+
+
+def version_key(value):
+    """Sort key: dev below test below the stable version of the same base."""
+    match = VERSION.fullmatch(value) if isinstance(value, str) else None
+    require(match, "版本格式无效")
+    major, minor, patch, channel, serial = match.groups()
+    return (int(major), int(minor), int(patch), CHANNEL_RANK[channel or "stable"],
+            0 if serial is None else int(serial))
 
 
 def is_test_version(value):
-    return version_key(value)[3] == 0
+    return version_channel(value) == "test"
 
 
 def build_value(value):
@@ -70,10 +79,10 @@ def build_value(value):
 
 
 def update_allowed(installed, installed_build, candidate, candidate_build):
-    """A strictly higher version. A test version on either side also needs a strictly newer integer build."""
+    """A strictly higher version. A prerelease on either side also needs a strictly newer integer build."""
     if version_key(candidate) <= version_key(installed):
         return False
-    if is_test_version(installed) or is_test_version(candidate):
+    if version_channel(installed) != "stable" or version_channel(candidate) != "stable":
         current, offered = build_value(installed_build), build_value(candidate_build)
         return current is not None and offered is not None and offered > current
     return True

@@ -13,19 +13,54 @@ enum SoftwareUpdateError: LocalizedError {
     }
 }
 
+/// Which channel a build belongs to: a dev build sorts below a test build of the same base, which
+/// sorts below the stable release it is a candidate for.
+enum SoftwareUpdateKind: Int, Comparable, Sendable {
+    case dev = 0, test = 1, stable = 2
+    var name: String { self == .stable ? "stable" : (self == .test ? "test" : "dev") }
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+}
+
+/// The update channel the App follows. A channel offers its own builds and every more stable one.
+enum SoftwareUpdateChannel: String, CaseIterable, Sendable {
+    case stable, test, dev
+    var displayName: String {
+        switch self { case .stable: return "正式版"; case .test: return "测试版"; case .dev: return "开发版" }
+    }
+    var allowsTestBuilds: Bool { self != .stable }
+    var allowsDevBuilds: Bool { self == .dev }
+    func allows(_ kind: SoftwareUpdateKind) -> Bool {
+        switch kind {
+        case .stable: return true
+        case .test: return allowsTestBuilds
+        case .dev: return allowsDevBuilds
+        }
+    }
+    /// Stored value: an explicit channel, or the legacy `receivesTestBuilds` switch.
+    static func stored(_ raw: String?, legacyTestBuilds: Bool?) -> SoftwareUpdateChannel {
+        if let raw, let channel = SoftwareUpdateChannel(rawValue: raw) { return channel }
+        if let legacyTestBuilds { return legacyTestBuilds ? .test : .stable }
+        return .test
+    }
+}
+
 /// The version grammar shared with the release pipeline, the installer helper and Android
 /// (docs/build-release.md and scripts/tests/fixtures/update-version-vectors.json): `X.Y.Z` is a
-/// stable release and `X.Y.Z-test.B` a test build whose B is its Actions build number. A test build
-/// sorts below the stable release of the same base and test builds of one base sort by B.
+/// stable release, `X.Y.Z-test.B` a test build and `X.Y.Z-dev.B` a dev build, whose B is the
+/// Actions build number. A dev build sorts below a test build of the same base, which sorts below
+/// that base's stable release; builds of one kind sort by B.
 /// Parsing works on ASCII bytes so look-alike digits and trailing whitespace never pass.
 struct SoftwareVersion: Comparable, Sendable {
     let major: Int
     let minor: Int
     let patch: Int
-    /// B of `X.Y.Z-test.B`; nil for a stable release.
-    let testBuild: Int?
+    /// B of `X.Y.Z-test.B` or `X.Y.Z-dev.B`; nil for a stable release.
+    let serial: Int?
+    let kind: SoftwareUpdateKind
 
-    var isTest: Bool { testBuild != nil }
+    var isTest: Bool { kind == .test }
+    var isDev: Bool { kind == .dev }
+    var isPrerelease: Bool { kind != .stable }
 
     init(_ value: String) throws {
         try self.init(bytes: Array(value.utf8))
@@ -41,22 +76,25 @@ struct SoftwareVersion: Comparable, Sendable {
     }
 
     private init(bytes: [UInt8]) throws {
-        let invalid = SoftwareUpdateError.invalid("版本格式无效，必须是 MAJOR.MINOR.PATCH 正式版或 MAJOR.MINOR.PATCH-test.N 测试版")
+        let invalid = SoftwareUpdateError.invalid("版本格式无效，必须是 MAJOR.MINOR.PATCH 正式版、MAJOR.MINOR.PATCH-test.N 测试版或 MAJOR.MINOR.PATCH-dev.N 开发版")
         let parts = bytes.split(separator: UInt8(ascii: "."), omittingEmptySubsequences: false)
         guard parts.count == 3 || parts.count == 4 else { throw invalid }
         var patchPart = parts[2]
+        var kind = SoftwareUpdateKind.stable
         var serial: Int?
         if parts.count == 4 {
-            let marker = Array("-test".utf8)
-            guard patchPart.count > marker.count, patchPart.suffix(marker.count).elementsEqual(marker),
-                  let build = Self.decimal(parts[3], allowsZero: false) else { throw invalid }
-            patchPart = patchPart.dropLast(marker.count)
+            guard let matched = [("-test", SoftwareUpdateKind.test), ("-dev", .dev)].first(where: { marker, _ in
+                let bytes = Array(marker.utf8)
+                return patchPart.count > bytes.count && patchPart.suffix(bytes.count).elementsEqual(bytes)
+            }), let build = Self.decimal(parts[3], allowsZero: false) else { throw invalid }
+            patchPart = patchPart.dropLast(matched.0.utf8.count)
+            kind = matched.1
             serial = build
         }
         guard let major = Self.decimal(parts[0], allowsZero: true),
               let minor = Self.decimal(parts[1], allowsZero: true),
               let patch = Self.decimal(patchPart, allowsZero: true) else { throw invalid }
-        self.major = major; self.minor = minor; self.patch = patch; self.testBuild = serial
+        self.major = major; self.minor = minor; self.patch = patch; self.kind = kind; self.serial = serial
     }
 
     /// One to nine ASCII digits without a leading zero. A test build's B may not be zero.
@@ -84,7 +122,7 @@ struct SoftwareVersion: Comparable, Sendable {
     static func isUpdate(installed: SoftwareVersion, installedBuild: String,
                          candidate: SoftwareVersion, candidateBuild: Int) -> Bool {
         guard candidate > installed else { return false }
-        guard installed.isTest || candidate.isTest else { return true }
+        guard installed.isPrerelease || candidate.isPrerelease else { return true }
         guard let current = buildNumber(installedBuild) else { return false }
         return candidateBuild > current
     }
@@ -93,9 +131,8 @@ struct SoftwareVersion: Comparable, Sendable {
         if lhs.major != rhs.major { return lhs.major < rhs.major }
         if lhs.minor != rhs.minor { return lhs.minor < rhs.minor }
         if lhs.patch != rhs.patch { return lhs.patch < rhs.patch }
-        guard let left = lhs.testBuild else { return false }
-        guard let right = rhs.testBuild else { return true }
-        return left < right
+        if lhs.kind != rhs.kind { return lhs.kind < rhs.kind }
+        return (lhs.serial ?? 0) < (rhs.serial ?? 0)
     }
 }
 
@@ -183,12 +220,16 @@ struct SoftwareRelease: Codable, Equatable, Sendable {
     let downloadURL: URL
     let pageURL: URL
     let notes: String
-    /// `"test"` for a test build, nil for a stable release (and for records saved before test builds existed).
+    /// `"test"` or `"dev"` for a prerelease, nil for a stable release (and for older saved records).
     var channel: String?
-    /// The source branch of a test build, for display only.
+    /// The source branch of a prerelease, for display only.
     var branch: String?
 
     var isTest: Bool { channel == "test" }
+    var isDev: Bool { channel == "dev" }
+    var isPrerelease: Bool { channel != nil }
+    /// The channel the candidate itself belongs to, taken from the version grammar (validated on parse).
+    var kind: SoftwareUpdateKind { (try? SoftwareVersion(version))?.kind ?? .stable }
 
     func packageURL(in cache: URL) -> URL {
         cache.appendingPathComponent("\(tag)-\(sha256)", isDirectory: true).appendingPathComponent(name)
@@ -211,8 +252,8 @@ struct SoftwareRelease: Codable, Equatable, Sendable {
     /// A test build is marked as such, its build number is its B, and it names a display branch;
     /// a stable release carries neither field.
     private func hasConsistentChannel(_ parsed: SoftwareVersion) -> Bool {
-        guard let serial = parsed.testBuild else { return channel == nil && branch == nil }
-        return channel == "test" && buildNumber == serial && SoftwareUpdateSource.isDisplayBranch(branch)
+        guard let serial = parsed.serial else { return channel == nil && branch == nil }
+        return channel == parsed.kind.name && buildNumber == serial && SoftwareUpdateSource.isDisplayBranch(branch)
     }
 }
 
@@ -261,19 +302,20 @@ private struct SoftwareManifest: Decodable {
 }
 
 enum SoftwareReleaseParser {
-    /// `allowsTest` admits a published test pre-release; the default is the stable-only
+    /// `channel` admits the prereleases it follows; the default is the stable-only
     /// `/releases/latest` rule.
-    static func manifestURL(releaseData: Data, allowsTest: Bool = false) throws -> URL {
-        try manifestURL(release: decodeRelease(releaseData, allowsTest: allowsTest))
+    static func manifestURL(releaseData: Data, channel: SoftwareUpdateChannel = .stable) throws -> URL {
+        try manifestURL(release: decodeRelease(releaseData, channel: channel))
     }
 
-    static func parse(releaseData: Data, manifestData: Data, allowsTest: Bool = false) throws -> SoftwareRelease {
-        try parse(release: decodeRelease(releaseData, allowsTest: allowsTest), manifestData: manifestData)
+    static func parse(releaseData: Data, manifestData: Data,
+                      channel: SoftwareUpdateChannel = .stable) throws -> SoftwareRelease {
+        try parse(release: decodeRelease(releaseData, channel: channel), manifestData: manifestData)
     }
 
-    /// The tag of the newest test pre-release in a `GET /releases` answer, or nil when it has none.
-    static func newestTestTag(listData: Data) throws -> String? {
-        try newestTestRelease(listData: listData)?.tag_name
+    /// The tag of the newest prerelease the channel follows in a `GET /releases` answer, or nil.
+    static func newestPrereleaseTag(listData: Data, channel: SoftwareUpdateChannel) throws -> String? {
+        try newestPrereleaseRelease(listData: listData, channel: channel)?.tag_name
     }
 
     fileprivate static func manifestURL(release: GitHubSoftwareRelease) throws -> URL {
@@ -314,7 +356,7 @@ enum SoftwareReleaseParser {
             name: packageName, size: artifact.size, sha256: artifact.sha256.lowercased(),
             signatureSHA256: artifact.signature_sha256.lowercased(), downloadURL: asset.browser_download_url,
             pageURL: release.html_url, notes: String((release.body ?? "").prefix(16_384)),
-            channel: parsed.isTest ? "test" : nil, branch: parsed.isTest ? manifest.branch : nil)
+            channel: parsed.isPrerelease ? parsed.kind.name : nil, branch: parsed.isPrerelease ? manifest.branch : nil)
         try result.validate()
         return result
     }
@@ -323,8 +365,8 @@ enum SoftwareReleaseParser {
     /// `identity(of:)`). A stable manifest has no `channel`; a test manifest names its channel, its base
     /// version, its Actions number as the build number and a display branch.
     private static func hasConsistentChannel(_ manifest: SoftwareManifest, version: SoftwareVersion) -> Bool {
-        guard let serial = version.testBuild else { return manifest.channel == nil || manifest.channel == "stable" }
-        return manifest.channel == "test" && manifest.build_number == serial
+        guard let serial = version.serial else { return manifest.channel == nil || manifest.channel == "stable" }
+        return manifest.channel == version.kind.name && manifest.build_number == serial
             && manifest.base_version == "\(version.major).\(version.minor).\(version.patch)"
             && SoftwareUpdateSource.isDisplayBranch(manifest.branch)
     }
@@ -333,44 +375,47 @@ enum SoftwareReleaseParser {
     /// is never a pre-release and a test tag always is. Anything else is not a release to offer.
     fileprivate static func identity(of release: GitHubSoftwareRelease) -> SoftwareVersion? {
         guard !release.draft, let version = try? SoftwareVersion(tag: release.tag_name),
-              release.prerelease == version.isTest,
+              release.prerelease == version.isPrerelease,
               release.html_url == SoftwareUpdateSource.pageURL(tag: release.tag_name) else { return nil }
         return version
     }
 
-    fileprivate static func decodeRelease(_ data: Data, allowsTest: Bool) throws -> GitHubSoftwareRelease {
+    fileprivate static func decodeRelease(_ data: Data, channel: SoftwareUpdateChannel) throws -> GitHubSoftwareRelease {
         guard data.count <= SoftwareUpdateSource.metadataLimit else {
             throw SoftwareUpdateError.invalid("Release 元数据超过大小限制")
         }
         let release = try JSONDecoder().decode(GitHubSoftwareRelease.self, from: data)
-        guard let version = identity(of: release), allowsTest || !version.isTest else {
-            throw SoftwareUpdateError.invalid("最新发布不是有效的正式版本")
+        guard let version = identity(of: release), channel.allows(version.kind) else {
+            throw SoftwareUpdateError.invalid("最新发布不是当前通道的有效版本")
         }
         return release
     }
 
-    /// Published test pre-releases only, ranked by the shared ordering rather than by the list's order.
-    fileprivate static func newestTestRelease(listData: Data) throws -> GitHubSoftwareRelease? {
+    /// Published prereleases the channel follows, ranked by the shared ordering rather than by the list order.
+    fileprivate static func newestPrereleaseRelease(listData: Data,
+                                                     channel: SoftwareUpdateChannel) throws -> GitHubSoftwareRelease? {
         guard listData.count <= SoftwareUpdateSource.releaseListLimit else {
             throw SoftwareUpdateError.invalid("Release 列表超过大小限制")
         }
         let entries = try JSONDecoder().decode([LossyGitHubSoftwareRelease].self, from: listData)
         var best: (version: SoftwareVersion, release: GitHubSoftwareRelease)?
         for release in entries.compactMap({ $0.value }) {
-            guard let version = identity(of: release), version.isTest else { continue }
+            guard let version = identity(of: release), version.isPrerelease,
+                  channel.allows(version.kind) else { continue }
             if let current = best, !(current.version < version) { continue }
             best = (version, release)
         }
         return best?.release
     }
 
-    /// What a user who follows the test channel should look at: the newer of the latest stable release
-    /// and the newest test pre-release. Only the winner's manifest is read afterwards.
-    fileprivate static func newest(stable: GitHubSoftwareRelease, listData: Data) throws -> GitHubSoftwareRelease {
-        guard let test = try newestTestRelease(listData: listData),
-              let stableVersion = identity(of: stable), let testVersion = identity(of: test),
-              testVersion > stableVersion else { return stable }
-        return test
+    /// What a user who follows a prerelease channel should look at: the newer of the latest stable
+    /// release and the newest prerelease the channel follows. Only the winner's manifest is read afterwards.
+    fileprivate static func newest(stable: GitHubSoftwareRelease, listData: Data,
+                                   channel: SoftwareUpdateChannel) throws -> GitHubSoftwareRelease {
+        guard let prerelease = try newestPrereleaseRelease(listData: listData, channel: channel),
+              let stableVersion = identity(of: stable), let prereleaseVersion = identity(of: prerelease),
+              prereleaseVersion > stableVersion else { return stable }
+        return prerelease
     }
 }
 
@@ -533,26 +578,21 @@ struct GitHubSoftwareUpdateTransport: SoftwareUpdateTransport {
 }
 
 protocol SoftwareUpdateServing: Sendable {
-    /// The latest stable release (one API request).
-    func latest() async throws -> SoftwareRelease
-    /// The newest release the user follows. With the test channel on that is the newer of the latest
-    /// stable release and the newest test pre-release (two API requests); a service that only knows
-    /// stable releases keeps the default.
-    func latest(includingTestBuilds: Bool) async throws -> SoftwareRelease
-    /// The newest release the user follows, or nil when it is not newer than `installed`. Newer is decided
+    /// The newest release the given channel follows: one API request for the stable channel, two when a
+    /// prerelease channel also reads the release list.
+    func latest(channel: SoftwareUpdateChannel) async throws -> SoftwareRelease
+    /// The newest release the channel follows, or nil when it is not newer than `installed`. Newer is decided
     /// by the release tag alone, so the manifest of a release that is not newer is never read or judged:
     /// the Universal releases of the retired scheme (docs/build-release.md) stay on the release page and
-    /// must not turn a check into an error. A service that does not see tags keeps the default and leaves
-    /// the whole decision to the caller.
-    func latestUpdate(includingTestBuilds: Bool, newerThan installed: SoftwareVersion) async throws -> SoftwareRelease?
+    /// must not turn a check into an error.
+    func latestUpdate(channel: SoftwareUpdateChannel, newerThan installed: SoftwareVersion) async throws -> SoftwareRelease?
     func download(_ release: SoftwareRelease, cacheDirectory: URL,
                   progress: @escaping @Sendable (Double) -> Void) async throws -> URL
 }
 
 extension SoftwareUpdateServing {
-    func latest(includingTestBuilds: Bool) async throws -> SoftwareRelease { try await latest() }
-    func latestUpdate(includingTestBuilds: Bool, newerThan installed: SoftwareVersion) async throws -> SoftwareRelease? {
-        try await latest(includingTestBuilds: includingTestBuilds)
+    func latestUpdate(channel: SoftwareUpdateChannel, newerThan installed: SoftwareVersion) async throws -> SoftwareRelease? {
+        try await latest(channel: channel)
     }
 }
 
@@ -561,30 +601,27 @@ struct GitHubSoftwareUpdateService: SoftwareUpdateServing {
 
     init(transport: any SoftwareUpdateTransport = GitHubSoftwareUpdateTransport()) { self.transport = transport }
 
-    func latest() async throws -> SoftwareRelease {
-        try await latest(includingTestBuilds: false)
-    }
-
-    func latest(includingTestBuilds: Bool) async throws -> SoftwareRelease {
-        let newest = try await newestRelease(includingTestBuilds: includingTestBuilds)
+    func latest(channel: SoftwareUpdateChannel) async throws -> SoftwareRelease {
+        let newest = try await newestRelease(channel: channel)
         return try await parsedRelease(of: newest)
     }
 
-    func latestUpdate(includingTestBuilds: Bool, newerThan installed: SoftwareVersion) async throws -> SoftwareRelease? {
-        let newest = try await newestRelease(includingTestBuilds: includingTestBuilds)
+    func latestUpdate(channel: SoftwareUpdateChannel, newerThan installed: SoftwareVersion) async throws -> SoftwareRelease? {
+        let newest = try await newestRelease(channel: channel)
         guard let version = SoftwareReleaseParser.identity(of: newest), version > installed else { return nil }
         return try await parsedRelease(of: newest)
     }
 
-    /// The release the user follows. With the channel off that is the latest stable release; with it on, the
-    /// newer of that and the newest test pre-release. Any failing request fails the whole check, so a missing
-    /// stable answer never lets an older test build pass for the newest release.
-    private func newestRelease(includingTestBuilds: Bool) async throws -> GitHubSoftwareRelease {
+    /// The release the user's channel follows. The stable channel reads only the latest stable release; a
+    /// prerelease channel reads the release list too and takes the newer of the stable release and the newest
+    /// prerelease it follows. Any failing request fails the whole check, so a missing stable answer never
+    /// lets an older prerelease pass for the newest release.
+    private func newestRelease(channel: SoftwareUpdateChannel) async throws -> GitHubSoftwareRelease {
         let stableData = try await transport.data(from: SoftwareUpdateSource.latestURL, maximumSize: SoftwareUpdateSource.metadataLimit)
-        guard includingTestBuilds else { return try SoftwareReleaseParser.decodeRelease(stableData, allowsTest: false) }
+        let stable = try SoftwareReleaseParser.decodeRelease(stableData, channel: .stable)
+        guard channel != .stable else { return stable }
         let listData = try await transport.data(from: SoftwareUpdateSource.releaseListURL, maximumSize: SoftwareUpdateSource.releaseListLimit)
-        let stable = try SoftwareReleaseParser.decodeRelease(stableData, allowsTest: false)
-        return try SoftwareReleaseParser.newest(stable: stable, listData: listData)
+        return try SoftwareReleaseParser.newest(stable: stable, listData: listData, channel: channel)
     }
 
     /// Only the winner's manifest is read and a bad one is an error: there is no fallback to the other candidate.

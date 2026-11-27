@@ -11,20 +11,32 @@ struct SoftwareUpdateSection: View {
         _updater = ObservedObject(wrappedValue: updater ?? .shared)
     }
 
-    /// A development preview never receives test builds, whatever was saved before.
-    private var testBuildsBinding: Binding<Bool> {
-        Binding(get: { updater.testChannelActive }, set: { updater.receivesTestBuilds = $0 })
+    /// A development preview follows the stable channel whatever was saved before.
+    private var channelBinding: Binding<SoftwareUpdateChannel> {
+        Binding(get: { updater.effectiveChannel }, set: { updater.channel = $0 })
     }
 
     private var frequencyText: String {
-        updater.testChannelActive
-            ? "App 运行期间每 6 小时检查 GitHub 正式版和测试版；下载校验完成后，由你确认安装。"
-            : "App 运行期间每 6 小时检查 GitHub 正式版；下载校验完成后，由你确认安装。"
+        switch channelBinding.wrappedValue {
+        case .stable: return "App 运行期间每 6 小时检查 GitHub 正式版；下载校验完成后，由你确认安装。"
+        case .test: return "App 运行期间每 6 小时检查 GitHub 正式版和测试版；下载校验完成后，由你确认安装。"
+        case .dev: return "App 运行期间每 6 小时检查 GitHub 正式版、测试版和开发版；下载校验完成后，由你确认安装。"
+        }
+    }
+
+    private var channelHint: String {
+        switch channelBinding.wrappedValue {
+        case .stable: return "只接收正式版；不会收到测试版或开发版。"
+        case .test: return "接收正式版和测试版；测试版来自任务分支，可能不稳定，也可能升级数据库，无法在 App 内降级。"
+        case .dev: return "接收正式版、测试版和开发版；开发版来自 dev 分支，更新最快、风险最高，同样无法在 App 内降级。"
+        }
     }
 
     private var installationWarning: String {
         let base = "将保存回答草稿并安全停止本实例的后台服务，再替换 App 并重新启动。若无法安全退出，安装会取消。任务数据和外部 Plus 会话会保留。"
-        return updater.release?.isTest == true ? base + "这是测试版：可能不稳定，也可能升级数据库，无法在 App 内降级。" : base
+        guard let release = updater.release, release.isPrerelease else { return base }
+        let label = release.channel == "dev" ? "开发版" : "测试版"
+        return base + "这是\(label)：可能不稳定，也可能升级数据库，无法在 App 内降级。"
     }
 
     var body: some View {
@@ -40,7 +52,7 @@ struct SoftwareUpdateSection: View {
                     updateActions
                 }
             }
-            if let release = updater.release, release.isTest, let branch = release.branch {
+            if let release = updater.release, release.isPrerelease, let branch = release.branch {
                 Text(verbatim: "来源分支：\(branch)")
                     .font(.kpSmall).foregroundStyle(.secondary).textSelection(.enabled)
             }
@@ -75,11 +87,11 @@ struct SoftwareUpdateSection: View {
             if updater.isPreview {
                 Text("当前是开发预览版，不会自动切换到正式版。可手动检查并查看发布页。")
                     .font(.kpSmall).foregroundStyle(.secondary)
-                Text("开发预览版不接收测试版。")
+                Text("开发预览版只跟随正式版通道。")
                     .font(.kpSmall).foregroundStyle(.secondary)
             }
-            if updater.installedIsTestBuild && !updater.testChannelActive {
-                Text("当前是测试版。开启「接收测试版」可获取后续测试构建；关闭时只在出现更高的正式版时提示。")
+            if updater.installedIsTestBuild && !updater.prereleaseChannelActive {
+                Text("当前是预发布版。把更新通道切到「测试版」或「开发版」可获取后续测试构建；正式版通道只在出现更高的正式版时提示。")
                     .font(.kpSmall).foregroundStyle(.secondary)
             }
             Divider()
@@ -93,12 +105,20 @@ struct SoftwareUpdateSection: View {
                         Text("自动下载更新").frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .disabled(!updater.allowsNetwork || updater.isPreview)
-                    Toggle(isOn: testBuildsBinding) {
-                        Text("接收测试版").frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        Text("更新通道").frame(maxWidth: .infinity, alignment: .leading)
+                        Picker("更新通道", selection: channelBinding) {
+                            ForEach(SoftwareUpdateChannel.allCases, id: \.self) { channel in
+                                Text(channel.displayName).tag(channel)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .disabled(!updater.canChangeChannel)
+                        .accessibilityLabel("更新通道")
+                        Text(channelHint)
+                            .font(.kpSmall).foregroundStyle(.secondary)
                     }
-                    .disabled(!updater.canChangeTestChannel)
-                    Text("开启后，也会检查并提供来自开发分支的测试构建；测试构建可能不稳定，也可能升级数据库，无法在 App 内降级。")
-                        .font(.kpSmall).foregroundStyle(.secondary)
                     Text(frequencyText)
                         .font(.kpSmall).foregroundStyle(.secondary)
                 }
