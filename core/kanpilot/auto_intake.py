@@ -9,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+from . import worktree_pool
 from . import automation_policy, cli, constants, core, db, planner_config, planner_inputs, project_config, remote, util
 
 _TRANSIENT = {"remote_unavailable", "git_transient"}
@@ -239,7 +240,7 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
             delivery = git_delivery.prepare_branch_worktree(task["repository"], task_id,
                        base_branch=policy.get("delivery_base"),
                        initial_head_sha=initial,
-                       worktrees_root=constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None))
+                       worktrees_root=worktree_pool.project_root(conn, task["repository"], task_id))
             adopted = bool(delivery.pop("adopted", False))
             if delivery.get("branch"):
                 delivery["mode"] = "pr"
@@ -260,7 +261,7 @@ def _submit(conn, db_path, task_id, policy, now, expected, *, wanted=False, cand
             delivery = git_delivery.prepare_branch_worktree(meta["repository"], task_id,
                        base_branch=policy.get("delivery_base"),
                        initial_head_sha=initial,
-                       worktrees_root=constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None))
+                       worktrees_root=worktree_pool.project_root(conn, meta["repository"], task_id))
             adopted = bool(delivery.pop("adopted", False))
             if delivery.get("branch"):
                 delivery["mode"] = "pr"

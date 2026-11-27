@@ -762,16 +762,24 @@ def review_instruction(prompt: str, *, job: dict, review_root: Path,
 # --------------------------------------------------------------- 回合执行
 
 
-def _create_plan_session(client, block: dict, directory: Path
+def _create_plan_session(client, block: dict, directory: Path, *,
+                         project_name: Optional[str] = None,
+                         session_title: Optional[str] = None
                          ) -> Tuple[Optional[str], Optional[str]]:
-    """按本轮快照配置 plan 审查会话，新轮次 auto、历史 ask 保留。"""
+    """按本轮快照配置 plan 审查会话，新轮次 auto、历史 ask 保留。
+
+    §5.23.10 展示快照：工作区名取任务所属项目、标题取任务名；不传时 Plus
+    会用 Review worktree 目录名当工作区名（如 review / run），与任务归属不符。
+    """
     try:
         created = client.session_create(
             str(directory), mode=constants.PI_DESKTOP_PLAN_MODE,
             provider_id=block.get("provider_id"),
             model_id=block.get("model_id"),
             thinking_level=block.get("thinking_level"),
-            title=f"KaneoPilot Review · {directory.name}", interaction_mode="unattended",
+            title=session_title or f"KaneoPilot Review · {directory.name}",
+            project_name=project_name,
+            interaction_mode="unattended",
         )
     except util.KanpilotError as exc:
         return None, f"pi_session_create 失败：{exc.message}"
@@ -1021,7 +1029,11 @@ def _start_model_round(*, client, block: dict, job: dict, job_path, log,
     """建 plan 会话 → 发送前落 send_state=unknown → 启动证明 → 登记 sent。"""
     # 会话项目根 = 专属 Review worktree（审查输入）；控制轮产物仍在 invocation 目录。
     project_root = Path(job.get("review_root") or job["invocation_dir"])
-    session_id, detail = _create_plan_session(client, block, project_root)
+    session_id, detail = _create_plan_session(
+        client, block, project_root,
+        project_name=job.get("workspace_display_name"),
+        session_title=job.get("session_display_name"),
+    )
     if session_id is None:
         return detail or "建会话失败"
     job["session_id"] = session_id
@@ -1525,6 +1537,11 @@ def _fresh_round(*, conn, db_path, block: dict, prompt: str, timeout: float,
             record_run=record_run, detail=f"review 身份核对失败：{problem}",
         )
     task = facts["task"]
+    # §5.23.10 展示快照：Plus 工作区用任务所属项目名，会话标题用任务名。
+    workspace_display_name = (task.get("project_name") or "").strip() or None
+    task_title = (task.get("title") or "").strip() or job["task_id"]
+    job["workspace_display_name"] = workspace_display_name
+    job["session_display_name"] = f"{task_title} · Review"
     job["execution_run_id"] = task.get("run_id")
     execution_worktree = Path(
         str((task.get("execution_round") or {}).get("worktree_path"))

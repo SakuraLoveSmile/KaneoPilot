@@ -3,6 +3,7 @@ import os
 import re
 from pathlib import Path
 
+from . import worktree_pool
 from . import (constants, core, db, exec_config, gh_client, git_delivery,
                release_delivery, release_github, runtime_operations, util)
 
@@ -108,7 +109,7 @@ def prepare(ctx, task):
     value["action_id"] = action._digest(identity)
     git_delivery._task_id(task["task_id"])
     value["branch"] = constants.DELIVERY_BRANCH_PREFIX + task["task_id"] + "-build-" + value["action_id"][:16]
-    root = constants.worktrees_root(db.get_setting(ctx.conn, "worktrees_root"))
+    root = worktree_pool.project_root(ctx.conn, task["repository"], task["task_id"])
     value["worktree_path"] = str(root.expanduser().resolve() / task["task_id"] / ("build-" + value["action_id"][:16]))
     util.require(not os.path.lexists(value["worktree_path"])
                  and not git_delivery._value(["for-each-ref", "--format=%(refname)", "refs/heads/" + value["branch"],

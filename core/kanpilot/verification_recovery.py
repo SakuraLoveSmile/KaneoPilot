@@ -207,7 +207,7 @@ def _read_run_evidence(conn, task):
                    for event in events)):
         _conflict("执行事件的任务、轮次、会话身份或 completed 终态不符")
     try:
-        meta, raw, path = planfile.load_plan(task["plan_path"], task["task_id"])
+        meta, raw, path = planfile.load_plan(task["plan_path"], task["task_id"], repository=task["repository"])
     except (util.KanpilotError, OSError, ValueError) as exc:
         raise util.KanpilotError("conflict", "当前计划文件不可核验") from exc
     if (util.sha256_bytes(raw) != task["plan_sha256"]

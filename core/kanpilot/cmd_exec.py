@@ -972,7 +972,7 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
         if plan_kind not in ("standard", "review_fix"):
             raise util.KanpilotError("bad_request", "invalid plan_kind")
         meta, raw, path = planfile.load_plan(
-            payload["plan_path"], task["task_id"]
+            payload["plan_path"], task["task_id"], repository=task["repository"]
         )
         # §5.22.6 + §5.24.3 + T1：frontmatter 的 planner_model/reasoning_effort 必须
         # 匹配本请求固化的运行快照；项目与仓库必须匹配固化的 project_snapshot。
@@ -1082,6 +1082,21 @@ def cmd_publish_plan(ctx, payload: dict) -> dict:
         extra["plan_delivery_kind"] = planfile.delivery_kind(raw.decode("utf-8"))
         extra["plan_execution_hold"] = True
         fields["extra_json"] = extra
+        delivery = core.delivery_of(task)
+        published_task = dict(task_dict, **fields)
+        from . import review_resolution
+        if (planfile.project_document(published_task) and delivery.get("worktree_path")
+                and not core.is_user_replan(task) and not core.automation_of(task).get("manual_takeover")
+                and not repair and not review_resolution.remediation_of(task)):
+            # A held plan is already visible in the task checkout. Dispatch
+            # validates the identical bytes again before taking its snapshot.
+            from . import git_delivery
+            try:
+                git_delivery.verify_branch_worktree(dict(delivery, repository=task["repository"]),
+                    require_clean=False, expected_head=delivery.get("head_sha"))
+            except git_delivery.GitDeliveryError as exc:
+                raise util.KanpilotError("worktree_invalid", exc.message) from exc
+            planfile.checkout_plan(published_task, delivery["worktree_path"], install=True)
         core.transition_task(
             conn, task, "ready", now_iso,
             actor=request["claimed_by"] or "kaneo-planner",
@@ -1242,11 +1257,8 @@ def cmd_register_review(ctx, payload: dict) -> dict:
                 "fix_task_source_sha256"
             )
         if payload.get("repair_plan_path"):
-            repair = util.inside(
-                Path(payload["repair_plan_path"]),
-                constants.plan_root(),
-                "repair_plan_path",
-            )
+            repair = planfile.plan_location(payload["repair_plan_path"], task["repository"],
+                                            payload.get("fix_task_id") or task["task_id"])
             util.require(repair.is_file(), "repair plan missing")
             extra_entries["repair_plan_path"] = str(repair)
             extra_entries["repair_plan_sha256"] = util.sha256_file(repair)

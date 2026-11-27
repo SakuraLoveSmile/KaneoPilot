@@ -1257,7 +1257,7 @@ def _content_proof(path, manifest, scratch):
             raise ValueError("file content changed")
 
 
-def _discard(path, manifest):
+def _discard(path, manifest, *, restore_tracked=True):
     """Remove step d, three actions only: unlink verified manifest files, rmdir emptied directories, restore tracked changes."""
     for record in manifest["files"]:
         source = path / record["rel"]
@@ -1274,8 +1274,15 @@ def _discard(path, manifest):
             os.rmdir(path / parent)
         except OSError:
             pass
-    _run_git(path, ["restore", "--source=HEAD", "--staged", "--worktree", "--", "."])
-    if _status(path):
+    if restore_tracked:
+        _run_git(path, ["restore", "--source=HEAD", "--staged", "--worktree", "--", "."])
+        changes = _status(path)
+    else:
+        # Git reports ignored empty directory chains (e.g. Flutter hooks) in
+        # --ignored=matching. Check actual files plus tracked/index changes.
+        changes = _file_plan(path) or _run_git(path, ["status", "--porcelain=v1", "-z",
+                                                     "--untracked-files=no", "--ignore-submodules=none"])
+    if changes:
         raise ValueError("worktree not clean after discard")
 
 

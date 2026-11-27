@@ -762,6 +762,44 @@ class TestReviewNeverWritesPass(ReviewCase):
 # ------------------------------------------------------------ 部分成功恢复
 
 
+class TestReviewSessionNaming(ReviewCase):
+    """§5.23.10：Review 会话同样传任务项目名与任务标题（不用 worktree 目录名）。"""
+
+    def test_create_plan_session_passes_display_names(self):
+        client = mock.Mock()
+        receipt = {"session": {
+            "id": "review-named", "title": "任务标题 · Review",
+            "projectName": "Feedback",
+            "interactionMode": "unattended", "interactionPolicyVersion": 1}}
+        client.session_create.return_value = receipt
+        client.session_configure.return_value = receipt
+        client.session_get.return_value = receipt
+        snapshot = {"provider_id": "p", "model_id": "m",
+                    "thinking_level": "high", "permission_mode": "auto"}
+        session, error = pi_desktop_review._create_plan_session(
+            client, snapshot, self.root,
+            project_name="Feedback", session_title="任务标题 · Review",
+        )
+        self.assertIsNone(error)
+        self.assertEqual(session, "review-named")
+        kwargs = client.session_create.call_args.kwargs
+        self.assertEqual(kwargs["project_name"], "Feedback")
+        self.assertEqual(kwargs["title"], "任务标题 · Review")
+        self.assertEqual(kwargs["interaction_mode"], "unattended")
+
+    def test_review_round_names_session_after_task(self):
+        self.make_scene()
+        self.review_result("pass")
+        self.assertEqual(self.run_review(), 0)
+        job = self.review_job()
+        self.assertEqual(job["workspace_display_name"], "Feedback")
+        self.assertTrue(job["session_display_name"].endswith(" · Review"))
+        created = self.server.created
+        self.assertIsNotNone(created)
+        self.assertEqual(created["projectName"], "Feedback")
+        self.assertEqual(created["title"], job["session_display_name"])
+
+
 class TestReviewRecovery(ReviewCase):
     def test_session_configuration_keeps_historical_ask_snapshot(self):
         client = mock.Mock()

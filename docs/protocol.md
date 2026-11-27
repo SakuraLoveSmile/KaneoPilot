@@ -215,7 +215,7 @@ kanpilot <command> [--json '<payload>'] [--db <path>]
 
 `claim` 对 dispatch 请求在事务外**先**执行与旧 `kaneo_dispatch.py check+claim` 等价的校验，全部通过才提交领取；任一失败按 §4.2-5 处理（task 转 `needs_user`，`failure_code=validation_failed|remote_unavailable` 区分确定性与暂时性）：
 
-1. 计划文件存在、在 Plan 根内、无符号链接；frontmatter 含 `task_id` 匹配、`implementation_status=未开始`、项目 ID、名称匹配请求固化快照（缺少快照的旧记录须匹配已保存项目映射）、`repository` 等于注册仓库且目录存在、`source_sha256`；`plan_sha256` 重算等于登记值。
+1. 计划文件存在、在任务项目的计划证据目录或历史 Plan 根内、无符号链接；frontmatter 含 `task_id` 匹配、`implementation_status=未开始`、项目 ID、名称匹配请求固化快照（缺少快照的旧记录须匹配已保存项目映射）、`repository` 等于注册仓库且目录存在、`source_sha256`；`plan_sha256` 重算等于登记值。
 2. 来源快照（`tasks.source_path`）存在；规范化重算 `source_sha256` 等于计划值；`task.id`/`projectId` 一致。
 3. `requirements_sha256` 由快照重算等于计划值（无快照或不可判 → `needs_user`）。
 4. 远端 `get-task`：`projectId` 一致、普通任务 `status ∈ {to-do, todo}`、`requirements_sha256` 一致、列含当前状态与 `in-progress`。同任务修复轮及用户明确重新规划的自动交付周期按 §5.27 校验已接受的运行/Review 列；不放宽普通任务。远端不可达 → `remote_unavailable`（task 保持原状，不算阻塞）。
@@ -360,7 +360,7 @@ dispatch-prepare/confirm 校验，字段全部来自 UI 观察，不得推测：
 
 v2 起 `request_id`/`run_id`/`planner_input_sha256` 为必填；旧三字段形态的调用按 `bad_request` 拒绝。
 
-- **事务外核验**（不占写锁）：计划文件在 Plan 根内存在、无符号链接、frontmatter `task_id` 匹配、`implementation_status=未开始`、项目身份与 repository 匹配固化快照（缺少快照的旧记录匹配已保存映射）、重算 `plan_sha256`；`planner_input_sha256` 等于本轮规划输入快照哈希（`planner_inputs` 表 `input_sha256`，与请求 payload 登记一致）；远端 `get-task` 复验任务仍为 To Do 且 `requirements_sha256` 未变——远端不可达 → `remote_unavailable`（保留产物并阻塞发布，不写本地状态）。
+- **事务外核验**（不占写锁）：计划文件在登记仓库的计划证据目录或历史 Plan 根内存在、无符号链接、frontmatter `task_id` 匹配、`implementation_status=未开始`、项目身份与 repository 匹配固化快照（缺少快照的旧记录匹配已保存映射）、重算 `plan_sha256`；`planner_input_sha256` 等于本轮规划输入快照哈希（`planner_inputs` 表 `input_sha256`，与请求 payload 登记一致）；远端 `get-task` 复验任务仍为 To Do 且 `requirements_sha256` 未变——远端不可达 → `remote_unavailable`（保留产物并阻塞发布，不写本地状态）。
 - **事务内复核**（单 `BEGIN IMMEDIATE`）：任务活跃（`save_state='active'` 且非 `purged`）、请求为本任务当前 `claimed` 规划请求且 `run_id` 匹配、租约未过期、`planner_input_sha256` 一致；任一不符 → `conflict`/`stale_run`。
 - **同一事务**：登记计划字段（plan_path/plan_sha256/plan_kind/generated_at/planner_model/reasoning_effort/source_sha256/requirements_sha256/repository），task→`ready`，置 `extra_json.plan_execution_hold=true`（安排执行前的手动确认闸），结束请求为 `succeeded` 并闭合 attempt；写 `plan_published` event。成功路径不再额外调用 `report succeeded`。
 - **幂等**：同 `run_id`、同计划哈希的重复提交返回 `{"ok": true, "deduplicated": true, ...}`；发布事务提交后 runner 崩溃不得回退为失联或失败。
@@ -975,9 +975,9 @@ worker 把 `pi --mode json` 的 JSONL 帧映射为 `events.jsonl`，每行 `{"v"
  "markdown": "<去除核心 frontmatter 后的正文>"}
 ```
 
-- **定位**：以任务登记的 `plan_path` 为唯一入口，复用 `planfile.load_plan` 的 Plan 根边界/无符号链接/frontmatter `task_id` 身份校验；不接受调用方另传路径。
+- **定位**：以任务登记的 `plan_path` 为唯一入口，复用 `planfile.load_plan` 的项目计划目录或历史 Plan 根边界/无符号链接/frontmatter `task_id` 身份校验；不接受调用方另传路径。
 - **哈希核验**：重算**整个文件**的 SHA-256 并与 `tasks.plan_sha256` 比较；调用方给的 `expected_plan_sha256`（当前视图快照）不符 → `conflict`。文件哈希与登记值不符（被篡改/重写过）→ `conflict`。
-- **错误矩阵**：任务无 `plan_path`/`plan_sha256` 登记 → `not_found`；文件缺失、越出 Plan 根、符号链接、frontmatter `task_id` 不符 → `validation_failed`；任务为 `purged` 仍允许只读审计（同 get-task 口径，返回 `read_only: true`）。
+- **错误矩阵**：任务无 `plan_path`/`plan_sha256` 登记 → `not_found`；文件缺失、越出该任务的计划目录、符号链接、frontmatter `task_id` 不符 → `validation_failed`；任务为 `purged` 仍允许只读审计（同 get-task 口径，返回 `read_only: true`）。
 - **正文边界**：`markdown` 为去除 YAML frontmatter 后的原始字节解码（UTF-8），核心不做重写/裁剪；不执行 HTML/脚本、不代取远端媒体（渲染约束在 UI 层，见 ui-spec §4.8）。
 - 本命令只读：不改 task/request/事件；失败不伪造正文返回。
 
@@ -1336,7 +1336,7 @@ _id, created_at}`，提示先核对 Plus 会话。
   - `fetch-todos` 携带 `mapping_state`（`unmapped|available|disabled|missing|unreadable`）、`repository_kind`（`git|directory|null`）与 `blocked_reason`；未映射项目在规划列表中明确标红并阻止准备。
   - `prepare-plan-input` 提取当前有效映射的 `project_id/project_name/repository/project_mapping_revision` 写入 `manifest.task` 并固化至 `input_sha256`。
   - `start-plans` 事务内验证目标映射一致性并固化 `project_snapshot`；已有排队或执行中的请求不受后续映射修改影响。
-  - `planfile.check_plan_meta` 与派发校验比对固化快照中的 ID、路径与名称；新规划文件安全写入 `<plan_root>/projects/<project_id>/...md`，校验路径位于 Plan 根内。
+  - `planfile.check_plan_meta` 与派发校验比对固化快照中的 ID、路径与名称；Git 项目的冻结计划写入登记仓库的 `<git-common-dir>/kanpilot/plans/<task_id>/`，任务分支上的 `docs/plans/<task_id>/<文件名>` 随 PR 合入。历史登记路径继续按 Plan 根与原哈希校验。
   - 默认运行记录根动态解析 `constants.app_support()/"runs"`，确保在隔离沙箱下运行。
 
 
@@ -2069,6 +2069,10 @@ Plus 独立补验证的规划和执行阶段均可产生普通 asktool 提问。
 **配置**：`set-config {worktree_concurrency_limit?:N, worktree_retention_days?:D}`；N 取 1–32，默认 4；D 取 1–90，默认 7。`worktrees_root` 只能经 §5.29.5 的 relocate 迁移，`set-config` 只接受与当前 canonical 根相同的值。新增只读 `worktree-config {}` → `{worktrees_root, concurrency_limit, retention_days, tasks:[{task_id, stages:{…}, allocated_bytes, retention_until}]}`，供设置页展示占用与保留状态。
 
 **并发与串行**：全库统计 `leased` 的 `plan`+`review` 阶段树；达到 `worktree_concurrency_limit` 时新请求转 `worktree_pool_waiting`（保留可重试，claim 返回 `claimed:false`），不转业务失败。同一任务同一阶段的树仍被前一持有者持有时，新代次同样等待（不新建第二棵树、不报错），直到前一持有者释放或交还；`quarantined` 的树拒绝领取，需人工解除。消息与 `attention-list` 的等待项沿用既有措辞。
+
+**项目计划与工作树收尾（KP-WS03）**。统一目录中的新任务使用 `Project Worktree/<仓库名>/managed-worktrees/<task_id>/{plan,run,review}`。原已登记的任务固定在原根；显式配置的独立管理根继续生效。Plus 以阶段树为工作目录、使用任务项目名。Git 仓库保留冻结计划原文；任务分支中的文档在发布计划时写入，重新规划的已冻结工作区延至执行前写入。交付核对文档字节与登记哈希，执行产生的代码和计划走同一条 PR。
+
+新确认合并的标准任务分支登记本地收尾。引擎在维护周期内核实任务完成、关联发布门已通过且没有活动请求，再逐项核对本地 Git 登记、工作目录占用和文件。已知运行材料、构建产物及 Git 忽略的文件逐文件归档核验；遇到独有改动或身份不符时保留现场并记录原因。移除标准阶段树和已用完的发布验证树之后，仅删除与已合并提交一致的本地任务分支。远端分支由仓库维护者管理。历史任务可用 `close-merged-worktrees {task_id,expected_head_sha,confirm?}` 单项预览；确认时重读 GitHub 同仓 PR、验证合并提交包含本地来源提交，随后使用相同的归档及删除流程。
 
 **保留与回收**：任务终态满 `worktree_retention_days` 后，把阶段树打包到 `<worktrees_root>/.archives/<task_id>-<YYYYMMDD>.tar.gz`，再删除 `plan/`、`review/`；`run/` 仅按任务已合并、来源分支已清理的既有规则处理。`meta.json` 与 `artifacts/<stage>/<run_id>/` 保留并可重建；删除前逐项复核工作树身份与干净状态，脏树转为隔离而不删除。命令 `worktree-retention {days?,dry_run?:true,confirm?}` 默认只预览，执行要求 `dry_run:false,confirm:true`；回执 scope `worktree-retention`，同操作重放返回 `deduplicated`。引擎在 live tick 中每小时自动执行一次，间隔由 `last_worktree_retention_at` 约束；归档失败或拦截项不中断引擎。
 

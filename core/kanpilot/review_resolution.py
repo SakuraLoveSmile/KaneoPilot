@@ -10,6 +10,7 @@ import re
 from types import SimpleNamespace
 from pathlib import Path
 
+from . import worktree_pool
 from . import bridge, constants, core, db, git_delivery, planfile, remote, review_snapshot, round_store, util
 
 
@@ -109,7 +110,7 @@ def _files_and_execution(ctx, task, value):
         _raw, files[str(directory / name)] = _read(directory / name)
     job = json.loads(_read(directory / "job.json")[0])
     _execution_job_identity(ctx.conn, task, value, row, job, directory, files)
-    meta, plan, path = planfile.load_plan(task["plan_path"], task["task_id"])
+    meta, plan, path = planfile.load_plan(task["plan_path"], task["task_id"], repository=task["repository"])
     util.require(util.sha256_bytes(plan) == value["plan_sha256"]
                  and all(meta.get(k) == task[k] for k in ("repository", "project_id", "requirements_sha256")),
                  "原计划文件或需求身份已变化", "conflict")
@@ -247,7 +248,7 @@ def _owned_workspace(ctx, task, value, prepared):
         return dict(delivery, workspace_version=1, head_sha=prepared["frozen"]["head"])
     util.require(git_delivery._value(["rev-parse", "--abbrev-ref", "HEAD"], prepared["source"]) == "HEAD",
                  "历史成果不是 detached 工作树，须先人工核验归属", "conflict")
-    root = constants.worktrees_root(db.get_setting(ctx.conn, "worktrees_root") or None).expanduser().resolve()
+    root = worktree_pool.project_root(ctx.conn, task["repository"], task["task_id"]).expanduser().resolve()
     task_id = task["task_id"]
     git_delivery._local_task_id(task_id)
     key = "review_repair_preparing:" + task_id

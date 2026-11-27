@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from . import worktree_pool
 from . import bridge, constants, core, db, remote, util, git_delivery
 
 
@@ -213,6 +214,13 @@ def cmd_dispatch_confirm(ctx, payload: dict) -> dict:
                 evidence, task, expect_message=True,
                 plan_basename=plan_basename,
             )
+            # A resumed UI dispatch can confirm a send without dispatch-start.
+            # Preserve the same registered branch and plan checks before monitoring.
+            from . import planfile
+            if planfile.project_document(task) and (core.is_pr_delivery(task) or _manual_branch_delivery(task)):
+                worktree, mode = _ensure_worktree(task, task["task_id"], payload["run_id"], conn)
+                if mode == "branch":
+                    planfile.checkout_plan(task, worktree, install=True)
         db.update_task(
             conn, task["task_id"], now,
             status="running", stage="monitor", sent=1, send_state="sent",
@@ -553,6 +561,9 @@ def _dispatch_start_codex(ctx, task, request, run_id, round_row) -> dict:
         directory = _headless.resolve_source(conn).run_dir(task_id, run_id)
         directory.mkdir(parents=True, exist_ok=True)
         worktree, worktree_mode = _ensure_worktree(task, task_id, run_id, conn, require_isolated=True)
+        if worktree_mode == "branch":
+            from . import planfile
+            planfile.checkout_plan(task, worktree, install=True)
         raw = Path(task["plan_path"]).read_bytes()
         util.require(util.sha256_bytes(raw) == task["plan_sha256"], "派发前计划已变化", "validation_failed")
         parsed = verify_evidence.parse_verify_block(raw.decode("utf-8"))
@@ -679,6 +690,9 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
         worktree_path, worktree_mode = _ensure_worktree(
             task, task_id, run_id, conn, require_isolated=True,
         )
+        if worktree_mode == "branch":
+            from . import planfile
+            planfile.checkout_plan(task, worktree_path, install=True)
         plan_bytes = Path(task["plan_path"]).read_bytes()
         util.require(
             util.sha256_bytes(plan_bytes) == task["plan_sha256"],
@@ -1362,8 +1376,12 @@ def _ensure_worktree(task, task_id, run_id, conn, *, require_isolated=False):
             util.require(task["send_state"] not in ("unknown", "sent") and task["sent"] != 1,
                          "重新规划仍有发送证据冲突，必须先完成发送恢复", "send_conflict")
         try:
+            from . import planfile
+            extra = {}
+            if planfile.project_document(task):
+                extra["pending_document"] = planfile.dispatch_document(task, delivery["worktree_path"])
             git_delivery.verify_branch_worktree(
-                delivery, require_clean=not (manual_branch or user_replan),
+                delivery, require_clean=not (manual_branch or user_replan), **extra,
                 expected_head=None if manual_branch and not versioned else delivery.get("head_sha"))
             if user_replan:
                 util.require(git_delivery.worktree_state_sha256(delivery) == state_sha,
@@ -1371,9 +1389,7 @@ def _ensure_worktree(task, task_id, run_id, conn, *, require_isolated=False):
         except git_delivery.GitDeliveryError as exc:
             raise util.KanpilotError("validation_failed", exc.message) from exc
         return Path(delivery["worktree_path"]), "branch"
-    root = constants.worktrees_root(
-        db.get_setting(conn, "worktrees_root") or None
-    )
+    root = worktree_pool.project_root(conn, task["repository"], task_id)
     path = root / task_id / run_id
     repo = Path(task["repository"]).expanduser()
     if path.exists():

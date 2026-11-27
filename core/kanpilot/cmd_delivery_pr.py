@@ -610,6 +610,9 @@ def _sync(ctx, payload, task, delivery, contract):
             intermediate = delivery_contract.verified_result(contract, fresh, payload, delivery,
                 {"outcome": "waiting", "message": "PR 已合并，等待交付收尾"})
             display["stage_results"] = dict(delivery.get("stage_results") or {}, sync=intermediate)
+            if not delivery.get("merged_at") and delivery.get("branch") == "kaneo/" + task["task_id"]:
+                from . import merged_worktrees
+                display[merged_worktrees.KEY] = merged_worktrees.merge_identity(task, delivery, pr)
             core.update_delivery(ctx.conn, fresh, ctx.now_iso, merged_at=pr["mergedAt"],
                                  pr_state="MERGED", last_sync_at=ctx.now_iso, publish_failures=0,
                                  next_sync_at=util.plus_seconds(300, ctx.now), **display)
