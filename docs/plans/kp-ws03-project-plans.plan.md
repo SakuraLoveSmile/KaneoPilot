@@ -15,3 +15,5 @@
 MediaPlayer #21（长按加速）的旧计划已恢复至原登记路径，读取校验 SHA-256 为 `9466fddbac331becdcb54aa2af2b3323ab28e765749c58be43cd39857377797c`。GitHub 合并提交为 `877513c`，测试版为 `v0.4.16-pilot.1795742727`。经用户授权，核对正式收尾回执、四个目录和 Git 登记，规划、执行、评审、发布验证树及本地来源分支已回收。远端来源分支仍指向 `ba8063c`。执行树归档为 `~/Library/Application Support/KaneoPilot/KaneoPilot-archives/2026-11-27/05c5a0fea0e649008b0539b96944a268/`，发布验证树归档为同目录下的 `bfff49a77ecc4b0eb1b64c8beeb63dda/`，两份 SHA256SUMS 均已复核。
 
 PR 首轮云端检查发现固定路径重试、人工接管与评审修复派发的兼容问题。已将同内容的计划写入改成可重放，在核对原工作树后放置修复计划，并覆盖旧派发确认入口。本地使用真实 pytest 的规划、评审修复、人工接管和工作树组合回归 119 项通过。收尾另外核验活动轮次及已打开的文件。
+
+交付版本关联 [KaneoPilot PR #32](https://github.com/SakuraLoveSmile/KaneoPilot/pull/32)。测试通道构建 `v0.6.1-test.484` 取实现提交 `cd2bcfee78b65a0ba3af8e23b9a0a52eaa0a553f`，发布结果及各平台检查见 [Packages #484](https://github.com/SakuraLoveSmile/KaneoPilot/actions/runs/45926798546)。用隔离仓库实测引擎维护入口和 macOS 原生进程探测：跨目录持有文件时执行树保留；关闭文件后，规划、执行、评审及两次发布验证的五棵树全部回收。项目计划、远端分支与两份验证材料均可回读。
