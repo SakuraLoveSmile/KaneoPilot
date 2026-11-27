@@ -74,6 +74,6 @@ PR：`#31`（草稿，基 `main`）。测试版：`v0.6.1-test.472`（run `45785
 ## 合入与收尾（2026-11-26）
 
 - 合入：PR `#31`（草稿 → ready）以 merge commit `54d66e4` 进入 `main`，父提交 `04ef4d7`（旧 main）+ `c783ced`（分支 tip）；合并前 PR checks 全绿（run `45792403323`：checks 10 分片、android、macos-fixtures、macos-package）。
-- 合入后 `main` 的 push 构建：run `45920665613`（记录时 in_progress，结论见下一条更新）。
+- 合入后 `main` 的 push 构建：run `45920665613` → **success**（全部 job 通过，无失败 job）。
 - worktree 清理：`git worktree remove` 删除 `Project Worktree/personal-kaneopilot/20261126-fix-kp-rt01-review-timeout`，并删除已合并的本地分支 `fix/20261126-kp-rt01-review-timeout`；远端同名分支保留（删远端分支需单独授权）。删除前确认：分支改动已全部在 `main`、无未提交改动、无运行进程引用该目录。
 - 已迁出/保留的产物：本地构建的 `KaneoPilot.app` 已安装在 `/Applications`（`0.6.1-test.472-local`），旧包备份在 `~/Library/Application Support/KaneoPilot/local-build-backup/KaneoPilot-0.6.1-test.469-local.app`；worktree 内 `build/local-macos/**` 属可再生成产物（`bash scripts/build_local_macos.sh --build` 或云端 Packages），随 worktree 一并删除。
