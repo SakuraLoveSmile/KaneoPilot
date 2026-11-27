@@ -3,7 +3,7 @@ name: Packages
 on:
   push:
     branches: ['**']
-    tags: ['v*', '!v*-test.*']
+    tags: ['v*', '!v*-test.*', '!v*-dev.*']
     paths-ignore: ['docs/plans/**']
   pull_request:
   workflow_dispatch:

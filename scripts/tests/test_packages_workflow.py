@@ -55,8 +55,8 @@ def uploads(job):
 
 
 class PackagesWorkflowTests(unittest.TestCase):
-    def test_pushed_test_tags_never_start_a_run(self):
-        self.assertEqual(TRIGGERS["push"]["tags"], ["v*", "!v*-test.*"])
+    def test_pushed_prerelease_tags_never_start_a_run(self):
+        self.assertEqual(TRIGGERS["push"]["tags"], ["v*", "!v*-test.*", "!v*-dev.*"])
 
     def test_only_branch_pushes_skip_plan_only_changes(self):
         # GitHub does not evaluate path filters for tag pushes; a manual run must never be skipped by one.
@@ -64,11 +64,11 @@ class PackagesWorkflowTests(unittest.TestCase):
         self.assertNotIn("paths-ignore", TRIGGERS["workflow_dispatch"])
         self.assertNotIn("paths-ignore", TRIGGERS["pull_request"] or {})
 
-    def test_manual_inputs_select_a_preview_or_a_test_release(self):
+    def test_manual_inputs_select_a_preview_a_test_or_a_dev_release(self):
         inputs = TRIGGERS["workflow_dispatch"]["inputs"]
         self.assertEqual(set(inputs), {"channel", "base_version", "notes", "probe_session_fulltext"})
         self.assertEqual((inputs["channel"]["type"], inputs["channel"]["options"], inputs["channel"]["default"]),
-                         ("choice", ["preview", "test"], "preview"))
+                         ("choice", ["preview", "test", "dev"], "preview"))
         for name in ("base_version", "notes"):
             self.assertEqual((inputs[name]["type"], inputs[name]["default"], inputs[name]["required"]), ("string", "", False))
 
