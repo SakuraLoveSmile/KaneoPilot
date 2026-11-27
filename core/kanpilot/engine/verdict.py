@@ -50,6 +50,10 @@ def has_effective_changes(worktree, **kw) -> bool:
 def task_effective_changes(task, frozen, *, deadline=None, heartbeat=None) -> List[str]:
     """A verification-only continuation may retain this task's committed source."""
     changes = effective_changes(frozen["worktree_path"], deadline=deadline, heartbeat=heartbeat)
+    from .. import planfile
+    document = planfile.project_document(task)
+    if document:
+        changes = [path for path in changes if not path.startswith(str(document.parent) + "/")]
     delivery = core.delivery_of(task)
     if (changes or _plan_delivery_kind(task) == "evidence_only"
             or not core.requires_branch_review(task) or not delivery.get("commits")):

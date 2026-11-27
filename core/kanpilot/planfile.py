@@ -3,18 +3,84 @@ kaneo_dispatch.py check() semantics (protocol.md §4.5 items 1-3, §5.6)."""
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 from . import bridge, constants, util
 
 
-def load_plan(plan_path: str, expect_task_id: Optional[str] = None) -> tuple[dict, bytes, Path]:
-    """Locate a plan inside PLAN_ROOT, parse frontmatter, basic field checks."""
-    path = util.inside(
-        Path(plan_path), constants.plan_root(), "plan_path"
-    )
+def project_records(repository, task_id):
+    """Persistent plan evidence owned by this repository, including after worktree removal."""
+    if not repository or not task_id or not util.TASK_ID_RE.fullmatch(str(task_id)):
+        return None
+    repo = Path(repository).expanduser()
+    if not (repo / ".git").exists():
+        return None
+    from . import worktree_pool
+    common = worktree_pool._common(repo)
+    directory = common / "kanpilot" / "plans" / task_id
+    worktree_pool._no_links(directory)
+    return directory
+
+
+def plan_location(path, repository, task_id):
+    path = Path(path).expanduser()
+    if path.resolve().is_relative_to(constants.plan_root().resolve()):
+        return util.inside(path, constants.plan_root(), "plan_path")
+    directory = project_records(repository, task_id)
+    util.require(directory is not None and path.parent == directory and not path.is_symlink()
+                 and path.suffix == ".md", "plan_path outside allowed root")
+    return path
+
+
+def project_document(task):
+    if "plan_path" not in task.keys() or not task["plan_path"]:
+        return None
+    source = Path(task["plan_path"])
+    if source.parts[-4:-1] == ("kanpilot", "plans", task["task_id"]):
+        return Path("docs/plans") / task["task_id"] / source.name
+    return None
+
+
+def dispatch_document(task, worktree):
+    """Only the exact untracked plan left by this dispatch can be reused on a retry."""
+    relative = project_document(task)
+    if relative and os.path.lexists(Path(worktree) / relative):
+        return checkout_plan(task, worktree)
+    return None
+
+
+def checkout_plan(task, worktree, *, install=False):
+    """Materialize the immutable plan before execution freezes its source snapshot."""
+    from . import worktree_pool
+    relative = project_document(task)
+    if relative is None:
+        return None  # Existing dispatches keep their original evidence and diff.
+    source = plan_location(task["plan_path"], task["repository"], task["task_id"])
+    raw = source.read_bytes()
+    util.require(util.sha256_bytes(raw) == task["plan_sha256"], "冻结计划内容已变化")
+    target = Path(worktree) / relative
+    worktree_pool._no_links(target)
+    if install and not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=target.parent) as tmp:
+            tmp.write(raw)
+            tmp.flush()
+            try:
+                os.link(tmp.name, target)
+            except FileExistsError:
+                pass
+    util.require(target.is_file() and not target.is_symlink() and target.read_bytes() == raw,
+                 "任务工作树中的正式计划缺失或内容已变化")
+    return str(relative)
+
+
+def load_plan(plan_path: str, expect_task_id: Optional[str] = None, *, repository=None) -> tuple[dict, bytes, Path]:
+    """Read a task-bound repository plan or an existing legacy plan."""
+    path = plan_location(plan_path, repository, expect_task_id)
     util.require(path.is_file(), f"plan file missing: {plan_path}")
     meta, raw = util.read_frontmatter(path)
     if expect_task_id is not None:

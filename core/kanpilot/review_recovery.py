@@ -121,7 +121,7 @@ def _read_files(conn, task, request):
             or job.get("plan_sha256") != task["plan_sha256"]):
         _conflict("当前执行尚无 completed/finished 终态或计划身份不符")
     try:
-        meta, raw, path = planfile.load_plan(task["plan_path"], task["task_id"])
+        meta, raw, path = planfile.load_plan(task["plan_path"], task["task_id"], repository=task["repository"])
     except (util.KanpilotError, OSError, ValueError) as exc:
         raise util.KanpilotError("conflict", "当前计划不可核验") from exc
     if (util.sha256_bytes(raw) != task["plan_sha256"]

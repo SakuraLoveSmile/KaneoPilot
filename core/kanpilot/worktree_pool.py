@@ -66,6 +66,39 @@ _STAGES = ("plan", "review", "run")
 _TASK_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
+def project_root(conn, repository, task_id):
+    """Keep registered tasks pinned; partition the unified layout by repository."""
+    configured = db.get_setting(conn, "worktrees_root")
+    old = constants.worktrees_root(configured).expanduser().absolute()
+    # An existing explicit standalone manager root keeps its historic semantics.
+    # Existing installations point at Project Worktree/<owner>/managed-worktrees.
+    unified = Path.home() / "Documents/Code/Project/Project Worktree"
+    if old.parent.parent.name == "Project Worktree" and old.name == "managed-worktrees":
+        unified = old.parent.parent
+    elif old.name == "Project Worktree":
+        unified = old
+    elif configured or os.environ.get("KANPILOT_WORKTREES_ROOT"):
+        return old
+    elif os.environ.get("KANPILOT_APP_SUPPORT") and constants.app_support().resolve() != (
+            Path.home() / "Library/Application Support/KaneoPilot").resolve():
+        # Preserve explicitly relocated data installations.
+        return old
+    name = Path(repository).resolve().name
+    if not name:
+        raise util.bad_request("任务仓库缺少项目目录名")
+    root = unified / name / "managed-worktrees"
+    _no_links(root)
+    row = db.get_task(conn, task_id)
+    delivery = (db.task_extra(row).get("delivery") or {}) if row else {}
+    pending = db.get_setting(conn, "task_workspace_preparing:" + task_id) or {}
+    for identity in (delivery, pending.get("delivery") or {}):
+        if identity.get("worktree_path") == str(old / task_id / "run"):
+            return old
+    slot = conn.execute("SELECT 1 FROM worktree_slots WHERE task_id=? AND worktrees_root=?",
+                        (task_id, str(old))).fetchone()
+    return old if slot else root
+
+
 def _stage_path(root, task_id, stage):
     """<worktrees_root>/<task_id>/<stage>；身份与形状在此唯一判定。"""
     if stage not in _STAGES:
@@ -361,7 +394,7 @@ def _acquire(conn, repository, *, stage, holder_id, sha, task_id,
         raise util.bad_request("阶段树需要合法 task_id")
     identity = repository_identity(repository)
     sha = _value(repository, "rev-parse", "--verify", str(sha) + "^{commit}")
-    root = Path(worktrees_root or constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None)).expanduser().absolute()
+    root = Path(worktrees_root or project_root(conn, repository, task_id)).expanduser().absolute()
     _no_links(root)
     root = root.resolve()
     path = _stage_path(root, task_id, stage)

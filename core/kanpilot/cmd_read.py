@@ -438,7 +438,7 @@ def cmd_get_plan(ctx, payload: dict) -> dict:
             "expected_plan_sha256 与登记计划哈希不符（任务可能已重新规划）",
         )
     meta, raw, _path = planfile.load_plan(
-        task["plan_path"], expect_task_id=task["task_id"]
+        task["plan_path"], expect_task_id=task["task_id"], repository=task["repository"]
     )
     digest = hashlib.sha256(raw).hexdigest()
     if digest != registered:
@@ -1002,6 +1002,12 @@ def cmd_doctor(ctx, payload: dict) -> dict:
         ("repos_root", constants.repos_root()),
         ("state_root", constants.app_support()),
     ):
+        if name == "plan_root" and not path.is_dir():
+            old = any(Path(row[0]).is_relative_to(path) for row in ctx.conn.execute(
+                "SELECT plan_path FROM tasks WHERE plan_path IS NOT NULL"))
+            if not old:
+                checks.append({"name": name, "ok": True, "detail": "任务计划由各项目保存，尚无旧路径引用"})
+                continue
         checks.append({"name": name, "ok": path.is_dir(), "detail": str(path)})
 
     # v2 §5.22.3：Codex 规划环境（可执行 + 登录态就绪；不读凭据值）。

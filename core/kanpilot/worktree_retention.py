@@ -56,6 +56,8 @@ def candidates(conn, now_iso, days=None):
     result = []
     for task in conn.execute("SELECT * FROM tasks ORDER BY task_id").fetchall():
         rows = _task_stages(conn, task["task_id"])
+        if (db.task_extra(task).get("delivery") or {}).get("local_worktree_closeout"):
+            continue  # The merge closeout owns these paths.
         if not rows:
             continue
         latest = max(row["updated_at"] or "" for row in rows)
@@ -195,6 +197,8 @@ def auto_sweep(conn, now_iso):
     if parsed is not None and (now - parsed).total_seconds() < 3600:
         return {"skipped": "interval"}
     ctx = _Context(conn, now_iso)
+    from . import merged_worktrees
+    merged_worktrees.sweep(conn, now_iso)
     result = sweep(ctx, confirm=True)
     with db.write_txn(conn):
         db.set_setting(conn, "last_worktree_retention_at", now_iso)

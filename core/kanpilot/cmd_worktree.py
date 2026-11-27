@@ -1257,7 +1257,7 @@ def _content_proof(path, manifest, scratch):
             raise ValueError("file content changed")
 
 
-def _discard(path, manifest):
+def _discard(path, manifest, *, restore_tracked=True):
     """Remove step d, three actions only: unlink verified manifest files, rmdir emptied directories, restore tracked changes."""
     for record in manifest["files"]:
         source = path / record["rel"]
@@ -1274,7 +1274,8 @@ def _discard(path, manifest):
             os.rmdir(path / parent)
         except OSError:
             pass
-    _run_git(path, ["restore", "--source=HEAD", "--staged", "--worktree", "--", "."])
+    if restore_tracked:
+        _run_git(path, ["restore", "--source=HEAD", "--staged", "--worktree", "--", "."])
     if _status(path):
         raise ValueError("worktree not clean after discard")
 

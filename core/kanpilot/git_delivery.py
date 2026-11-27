@@ -368,7 +368,7 @@ def _common_dir(repo):
 
 
 def verify_branch_worktree(delivery: dict, *, require_clean: bool,
-                           expected_head: Optional[str]) -> None:
+                           expected_head: Optional[str], pending_document=None) -> None:
     try:
         path = Path(delivery.get("worktree_path") or "").expanduser()
         if not delivery.get("worktree_path") or not path.is_dir():
@@ -392,7 +392,8 @@ def verify_branch_worktree(delivery: dict, *, require_clean: bool,
             # commit_worktree 只提交交付路径，产物留在工作树。若这里不放行，
             # 每次提交后的干净核验都会把产物误判成残留改动。
             leftover = [c for c in effective_worktree_changes(str(path))
-                        if not is_build_artifact(c["path"])]
+                        if not is_build_artifact(c["path"])
+                        and not (c["status"] == "??" and c["path"] == pending_document)]
             if leftover:
                 raise GitDeliveryError("worktree_invalid", "任务工作树有未提交改动")
     except (GitDeliveryError, OSError, IndexError) as exc:

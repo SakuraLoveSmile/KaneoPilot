@@ -41,7 +41,7 @@ KANPILOT_CODEX_FAKE（隔离测试接缝，不拉起 codex）：
 
 from __future__ import annotations
 
-from . import plan_questions
+from . import plan_questions, planfile
 
 import argparse
 import json
@@ -117,15 +117,18 @@ def _yaml_scalar(value) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
-def _plan_file_path(project_id: Optional[str], title: str) -> Path:
-    root = constants.plan_root()
-    if project_id and re.fullmatch(r"[A-Za-z0-9_-]+", str(project_id)):
+def _plan_file_path(project_id: Optional[str], title: str, *, repository=None, task_id=None) -> Path:
+    root = planfile.project_records(repository, task_id) or constants.plan_root()
+    if root != constants.plan_root():
+        directory = root
+    elif project_id and re.fullmatch(r"[A-Za-z0-9_-]+", str(project_id)):
         directory = root / "projects" / str(project_id)
     else:
         directory = root
-    directory = util.inside(directory, root, "plan_directory")
+    if directory != root:
+        directory = util.inside(directory, root, "plan_directory")
     directory.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
     safe = "".join(
         ch if (ch.isalnum() or ch in " _-[]【】（）()") else "_"
         for ch in (title or "plan")
@@ -319,7 +322,7 @@ def write_plan_file(
     context: dict, manifest: dict, plan_markdown: str, generated_at: str,
     task_row=None, model_config=None, target_path=None,
 ) -> Path:
-    """``build_plan_meta`` 的 frontmatter + 模型 plan_markdown 正文 → PLAN_ROOT。"""
+    """``build_plan_meta`` 的 frontmatter + 模型 plan_markdown 正文生成冻结计划。"""
     meta = build_plan_meta(
         context, manifest, generated_at, task_row=task_row,
         model_config=model_config,
@@ -333,10 +336,12 @@ def write_plan_file(
         lines.append(f"{key}: {scalar}")
     lines.append("---")
     body = _strip_model_frontmatter(plan_markdown or "")
-    path = (util.inside(Path(target_path), constants.plan_root(), "plan_path")
+    path = (planfile.plan_location(target_path, meta.get("repository"), task_id)
             if target_path is not None else
-            _plan_file_path(meta.get("project_id"), task.get("title") or task_id or "plan"))
-    path.write_text("\n".join(lines) + "\n\n" + body, encoding="utf-8")
+            _plan_file_path(meta.get("project_id"), task.get("title") or task_id or "plan",
+                            repository=meta.get("repository"), task_id=task_id))
+    with path.open("x", encoding="utf-8") as stream:
+        stream.write("\n".join(lines) + "\n\n" + body)
     return path
 
 

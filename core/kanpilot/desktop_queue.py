@@ -776,14 +776,15 @@ def _settle_plan(ctx, identity, row, task, job, directory):
             metadata = planner_runner.build_plan_meta(job["context"], manifest, job["generated_at"],
                                                        task_row=task, model_config=MODEL_SOURCE)
             title = (job["context"].get("task") or {}).get("title") or task["task_id"]
-            job["plan_path"] = str(planner_runner._plan_file_path(metadata.get("project_id"), title))
+            job["plan_path"] = str(planner_runner._plan_file_path(metadata.get("project_id"), title,
+                repository=task["repository"], task_id=task["task_id"]))
             _write(directory / "job.json", job)
         target = Path(job["plan_path"])
         if not job.get("plan_sha256"):
             if target.exists():
                 metadata = planner_runner.build_plan_meta(job["context"], manifest, job["generated_at"],
                                                            task_row=task, model_config=MODEL_SOURCE)
-                saved, raw, _ = planfile.load_plan(str(target), task["task_id"])
+                saved, raw, _ = planfile.load_plan(str(target), task["task_id"], repository=task["repository"])
                 if (any(str(saved.get(key)) != str(value) for key, value in metadata.items())
                         or planner_runner._strip_model_frontmatter(raw.decode("utf-8")).lstrip("\n")
                         != planner_runner._strip_model_frontmatter(job["plan_markdown"]).lstrip("\n")):
