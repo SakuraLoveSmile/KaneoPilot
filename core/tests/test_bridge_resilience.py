@@ -48,7 +48,6 @@ def _client(opener, timeout=10.0):
     client.base_url = "https://kaneo.example.test/"
     client.token = "stub-token"
     client.timeout = timeout
-    client.read_timeout = min(timeout, bridge.GET_TIMEOUT_CAP)
     client._opener = opener
     return client
 
@@ -101,6 +100,15 @@ class BridgeResilienceTest(unittest.TestCase):
         client.request("/api/task/status/x", "PUT", {"status": "in-progress"})
         self.assertEqual(opener.timeouts[0], bridge.GET_TIMEOUT_CAP)
         self.assertEqual(opener.timeouts[1], 30.0)
+
+    def test_lowered_timeout_after_construction_is_used(self):
+        # doctor 探针会临时把 client.timeout 调小；不能再用构造时算好的旧值，
+        # 否则「1 秒探针 × 3 次重试」会把超时语义放大（集成用例抓到的回归）。
+        opener = _Opener([{"ok": 1}])
+        client = _client(opener, timeout=10.0)
+        client.timeout = 1.0
+        client.request("/api/project?workspaceId=w")
+        self.assertEqual(opener.timeouts[0], 1.0)
 
     def test_http_error_is_never_retried(self):
         opener = _Opener([HTTPError("u", 503, "busy", {}, None)])
