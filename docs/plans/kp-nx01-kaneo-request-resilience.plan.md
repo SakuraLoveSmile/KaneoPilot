@@ -52,7 +52,12 @@
 
 ## 验证
 
-- 待填：隔离测试、全量 `python3 -m pytest tests -q`、云端 `Packages` 测试版。
+- 本地隔离测试：新增 `core/tests/test_bridge_resilience.py`（10 例，含探针超时回归用例）与 `core/tests/test_dispatch_begin_send_recovery.py`（6 例）；`test_bridge_labels_comments` 随注入点改为 opener 桩。合计 30 passed。
+- 受影响套件（dispatch / dispatch_branch / auto_dispatch / lifecycle / board / remote_unavailable_resume / engine_lifecycle_spawn / execution_retry / live_dispatch_gate / pi_desktop_backend / monitor_interval / engine_fix_branch_guard / review_stage_recovery / enqueue_offer）全绿；`tests/rehearsal/test_doctor_live.py` 15 passed（含修复后的超时用例）。
+- 真机探针：`http_proxy=127.0.0.1:7890` 仍在环境里时，新 bridge 直连 Kaneo `/api/health` 0.15s 200。
+- 云端 `Packages`：push 触发 45962303334（identity / android / macos-package / macos-fixtures ×2 / checks 5 shard × py3.11+3.13）全部通过；pull_request 触发 45962309055 同样通过。此前 45958838730 的两处失败已分别处理（探针回归已修、`hdiutil verify` 抖动未复现）。
+- 测试版：`gh workflow run packages.yml --ref <branch> -f channel=test` → run 45964944320 通过，预发布 `v0.6.1-test.500`（Android APK / macOS arm64 DMG / manifest.json / SHA256SUMS，commit 37ef20c）。
+- 本机全量 `python3 -m pytest tests -q` 未作为依据：单跑时在 `test_desktop_queue.py` 反复停滞（未改动的 main 基线同样停滞，单测各自通过），改用云端 5 分片 × 2 版本作为全量证据。
 
 ## 回归与修复（2026-11-27 15:5x）
 
@@ -62,4 +67,5 @@
 
 ## 状态
 
-- 实现中（本地隔离测试通过、云端复跑待确认；未发测试版）。
+- 待体验：代码已推分支、PR #33 草稿、测试版 `v0.6.1-test.500` 已发布；等用户开启「接收测试版」后更新体验。
+- 分支 `fix/20261127-kp-nx01-kaneo-request-resilience`（HEAD 37ef20c），未合入 main。
