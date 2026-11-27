@@ -182,6 +182,8 @@ class FakePlusServer:
         self.interaction_policy_version = 1
         self.created = None
         self.configured = None
+        # 回显覆盖：模拟旧版不回显 projectName 或 Host 返回了别的名字。
+        self.created_project_name = "echo"   # echo | none | <自定义名>
         self.prompt_content = None
         self.prompt_attachments = None
         self.prompt_count = 0
@@ -275,9 +277,16 @@ class FakePlusServer:
                 "code": "NOT_FOUND", "message": operation}}}
         if name == "pi_session_create":
             self.created = dict(args)
-            return {"structuredContent": {"session": {
+            session = {
                 "id": self.session_id, "title": args.get("title"),
-                "interactionMode": self.interaction_mode, "interactionPolicyVersion": self.interaction_policy_version}}}
+                "interactionMode": self.interaction_mode,
+                "interactionPolicyVersion": self.interaction_policy_version,
+            }
+            if self.created_project_name == "echo":
+                session["projectName"] = args.get("projectName")
+            elif self.created_project_name != "none":
+                session["projectName"] = self.created_project_name
+            return {"structuredContent": {"session": session}}
         if name == "pi_session_configure":
             self.configured = dict(args)
             return {"structuredContent": {"ok": True, "session": {"id": self.session_id, "interactionMode": self.interaction_mode, "interactionPolicyVersion": self.interaction_policy_version}}}
@@ -659,7 +668,7 @@ class PlusPlannerCase(KanpilotTestCase):
         return result.stdout.strip()
 
     def plan_files(self, project_name="Feedback"):
-        files = []
+        files = list((self.repos_root / project_name / ".git" / "kanpilot" / "plans").glob("*/*.md"))
         directory = self.plan_root / project_name
         if directory.is_dir():
             files.extend(directory.glob("*.md"))
@@ -948,6 +957,57 @@ class TestPlusReadyPath(PlusPlannerCase):
                              payload["runtime_config"])
         finally:
             conn.close()
+
+    def test_plan_session_passes_project_name_and_round_title(self):
+        """§5.23.10：规划会话传任务项目名，标题带任务名与规划轮次。"""
+        fixture, _payload = self._fixture()
+        with self.fast():
+            self.run_round()
+        created = self.server.created
+        self.assertIsNotNone(created)
+        self.assertEqual(created["projectName"], "Feedback")
+        self.assertEqual(created["title"], "Plus 计划任务 · 规划 · 第1次")
+        _, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        naming = job["session_naming"]
+        self.assertEqual(naming["workspace_requested"], "Feedback")
+        self.assertEqual(naming["workspace_returned"], "Feedback")
+        self.assertTrue(naming["workspace_verified"])
+        self.assertTrue(naming["title_verified"])
+        self.assertEqual(self.task(fixture["task_id"])["status"], "ready")
+
+    def test_returned_workspace_mismatch_blocks_prompt(self):
+        """Host 回显的工作区名与请求不符 → 不下发 agent_prompt、不再建会话。"""
+        fixture, _payload = self._fixture()
+        self.server.created_project_name = "plan"
+        with self.fast():
+            self.run_round()
+        self.assertEqual(self.server.prompt_count, 0,
+                         "工作区名不符绝不下发 agent_prompt")
+        view = self.task(fixture["task_id"])
+        self.assertEqual(view["failure_code"], "plan_session_naming_mismatch")
+        self.assertIn("plan_session_naming_mismatch", view["failure_reason"])
+        self.assertEqual(self.request_view(fixture["request_id"])["status"],
+                         "failed")
+        _, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        self.assertEqual(job["session_id"], SESSION_ID,
+                         "已创建会话 ID 保留供人工检查")
+        self.assertFalse(job["session_naming"]["workspace_verified"])
+        self.assertEqual(
+            len([n for n, _a in self.server.calls
+                 if n == "pi_session_create"]), 1,
+            "不自动再建第二个会话")
+
+    def test_old_plus_without_project_name_echo_still_plans(self):
+        """旧版 Plus 不回显 projectName → 记未验证，仍按原流程规划。"""
+        fixture, _payload = self._fixture()
+        self.server.created_project_name = "none"
+        with self.fast():
+            self.run_round()
+        self.assertEqual(self.task(fixture["task_id"])["status"], "ready")
+        _, job = self.job_for(fixture["task_id"], fixture["request_id"])
+        naming = job["session_naming"]
+        self.assertIsNone(naming["workspace_returned"])
+        self.assertFalse(naming["workspace_verified"])
 
     def test_ready_publishes_plan_and_rejects_proposal(self):
         fixture, _payload = self._fixture()

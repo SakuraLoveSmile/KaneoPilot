@@ -159,6 +159,9 @@ COMMANDS: dict[str, tuple[dict, Callable]] = {
     "worktree-retention": ({"days": (False, "int"), "dry_run": (False, "bool"),
                             "confirm": (False, "bool")},
                            _automation_command("worktree_retention", "cmd_worktree_retention")),
+    "close-merged-worktrees": ({"task_id": (True, "str"), "expected_head_sha": (True, "str"),
+                                "confirm": (False, "bool")},
+                               _automation_command("merged_worktrees", "cmd_close_merged_worktrees")),
     "worktree-config": ({"measure": (False, "bool")},
                         _automation_command("cmd_worktree", "cmd_worktree_config")),
     "worktree-layout-migrate": (

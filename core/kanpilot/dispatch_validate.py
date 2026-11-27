@@ -49,7 +49,7 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
     # 1. plan file + frontmatter + registered hash -------------------------
     util.require(task["plan_path"], "task has no plan_path")
     try:
-        meta, raw, path = planfile.load_plan(task["plan_path"], task_id)
+        meta, raw, path = planfile.load_plan(task["plan_path"], task_id, repository=task["repository"])
     except util.KanpilotError as exc:
         raise DispatchCheckFailed(exc.message, exc.code)
     try:
@@ -285,8 +285,11 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
         if user_replan:
             _require(bool(state_sha), "重新规划缺少工作树状态指纹")
         try:
+            extra = {}
+            if planfile.project_document(task):
+                extra["pending_document"] = planfile.dispatch_document(task, delivery["worktree_path"])
             git_delivery.verify_branch_worktree(
-                delivery, require_clean=not (manual_branch or user_replan),
+                delivery, require_clean=not (manual_branch or user_replan), **extra,
                 expected_head=None if manual_branch else delivery["head_sha"])
             if user_replan:
                 _require(git_delivery.worktree_state_sha256(delivery) == state_sha,

@@ -3,6 +3,7 @@ import os
 import re
 from pathlib import Path
 
+from . import worktree_pool
 from . import constants, core, db, git_delivery, util
 
 
@@ -78,7 +79,7 @@ def cmd_repair_review_fix_workspace(ctx, payload):
         return json.loads(receipt["result_json"])
     _repair_idle(conn, task)
     delivery = core.delivery_of(task)
-    root = constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None).expanduser().resolve()
+    root = worktree_pool.project_root(conn, task["repository"], task_id).expanduser().resolve()
     path = Path(delivery.get("worktree_path") or "").expanduser()
     util.require(delivery.get("mode") == "pr" and delivery.get("branch") == constants.DELIVERY_BRANCH_PREFIX + task_id
                  and delivery.get("head_sha") == delivery.get("base_sha") == expected
@@ -177,7 +178,7 @@ def prepare_for_submission(conn, task_id, repository, task=None):
         base_sha = matching[-1]["head_sha"]
         base_branch = core.delivery_of(source).get("branch")
         util.require(bool(base_branch), "原评审任务缺少分支登记", "worktree_invalid")
-    root = constants.worktrees_root(db.get_setting(conn, "worktrees_root") or None)
+    root = worktree_pool.project_root(conn, repository, task_id)
     intent_key = "task_workspace_preparing:" + task_id
     intent = db.get_setting(conn, intent_key)
     try:

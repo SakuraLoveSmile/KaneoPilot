@@ -400,10 +400,14 @@ class TestProjectMappings(KanpilotTestCase):
         view = self.task(task["id"])
         self.assertEqual(view["status"], "ready")
         self.assertTrue(view["plan_path"])
-        # 验证落在 plan_root/projects/<project_id>/ 目录下
+        # 登记项目冻结证据，任务工作树同时取得待交付的同字节文档。
         plan_p = Path(view["plan_path"]).resolve()
-        expected_dir = (self.plan_root / "projects" / pid).resolve()
-        self.assertTrue(str(plan_p).startswith(str(expected_dir)))
+        self.assertEqual(plan_p.parent, star_repo.resolve() / ".git" / "kanpilot" / "plans" / task["id"])
+        detail = self.call("get-task", {"task_id": task["id"]})["task"]
+        document = Path("docs/plans") / task["id"] / plan_p.name
+        self.assertEqual((Path(detail["delivery"]["worktree_path"]) / document).read_bytes(), plan_p.read_bytes())
+        self.assertFalse((star_repo / document).exists())
+        self.assertEqual(self.call("get-plan", {"task_id": task["id"]})["plan_sha256"], view["plan_sha256"])
 
         enq = self.call("enqueue", {
             "task_id": task["id"],

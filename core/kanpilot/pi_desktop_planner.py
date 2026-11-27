@@ -38,7 +38,8 @@
 同源明确失败另有 ``plan_proposal_unreadable``、``plan_method_unsupported``、
 ``plan_permission_mode_unsupported``、``plan_backend_config_incomplete``、
 ``plan_input_mismatch``、``plan_worktree_failed``、``plan_session_setup_failed``、
-``plan_prompt_unreadable``、``plan_request_too_large``、``send_unknown``、
+``plan_prompt_unreadable``、``plan_request_too_large``、``plan_session_naming_mismatch``、
+``send_unknown``、
 ``startup_unproven``、``plan_round_unverifiable``、``pi_desktop_unavailable``、
 ``turn <state>``、``timeout``。均不自动重试。
 
@@ -54,6 +55,7 @@ from . import plan_questions
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -239,6 +241,34 @@ def _published_model_pair(context: dict, manifest: dict, generated_at: str,
             continue
     pair, source = candidates[-1]
     return pair, source, note
+
+
+def _naming_record(workspace_requested: Optional[str], title_requested: Optional[str],
+                   session: dict) -> dict:
+    """§5.23.10：分开记录展示名的请求值与 Plus 回显值，不补造成功。
+
+    旧版 Plus 只回 title 不回 projectName → ``workspace_returned`` 为 None、
+    ``workspace_verified`` 为 False，由调用方按「未验证」处理而非阻断。
+    """
+    def _echo(*keys):
+        for key in keys:
+            value = session.get(key) if isinstance(session, dict) else None
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    returned_project = _echo("projectName", "project_name")
+    returned_title = _echo("title", "name")
+    return {
+        "workspace_requested": workspace_requested,
+        "workspace_returned": returned_project,
+        "workspace_verified": (returned_project is not None
+                               and returned_project == workspace_requested),
+        "title_requested": title_requested,
+        "title_returned": returned_title,
+        "title_verified": returned_title is not None
+                          and returned_title == title_requested,
+    }
 
 
 class _AnswerLog:
@@ -778,6 +808,39 @@ class _Round:
             session_id, turn_id, pi_desktop_worker._turn_status(record), record,
             time.monotonic() + remaining)
 
+    # ------------------------------------------------- 展示快照（§5.23.10）
+
+    def _workspace_display_name(self) -> Optional[str]:
+        """任务所属项目名：Plus 工作区命名快照（不用 worktree 目录名）。"""
+        for source in (self.task, self.manifest.get("task") or {}):
+            if not isinstance(source, dict):
+                continue
+            value = source.get("project_name")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    def _plan_round_ordinal(self) -> int:
+        """本任务第几次规划（含本轮）；读不到按 1 处理，绝不阻塞规划。"""
+        try:
+            conn = db.connect(self.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS total FROM requests "
+                    "WHERE task_id=? AND stage='plan'", (self.task_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError, ValueError):
+            return 1
+        total = (row["total"] if row is not None else 1) or 1
+        return max(1, int(total))
+
+    def _session_display_title(self) -> str:
+        """会话标题：任务名 + 规划轮次，便于在 Plus 侧区分同一任务的多次尝试。"""
+        title = (self.task.get("title") or "").strip() or self.task_id
+        return f"{title} · 规划 · 第{self._plan_round_ordinal()}次"
+
     # ---------------------------------------------------------- 新轮
 
     def _fresh(self) -> bool:
@@ -808,13 +871,22 @@ class _Round:
         if problem:
             return self.fail(f"pi_desktop_unavailable: {problem}",
                              "pi_desktop_unavailable", evidence=self._evidence())
+        # §5.23.10 展示快照：工作区名取任务所属项目，标题带规划轮次；
+        # 不传时 Plus 会用 worktree 目录名（如 plan）当工作区名。
+        workspace_name = self._workspace_display_name()
+        session_title = self._session_display_title()
+        self.job.update({
+            "workspace_display_name": workspace_name,
+            "session_display_name": session_title,
+        })
         try:
             created = self.client.session_create(
                 str(worktree), mode=_PLAN_SESSION_MODE,
                 provider_id=self.runtime.get("provider_id"),
                 model_id=self.runtime.get("model_id"),
                 thinking_level=self.runtime.get("thinking_level"),
-                title=f"kanpilot plan {self.task_id}", interaction_mode="unattended")
+                title=session_title, project_name=workspace_name,
+                interaction_mode="unattended")
             session = created.get("session") if isinstance(created, dict) else None
             session = session if isinstance(session, dict) else {}
             session_id = (session.get("id")
@@ -826,6 +898,8 @@ class _Round:
             self.job["session_id"] = str(session_id)
             self.job["session_title"] = (
                 session.get("title") or session.get("name"))
+            self.job["session_naming"] = _naming_record(
+                workspace_name, session_title, session)
             self.write_job()
             plus_interaction.require_unattended(created, self.job["session_id"])
             # 保留该请求的权限快照；新请求 auto，旧 ask 请求不能被提升。
@@ -838,6 +912,20 @@ class _Round:
             return self.fail(f"plan_session_setup_failed: {exc.message}",
                              exc.code if exc.code == "interaction_policy_unverified" else "plan_session_setup_failed",
                              evidence=self._evidence())
+        # §5.23.10：Plus 回显的工作区名与请求不符 → 不下发 agent_prompt，
+        # 保留会话 ID 供人工检查，绝不自动再建一次会话。旧版不回显时只记未验证。
+        naming = self.job.get("session_naming") or {}
+        if (naming.get("workspace_requested")
+                and naming.get("workspace_returned")
+                and not naming.get("workspace_verified")):
+            return self.fail(
+                "plan_session_naming_mismatch: PI-Desktop 返回的工作区名 "
+                f"{naming['workspace_returned']!r} ≠ 请求 "
+                f"{naming['workspace_requested']!r}；已保留会话 "
+                f"{self.job['session_id']} 供人工检查，未下发 agent_prompt",
+                "plan_session_naming_mismatch",
+                failure_code="plan_session_naming_mismatch",
+                evidence=self._evidence())
         self._refresh_round(session_id=self.job["session_id"],
                             session_title=self.job.get("session_title"),
                             worktree_path=worktree)
@@ -1018,8 +1106,6 @@ class _Round:
                                      f"任务仓库不可用：{repo}")
         conn = db.connect(self.db_path)
         try:
-            root = constants.worktrees_root(
-                db.get_setting(conn, "worktrees_root") or None)
             manual_branch = (self.req_payload.get("delivery_mode") == "manual"
                              and self.req_payload.get("plan_cwd")
                              and self.req_payload.get("workspace_version") != 1)

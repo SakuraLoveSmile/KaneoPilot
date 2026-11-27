@@ -45,6 +45,8 @@ def cmd_delivery_commit(ctx, payload) -> dict:
             fix_round = review_repair._round_count(task)
 
     # Phase 2: IO outside BEGIN IMMEDIATE, including the final HEAD check.
+    from . import planfile
+    plan_doc = planfile.project_document(task)
     failure, result = None, None
     try:
         if repair.get("source_kind") == "build_failure" and git_delivery._merge_marker(git_input["worktree_path"], "MERGE_HEAD") is not None:
@@ -77,7 +79,15 @@ def cmd_delivery_commit(ctx, payload) -> dict:
                 from . import review_repair
                 review_repair.verify_frozen(task)
                 verified["merge_parent_sha"] = repair["target_base_sha"]
+            if plan_doc:
+                planfile.checkout_plan(task, git_input["worktree_path"])
+            if plan_doc and git_delivery._value(["ls-files", "--others", "--ignored", "--exclude-standard",
+                                                 "--", str(plan_doc)], git_input["worktree_path"]):
+                raise git_delivery.GitDeliveryError("delivery_commit_failed", "仓库忽略了任务的正式计划，无法纳入 PR")
             candidates = git_delivery.effective_worktree_changes(git_input["worktree_path"])
+            if plan_doc and not evidence_only and not delivery.get("commits") and all(
+                    change["path"].startswith(str(plan_doc.parent) + "/") or git_delivery.is_build_artifact(change["path"]) for change in candidates):
+                raise git_delivery.GitDeliveryError("delivery_commit_failed", "执行仅产生计划文件，缺少任务实现")
             if evidence_only and not verdict.effective_changes(git_input["worktree_path"]):
                 # 证据/记录收尾轮：声明本轮不产生源码 diff，沿用既有 head 继续评审，
                 # 不创建空提交、不阻塞交付。上面的验证回执核对仍然执行，不能跳过门禁。
@@ -96,6 +106,11 @@ def cmd_delivery_commit(ctx, payload) -> dict:
                 result = git_delivery.commit_worktree(
                     git_input, task_id=payload["task_id"], title=title,
                     execution_run_id=execution_run_id, fix_round=fix_round, **verified)
+        if plan_doc:
+            blob = git_delivery._git(["cat-file", "blob", result["sha"] + ":" + str(plan_doc)],
+                                     git_input["worktree_path"], 10).stdout
+            if util.sha256_bytes(blob) != task["plan_sha256"]:
+                raise git_delivery.GitDeliveryError("delivery_commit_failed", "提交中的项目计划与冻结内容不符")
         if result.get("unchanged"):
             # 证据轮不改源码，工作树本就不干净（.pi 证据）；只核分支未被他人移动。
             if git_delivery._value(["rev-parse", "HEAD"], git_input["worktree_path"]) != delivery["head_sha"]:
