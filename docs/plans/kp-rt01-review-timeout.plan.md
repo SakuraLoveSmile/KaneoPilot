@@ -6,7 +6,7 @@
 - 权威记录：本文件
 - 主仓库 / 当前工作目录：`/Users/sakurasep/Documents/Code/Project/Personal Project/KaneoPilot`（主检出，未改动）
 - 工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261126-fix-kp-rt01-review-timeout`
-- 分支：`fix/20261126-kp-rt01-review-timeout`；基线 `main@04ef4d7`；合入目标 `main`
+- 分支：`fix/20261126-kp-rt01-review-timeout`；基线 `main@04ef4d7`；合入目标 `main`（已合入：`54d66e4`，2026-11-26）
 - 未提交差异：实现阶段按本计划产生，见「提交与集成」
 - 运行资源：无长驻进程；本地仅跑 Python 隔离测试，Swift/打包走云端 Packages
 
@@ -69,4 +69,11 @@ PR：`#31`（草稿，基 `main`）。测试版：`v0.6.1-test.472`（run `45785
 - 用户确认（明确确认后才改为已验收）：待用户确认（测试版 `v0.6.1-test.472`，需在客户端开启「接收测试版」）。
 - 下一步和恢复任务时首先核对的内容：`git -C <worktree> status`、`git log --oneline -3`、本文件「执行与验证记录」最后一行。
 - 需要时的回退 / 数据保留方式：`settings.review_timeout_seconds` 置空即回到既有行为；代码回退为 revert 本任务提交，不涉及数据迁移。
-- 本任务 worktree 收尾：尚不满足清理条件（未合入 main）。
+- 本任务 worktree 收尾：已检查并清理（2026-11-26）。
+
+## 合入与收尾（2026-11-26）
+
+- 合入：PR `#31`（草稿 → ready）以 merge commit `54d66e4` 进入 `main`，父提交 `04ef4d7`（旧 main）+ `c783ced`（分支 tip）；合并前 PR checks 全绿（run `45792403323`：checks 10 分片、android、macos-fixtures、macos-package）。
+- 合入后 `main` 的 push 构建：run `45920665613`（记录时 in_progress，结论见下一条更新）。
+- worktree 清理：`git worktree remove` 删除 `Project Worktree/personal-kaneopilot/20261126-fix-kp-rt01-review-timeout`，并删除已合并的本地分支 `fix/20261126-kp-rt01-review-timeout`；远端同名分支保留（删远端分支需单独授权）。删除前确认：分支改动已全部在 `main`、无未提交改动、无运行进程引用该目录。
+- 已迁出/保留的产物：本地构建的 `KaneoPilot.app` 已安装在 `/Applications`（`0.6.1-test.472-local`），旧包备份在 `~/Library/Application Support/KaneoPilot/local-build-backup/KaneoPilot-0.6.1-test.469-local.app`；worktree 内 `build/local-macos/**` 属可再生成产物（`bash scripts/build_local_macos.sh --build` 或云端 Packages），随 worktree 一并删除。
