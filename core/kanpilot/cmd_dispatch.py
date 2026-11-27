@@ -3,9 +3,23 @@ begin-send / confirm / fail. Mirrors legacy kaneo_dispatch.py semantics."""
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from . import bridge, constants, core, db, remote, util, git_delivery
+
+
+def _transition_verified(task, state: dict) -> bool:
+    """远端是否已是本轮要求的 in-progress，且项目与需求未变（kp-nx01）。"""
+    state_task = state.get("task") or {}
+    return (
+        state_task.get("status") == constants.IN_PROGRESS_SLUG
+        and state_task.get("projectId") == task["project_id"]
+        and (
+            not task["requirements_sha256"]
+            or state.get("requirements_sha256") == task["requirements_sha256"]
+        )
+    )
 
 
 def _entry(ctx, payload, allowed):
@@ -75,9 +89,13 @@ def cmd_dispatch_begin_send(ctx, payload: dict) -> dict:
         except bridge.BridgeError as exc:
             raise util.KanpilotError("remote_unavailable", str(exc)) from exc
         live_task = live.get("task") or {}
+        # 幂等（kp-nx01）：上一次 begin-send 写完状态、回读断链时，远端已经是
+        # in-progress。重跑这一步既不该判冲突，也不该再写一次。
+        already_in_progress = live_task.get("status") == constants.IN_PROGRESS_SLUG
         pre_ok = (
             live_task.get("projectId") == task["project_id"]
-            and live_task.get("status") == task["original_todo_slug"]
+            and (already_in_progress
+                 or live_task.get("status") == task["original_todo_slug"])
             and (
                 not task["requirements_sha256"]
                 or live.get("requirements_sha256")
@@ -109,41 +127,57 @@ def cmd_dispatch_begin_send(ctx, payload: dict) -> dict:
                 conn, task["task_id"], now,
                 status="submitting", transition_started_at=now,
             )
-        # Remote write + re-verify.
-        try:
-            remote.update_status(
-                remote.get_client(), task["task_id"], task["project_id"],
-                constants.IN_PROGRESS_SLUG, task["original_todo_slug"],
-            )
-            after = remote.get_task(remote.get_client(), task["task_id"])
-            after_task = after.get("task") or {}
-            verified = (
-                after_task.get("status") == constants.IN_PROGRESS_SLUG
-                and after_task.get("projectId") == task["project_id"]
-                and (
-                    not task["requirements_sha256"]
-                    or after.get("requirements_sha256")
-                    == task["requirements_sha256"]
+        # Remote write + 复验（kp-nx01：远端已是 in-progress 则跳过重复写入）。
+        write_error = None
+        if not already_in_progress:
+            try:
+                remote.update_status(
+                    remote.get_client(), task["task_id"], task["project_id"],
+                    constants.IN_PROGRESS_SLUG, task["original_todo_slug"],
                 )
-            )
-            if not verified:
-                raise bridge.BridgeError(
-                    f"remote transition unverifiable: "
-                    f"{after_task.get('status')}"
-                )
-        except bridge.BridgeError as exc:
-            # The remote write may or may not have landed -> unknown.
+            except bridge.BridgeError as exc:
+                # 写入结果不明：先不下结论，交给下面的复读判定。
+                write_error = exc
+        after, read_error = None, None
+        for delay in (0.0, 0.5, 1.5):
+            if delay:
+                time.sleep(delay)
+            try:
+                after = remote.get_task(remote.get_client(), task["task_id"])
+                break
+            except bridge.BridgeError as exc:
+                read_error = exc
+        after_task = (after or {}).get("task") or {}
+        if after is not None and _transition_verified(task, after):
+            pass
+        elif after is not None and after_task.get("status") == task["original_todo_slug"]:
+            # 复读成功且远端仍在原列：写入确定没生效，按"未发送"收尾，可直接重试。
+            reason = write_error or read_error or "远端状态未切换"
             with db.write_txn(conn):
                 task = db.require_task(conn, task["task_id"])
                 core.block_task(
-                    conn, task, now, str(exc), "remote_conflict",
+                    conn, task, now, f"远端状态未切换：{reason}",
+                    "remote_unavailable", "kaneo-dispatch",
+                    send_state="not_sent", lock_retained=0,
+                )
+            raise util.KanpilotError(
+                "remote_unavailable", f"transition not applied: {reason}"
+            ) from (write_error if isinstance(write_error, BaseException) else None)
+        else:
+            # 读不到 / 读到别的状态：写入是否生效不明 → 保留占用，交人工。
+            detail = read_error or write_error or (
+                f"remote status {after_task.get('status')}")
+            with db.write_txn(conn):
+                task = db.require_task(conn, task["task_id"])
+                core.block_task(
+                    conn, task, now, str(detail), "remote_conflict",
                     "kaneo-dispatch", send_state="unknown",
                     lock_retained=1, manual_recovery_required=1,
                 )
             raise util.KanpilotError(
                 "remote_conflict",
-                f"transition verification failed: {exc}",
-            ) from exc
+                f"transition verification failed: {detail}",
+            ) from (detail if isinstance(detail, BaseException) else None)
         with db.write_txn(conn):
             db.update_task(
                 conn, task["task_id"], now,
@@ -154,7 +188,9 @@ def cmd_dispatch_begin_send(ctx, payload: dict) -> dict:
                 conn, now, "kaneo_transition", task_id=task["task_id"],
                 actor="kaneo-dispatch",
                 detail={"from": task["original_todo_slug"],
-                        "to": constants.IN_PROGRESS_SLUG},
+                        "to": constants.IN_PROGRESS_SLUG,
+                        "reused": already_in_progress,
+                        "write_failed": write_error is not None},
             )
         return {
             "status": "submitting",
