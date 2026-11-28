@@ -93,8 +93,19 @@
 - 最小变异复核：15 个目标变异（身份绑定、原轮未启动、finish_request、读回身份、动作证据、queued 源绑定、unknown/sent_at、远端状态、guard 重载、预检授权保留、rebind 源快照/原轮/用户门槛、不可解析 UI 证据、启动意图 transition 门槛）全部被测试捕获；脚本 `/tmp/kp_nx01_mutation_check.py`，源码树未被变异。
 - `py_compile`/`compileall`、`git diff --check` 与凭据/范围扫描通过；独立代码审查代理因 403 未产出结论，未以机器评审代替手工复核。
 - 最终全量门禁通过：在 `core/` 执行 `env -u QODER_SDK_CUSTOM_BASE_URL_BYOK /usr/local/bin/python3.11 -m pytest tests -q --tb=short`，结果 `5375 passed, 2092 subtests passed, 1 warning in 4466.61s (1:14:26)`，退出码 0。唯一警告为 `test_release_github.py` 重复 ZIP 成员名夹具的预期 UserWarning。该环境变量的一字符值会污染既有 Qoder 短密钥脱敏基线测试；仅在测试进程移除，不改源码或断言。
-- 未运行：云端 Packages、实际安装、真实 Kaneo/模型恢复、生产任务验收；尚未推送 dev、发布或安装。
+## dev 交付与隔离体验（2026-11-28）
+
+- 合入 worktree：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-kaneopilot/20261128-chore-kp-nx01-dev-integration`；分支 `chore/20261128-kp-nx01-dev-integration`；合并提交 `50cb536a7bdceb541f4bdc57b6a41581d6eecb9e`，父提交为 `e5eed98116bbcfb0f4b65694f3366c453d9d0316` 与 `73967554d6828c09258eb43f207bd9730b2bcfac`。相对 `origin/dev` 净变更 13 文件，`cmd_read.py` 与 `test_bridge_labels_comments.py` 无净差异；已推送 `origin/dev`。
+- L3 deep security review：`findings_count=0`。
+- `Packages` run `46119918331`（number 515）从提交 `50cb536` 成功发布 `v0.6.2-dev.515`，`isPrerelease=true`、`isDraft=false`。APK/DMG/manifest/SHA256SUMS 齐全，校验全部通过；APK `ddc1666d0149d96b5ec50fed01f35d94eddbef1553aee9627587531b45c79331`，DMG `61d0f924b16b635986237260b8181605d5862084c572b84c07aaeb27ddcb283a`，manifest `5fa24b8a484c6344b6e9ef85cf0434c03d0cb7a289b4d9c57306d41b8f99df90`。
+- 因 dev 通道不产出 preview 资产，另以同提交 `50cb536` 触发非发布 `channel=preview` 的 `Packages` run `46121617412`（number 516）；全部必需 job 成功，`publish` 与可选 `macos-session-fulltext-probe` 按预期跳过。下载 artifact `macos-update-ui-516`（artifact ID `15254182319`），ZIP 大小 `35804981`、SHA-256 `a11525b865318869ffa8235a915cf15b523971ada3806ff5effa662fccc3e9f6`；`ui-metadata.json` 的 `source_sha=50cb536a7bdceb541f4bdc57b6a41581d6eecb9e`、build `516`、Bundle ID `local.kaneopilot.software-update-check`，App 版本 `0.0.0`。`codesign --verify --deep --strict` 通过，签名主体为云端 ad-hoc。
+- 隔离体验使用上述 preview App、`KANPILOT_CORE` 指向 integration worktree 的 FakeCore、独立 HOME、空 `credentials.json`、`KANPILOT_FAKE_STATE` 与 `-executorSchedulingEnabled NO`；未连接真实 Kaneo、未调用真实模型、未改生产 DB/任务/凭据/已安装 App。启动日志中的 `sandbox_extension_issue_file_to_process ... Operation not permitted` 未阻止独立副本运行。
+- 通用 `send_state=unknown` 体验：详情显示「发送不明」、主操作「重新校验」及更多操作；重新校验弹出 Kaneo/计划/材料核对结果；「恢复原任务」确认文案明确旧派发按未发送处理并重新排队，确认后任务变为「已排队」。证据 `/tmp/kp-nx01-dev-experience-46119918331/screens/unknown-send-restored.png`；命令日志只包含该隔离夹具的 `recheck` 与 `resolve restore`。
+- `remote_conflict` 恢复入口实测未通过：隔离夹具让 `task-comic-010` 保持 `send_state=unknown`、`failure_code=remote_conflict`、`failure_stage=dispatch`，并由 FakeCore 返回 `_automation_allowed=["resume","replan","dismiss"]`。Task Detail 只显示警告与「核验执行状态」，没有主操作或更多操作；从「需要你」列表点击同一任务也进入该详情，仍无「继续」。截图 `/tmp/kp-nx01-dev-experience-46119918331/screens/remote-conflict-detail-hidden.png`、`remote-conflict-pending-route.png`、`remote-conflict-pending-list.png`。该夹具的命令日志只有读取命令，未发出 `resume`。
+- 原因定位：`TaskDetailContentView.swift:902-905` 在 unknown 状态只保留 restore/accept_duplicate/mark_sent/recheck，以及 `canRetryExecution` 为真时的 resume；`Models.swift:671-677` 的 `canRetryExecution` 不包含 `remote_conflict`，因此核心已授权的 resume 被界面过滤。FakeCore 未实现真实核心的身份绑定授权，本次只能证明入口渲染缺口，不能证明生产后端恢复。
+- 体验后仅退出隔离 preview PID `86749`；生产 App 仍为 PID `98608`，`/Applications/KaneoPilot.app` 仍为 Bundle ID `local.kaneopilot`、版本 `0.6.2-dev.494`、build `494`、时间 `2026-11-27T12:04:51+0800`；GitHub latest 仍为稳定版 `v0.6.0`。
+- 未运行/未验证：真实 Kaneo 与模型恢复、生产任务验收、真实设备安装；上述 UI 入口缺陷尚未修复，不能将本次后端组合态绿灯或 FakeCore 体验当作端到端验收。
 
 ## 状态
 
-- 实现中：补修已提交 `7396755`，已在独立 integration worktree 与 `origin/dev=e5eed98` 完成三方合并，组合态定向验证通过；尚未推送 dev、云端构建、安装或生产验收。
+- 实现中：后端补修已提交 `7396755`、集成并推送 dev（`50cb536`），云端 dev.515 发布与非发布 preview.516 均通过；隔离体验发现 `remote_conflict + send_state=unknown` 的核心授权 resume 被 Task Detail 过滤，且「需要你」列表进入同一详情后仍不可见。当前批准范围明确禁止修改 UI，因此保留该缺口并另立后续最小修补；未合并 main、未发稳定版、未做生产验收。
