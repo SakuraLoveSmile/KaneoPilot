@@ -224,7 +224,8 @@ class BuildFailureActionTest(BuildFailureFixture):
     def test_dispatch_start_rechecks_remote_after_worktree_prepared(self):
         self.claim_action()
         git(self.repo, "push", "--force", "origin", self.base + ":refs/heads/main")
-        db.update_task(self.conn, self.task_id, self.now, status="submitting")
+        db.update_task(self.conn, self.task_id, self.now, status="submitting",
+                       transition_verified_at=self.now)
         process = Mock(wraps=subprocess)
         process.SubprocessError = subprocess.SubprocessError
         process.Popen.side_effect = AssertionError("worker must not start after base drift")

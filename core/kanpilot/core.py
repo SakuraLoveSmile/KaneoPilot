@@ -457,6 +457,58 @@ def execution_retry_of(task):
     return {}
 
 
+_DISPATCH_RECOVERY_IDENTITY = (
+    "task_id", "project_id", "repository", "plan_path", "plan_sha256",
+    "plan_generated_at", "source_path", "source_sha256", "requirements_sha256",
+)
+
+
+def dispatch_recovery_identity(task):
+    return [task[key] for key in _DISPATCH_RECOVERY_IDENTITY]
+
+
+def dispatch_recovery(task):
+    resolution = util.jload(task["resolution"])
+    recovery = resolution.get("dispatch_recovery") if isinstance(resolution, dict) else None
+    return recovery if isinstance(recovery, dict) else None
+
+
+def dispatch_recovery_source_matches(conn, task, recovery):
+    if not isinstance(recovery, dict):
+        return False
+    source = db.get_request(conn, recovery.get("source_request_id"))
+    if (task["run_id"] != recovery.get("source_run_id")
+            or source is None or source["task_id"] != task["task_id"]
+            or source["kind"] != "dispatch"
+            or source["run_id"] != recovery.get("source_run_id")
+            or source["status"] not in ("failed", "cancelled")):
+        return False
+    return (source["status"] != "failed"
+            or (util.jload(source["result_json"]) or {})
+            == recovery.get("source_request_result"))
+
+
+def dispatch_recovery_matches(conn, task, recovery, request_id):
+    if not isinstance(recovery, dict):
+        return False
+    state = recovery.get("state")
+    if state not in ("queued", "claimed", "transitioned"):
+        return False
+    if dispatch_recovery_identity(task) != recovery.get("identity"):
+        return False
+    if recovery.get("request_id") != request_id:
+        return False
+    request = db.get_request(conn, request_id)
+    request_status = "queued" if state == "queued" else "claimed"
+    if (request is None or request["task_id"] != task["task_id"]
+            or request["kind"] != "dispatch" or request["status"] != request_status):
+        return False
+    if state == "queued":
+        return (dispatch_recovery_source_matches(conn, task, recovery)
+                and task["status"] == "ready" and not request["run_id"])
+    return bool(task["status"] in ("dispatching", "prepared", "submitting", "running")
+                and task["run_id"] == recovery.get("run_id") == request["run_id"])
+
 def expected_remote_slugs(task):
     if review_repair_of(task):
         return set(constants.REVIEW_SLUGS) | {constants.IN_PROGRESS_SLUG}

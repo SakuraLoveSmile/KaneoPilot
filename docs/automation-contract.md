@@ -25,7 +25,7 @@
 - 无请求立即结束；不轮询刷屏。
 - 远端 Kaneo 写只能经核心命令（`dispatch-begin-send`、`advance-task`、`create-review-fix`、`delivery-publish`、`delivery-sync`）；批量远端读取经 bridge。
 - 派发证据字段全部来自 context/协议事件观察；不推测、不修饰。
-- 关闭/中断不意味着操作结束：已 claimed 请求由租约派生失联，人工 resolve 才释放。
+- 关闭/中断不意味着操作结束：未被确定失败命令收尾的 claimed 请求由租约派生失联，人工 resolve 才释放；begin-send 的确定失败须在同一事务内关闭请求/attempt，不能用 early return 留下 claimed。
 - 暂停只影响新领取；执行端不得因全局暂停中止已 running 的轮次。
 
 ## 旧调度循环（ExecutorScheduler，仅历史兼容）
@@ -460,7 +460,7 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 | no_changes | delivery-commit | replan、mark_done、dismiss |
 | branch_diverged、gh_unavailable、pr_closed | delivery | resume（→ in_review + delivery，next_sync_at=now）、mark_done、dismiss |
 | delivery_unknown | delivery | resume（→ in_review + delivery，重新只读对账）、replan、dismiss；不自动重跑执行/评审 |
-| remote_conflict | advance-task、intake、begin-send | resume（接受远端当前需求和状态，回到被阻塞的步骤；派发中途不可用）、replan、mark_done、dismiss |
+| remote_conflict | advance-task、intake、begin-send | resume（非派发阶段接受远端当前需求和状态；派发阶段仅限 §5.10 的未启动身份绑定恢复，需求必须不变）、replan、mark_done、dismiss |
 | planner_failed（自动重试一次后）、needs_input | plan | replan、dismiss；也可以在规划面板补充材料后手动提交 |
 | dispatch_failed | dispatch | 沿用 retry/restore/accept_duplicate/mark_sent；另有 replan、dismiss |
 
@@ -470,18 +470,19 @@ ExecutorScheduler/SchedulerDecision 是历史实现，当前不再拉起或调�
 
 - **resume：** 只对上表列出的原因可用，derive/resolve 同时核对 failure_code 和 failure_stage。verification_environment_failure 的 monitor resume 不要求托管，非托管不写 automation 段字段；创建可领取 monitor 请求，不能重新 dispatch。
 - **revert_engine_fix：** 候选、before 全快照、两个 expected、事务外远端/binding 校验、事务内快照比较与恢复，以 protocol §5.27.12 为唯一共享契约；拒绝零任务写入，不修改原收据，不操作分支磁盘，不修改评审 automation.fix_round。全历史用于去重，未撤回行用于全部额度和两处 empty_diff 规则。engine_fix_summary 在撤回后仍显示退额。
-- **remote_conflict 的 resume：** 走三段式。
+- **remote_conflict 的 resume：** 非派发阶段走三段式。
   1. 读取远端任务（不在事务内）。
   2. 远端状态必须是下一步所需的值：monitor 需要 in-progress、in-review 或 done；delivery 需要 in-review 或 done；plan 不限。不符 → conflict，提示「请先在 Kaneo 调整到 X 再继续」。
   3. 在事务内把 requirements_sha256 和 kaneo_status 更新为远端当前值，记录事件 `requirements_accepted`。
-  4. 回到上一个失败请求对应的步骤：monitor → running + monitor；delivery → in_review + delivery；review → in_review + review；plan → needs_plan + plan_wanted；dispatch → 拒绝，改用既有的发送恢复动作。
+  4. 回到上一个失败请求对应的步骤：monitor → running + monitor；delivery → in_review + delivery；review → in_review + review；plan → needs_plan + plan_wanted。
+- **派发中途的 remote_conflict resume：** 只对自动化管理任务提供用户显式恢复，动作入口同时核对派发阶段与原轮未启动证据。原轮必须无启动意图、pid、session、sent/sent_at/send 证据或已见消息/会话的 UI 证据，且保留 unknown 的任务级占用与人工恢复标记；允许 `dispatch-prepare` 留下但未含 `message_visible`、`session_id`、`turn_id` 的 UI 证据及未核验的 `transition_started_at`，禁止 `transition_verified_at`。远端同一任务/项目、需求哈希不变且已 in-progress；在原请求（终态 failed 或历史 claimed）与新请求间写 `resolution.dispatch_recovery` 身份绑定；身份材料缺失不授权，queued 还核对原 run/source request 归属与失败快照。有效授权遇到远端状态或身份漂移时拒绝，不得退回普通派发。claim 时原子消费并绑定新 run，begin-send、confirm 与启动意图前重验；不放宽普通远端状态门、不记录 `requirements_accepted`、不重复 PUT。begin-send 的确定失败必须同时关闭请求/attempt 并释放 dispatch 串行位，`unknown` 的任务级人工恢复标记不因串行位释放而清除。queued 授权在领取前网络预检失败时仍终结请求/attempt、保持任务 ready，并保存失败 request/result 快照等待用户显式重试；用户 enqueue/confirm 须复核原身份、source 快照和原轮未启动证据后重绑新 request，automation 不得静默重绑，失败请求不得复用。
 - **replan：** 对自动化任务改为 needs_plan + plan_wanted，`plan_attempts=0`，开新段。如果远端需求有变化，用与上面相同的三段式先接受当前需求；用户点「重新规划」即视为已看过新内容。无法同分支修复时二次确认「将从目标分支新建工作树，本轮改动不会带入」。
 - **dismiss：** 对自动化任务显示为「转为人工处理」：在原 dismiss 语义（needs_user → ready）之外，置 `manual_takeover=true`、`delivery.mode="manual"`，记录事件 `automation_stopped`。此后 intake、自动确认、交付补建、same_task 登记全部跳过这个任务，它按普通手动任务处理，但继续使用原分支工作树。转为人工处理不停止观察、收尾与评审；live 项目的 monitor/review 由引擎周期 tick 补给。
 - **release_lost：** 释放丢失的自动化 plan 请求时，若 `plan_attempts<2` 则置 plan_wanted。
 - **tick 自动释放：** 自动化任务的 monitor/delivery 丢失请求，由 tick 按 release_lost 的语义自动释放（actor=scheduler，事件 `lost_request_released`）；live 项目由引擎周期 tick 执行。dispatch、plan、review 的丢失请求仍留给用户处理。
 - **plan 失败：** 自动化任务第一次普通失败时置 plan_wanted，让 intake 按原冻结输入自动重试一次；第二次失败转 needs_user，保留 failure_code=planner_failed。已完成稿仅发布被拒的止损与材料保全遵循上文第9项，不自动重跑模型。
 
-**新事件：** branch_worktree_adopted、engine_fix_reverted、automation_adopted、auto_confirm_skipped、fix_round_started、delivery_committed、delivery_pushed、pr_opened、kaneo_comment_posted、pr_merged、pr_closed、cost_recorded、requirements_accepted、automation_stopped、lost_request_released。
+**新事件：** branch_worktree_adopted、engine_fix_reverted、automation_adopted、auto_confirm_skipped、fix_round_started、delivery_committed、delivery_pushed、pr_opened、kaneo_comment_posted、pr_merged、pr_closed、cost_recorded、requirements_accepted、automation_stopped、lost_request_released、dispatch_recovery_queued/claimed/transitioned/failed/completed/retry_pending/rebound。
 
 `BOARD_FAILURE_CODES` 不增加，新原因通过 failure_stage 归类。归类如下：
 
