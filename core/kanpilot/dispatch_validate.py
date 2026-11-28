@@ -120,8 +120,21 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
         live_task.get("projectId") == meta["project_id"],
         "remote project mismatch",
     )
+    recovery = core.dispatch_recovery(task)
+    queued = db.active_request_for_key(conn, f"dispatch:{task_id}")
+    recovered_dispatch = bool(
+        live_task.get("id") == task_id
+        and live_task.get("status") == constants.IN_PROGRESS_SLUG and recovery
+        and not core.review_repair_of(task) and not core.execution_retry_of(task)
+        and core.dispatch_recovery_matches(
+            conn, task, recovery, queued["request_id"] if queued is not None else None))
+    if (recovery
+            and recovery.get("state") in ("queued", "claimed", "transitioned")
+            and not repair and not core.execution_retry_of(task)):
+        _require(recovered_dispatch, "dispatch recovery authorization mismatch")
     _require(
-        live_task.get("status") in (core.expected_remote_slugs(task) | (set(constants.REVIEW_SLUGS) if repair else set())),
+        live_task.get("status") in (core.expected_remote_slugs(task) | (set(constants.REVIEW_SLUGS) if repair else set()))
+        or recovered_dispatch,
         "remote task not in expected status",
     )
     _require(
@@ -305,6 +318,7 @@ def validate_dispatch(conn: sqlite3.Connection, task, now) -> dict:
             raise DispatchCheckFailed(exc.message) from exc
     return {
         **({"review_repair": repair} if repair else {}),
+        **({"dispatch_recovery": recovery} if recovered_dispatch else {}),
         "task_id": task_id,
         "plan_path": str(path),
         "plan_sha256": plan_sha,
@@ -338,7 +352,19 @@ def handle_dispatch_guard_failure(
         if request["status"] == "queued":
             # Fail only when still ours: a competing claim may have taken it
             # while validation ran outside the transaction.
+            from . import cmd_queue
+            recovery = core.dispatch_recovery(task)
+            preserve_recovery = bool(
+                exc.code == "remote_unavailable"
+                and core.dispatch_recovery_matches(
+                    conn, task, recovery, request["request_id"]))
             core.fail_request(conn, request, now_iso, exc.message, actor=actor)
+            if preserve_recovery:
+                cmd_queue.defer_dispatch_recovery(
+                    conn, task, now_iso, actor, request["request_id"], exc.message)
+            else:
+                cmd_queue.fail_dispatch_recovery(
+                    conn, task, now_iso, actor, exc.message)
         # Deterministic failures block the task; remote_unavailable leaves it
         # untouched (protocol.md §4.5-4: not a blocking condition).
         if exc.code != "remote_unavailable" and task["status"] != "needs_user":

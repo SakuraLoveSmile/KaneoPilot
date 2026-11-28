@@ -462,9 +462,13 @@ def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Opt
         with db.write_txn(conn):
             request = db.get_request(conn, request_id)
             if request["status"] == "queued":
+                task = db.require_task(conn, task_id)
                 core.fail_request(
                     conn, request, util.to_iso(now), reason, actor=executor
                 )
+                from . import cmd_queue
+                cmd_queue.fail_dispatch_recovery(
+                    conn, task, util.to_iso(now), executor, reason)
         return {
             "claimed": False, "reason": "guard_failed",
             "request_id": request_id, "detail": reason,
@@ -510,11 +514,44 @@ def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Opt
         if reason is not None:
             core.fail_request(conn, request, util.to_iso(now), reason,
                               actor=executor)
+            from . import cmd_queue
+            cmd_queue.fail_dispatch_recovery(
+                conn, task, util.to_iso(now), executor, reason)
             return {
                 "claimed": False, "reason": "guard_failed",
                 "request_id": request_id, "detail": reason,
                 "code": "guard_failed",
             }
+        recovery = checked.get("dispatch_recovery")
+        if recovery:
+            from . import cmd_queue
+            if checked.get("kaneo_status") != constants.IN_PROGRESS_SLUG:
+                core.fail_request(conn, request, util.to_iso(now),
+                                  "恢复授权的远端状态已变化", actor=executor)
+                cmd_queue._set_dispatch_recovery_state(
+                    conn, task, util.to_iso(now), executor, "failed",
+                    request_id=request_id, reason="远端状态已变化")
+                return {"claimed": False, "reason": "guard_failed", "request_id": request_id,
+                        "detail": "恢复授权的远端状态已变化", "code": "validation_failed"}
+            if (core.dispatch_recovery(task) != recovery
+                    or not core.dispatch_recovery_matches(conn, task, recovery, request_id)):
+                core.fail_request(conn, request, util.to_iso(now),
+                                  "派发恢复授权已变化", actor=executor)
+                current_recovery = core.dispatch_recovery(task)
+                if current_recovery and current_recovery.get("request_id") == request_id:
+                    cmd_queue._set_dispatch_recovery_state(
+                        conn, task, util.to_iso(now), executor, "failed",
+                        request_id=request_id, reason="派发恢复授权已变化")
+                return {"claimed": False, "reason": "guard_failed", "request_id": request_id,
+                        "detail": "派发恢复授权已变化", "code": "validation_failed"}
+            if not cmd_queue.dispatch_recovery_unstarted(conn, task):
+                core.fail_request(conn, request, util.to_iso(now),
+                                  "原派发轮次已出现启动或发送证据", actor=executor)
+                cmd_queue._set_dispatch_recovery_state(
+                    conn, task, util.to_iso(now), executor, "failed",
+                    request_id=request_id, reason="原轮次证据已变化")
+                return {"claimed": False, "reason": "guard_failed", "request_id": request_id,
+                        "detail": "原派发轮次已出现启动或发送证据", "code": "validation_failed"}
         # v2 §5.22.4：校验期间若有新 publish，hold 重新置位或哈希变化 →
         # 拒绝本次 claim（确认闸不被竞态绕过）。
         if db.task_extra(task).get("plan_execution_hold"):
@@ -529,6 +566,11 @@ def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Opt
                 conn, request, util.to_iso(now),
                 "plan changed between validation and claim", actor=executor,
             )
+            if recovery:
+                from . import cmd_queue
+                cmd_queue._set_dispatch_recovery_state(
+                    conn, task, util.to_iso(now), executor, "failed",
+                    request_id=request_id, reason="plan changed between validation and claim")
             return {
                 "claimed": False, "reason": "guard_failed",
                 "request_id": request_id,
@@ -540,6 +582,12 @@ def _claim(ctx, payload: dict, scope_id: Optional[str] = None, operation_id: Opt
             util.require(repair.get("state") == "queued" and checked.get("review_repair") == repair,
                          "修复材料在领取期间已变化", "conflict")
         run_id = _claim_row(conn, request, task, executor, lease_seconds, now)
+        if recovery:
+            from . import cmd_queue
+            cmd_queue._set_dispatch_recovery_state(
+                conn, task, util.to_iso(now), executor, "claimed",
+                request_id=request_id, run_id=run_id)
+            task = db.require_task(conn, task_id)
         if repair:
             db.set_extra(conn, task, util.to_iso(now), fix_request=dict(repair, state="running", repair_execution_run_id=run_id))
         session_marker = f"{task_id}/{run_id}"

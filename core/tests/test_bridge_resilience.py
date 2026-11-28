@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import unittest
@@ -26,8 +27,24 @@ class _Response:
         return False
 
 
+class _IncompleteResponse:
+    """open 成功、read 时抛 IncompleteRead：响应体在读取阶段被截断。"""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def read(self, size):
+        raise self._exc
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
 class _Opener:
-    """按顺序回放结果：异常则抛出，字典则当响应体返回。"""
+    """按顺序回放结果：异常则抛出，响应对象原样返回，字典则当响应体返回。"""
 
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
@@ -40,6 +57,8 @@ class _Opener:
         outcome = self.outcomes[min(self.calls - 1, len(self.outcomes) - 1)]
         if isinstance(outcome, BaseException):
             raise outcome
+        if isinstance(outcome, (_Response, _IncompleteResponse)):
+            return outcome
         return _Response(outcome)
 
 
@@ -48,7 +67,6 @@ def _client(opener, timeout=10.0):
     client.base_url = "https://kaneo.example.test/"
     client.token = "stub-token"
     client.timeout = timeout
-    client.read_timeout = min(timeout, bridge.GET_TIMEOUT_CAP)
     client._opener = opener
     return client
 
@@ -102,12 +120,50 @@ class BridgeResilienceTest(unittest.TestCase):
         self.assertEqual(opener.timeouts[0], bridge.GET_TIMEOUT_CAP)
         self.assertEqual(opener.timeouts[1], 30.0)
 
+    def test_lowered_timeout_after_construction_is_used(self):
+        opener = _Opener([{"ok": 1}])
+        client = _client(opener, timeout=10.0)
+        client.timeout = 1.0
+        client.request("/api/project?workspaceId=w")
+        self.assertEqual(opener.timeouts[0], 1.0)
+
     def test_http_error_is_never_retried(self):
         opener = _Opener([HTTPError("u", 503, "busy", {}, None)])
         client = _client(opener)
         with self.assertRaisesRegex(bridge.BridgeError, "HTTP 503"):
             client.request("/api/task/x")
         self.assertEqual(opener.calls, 1)
+
+    def test_get_retries_incomplete_read_then_succeeds(self):
+        opener = _Opener([
+            _IncompleteResponse(http.client.IncompleteRead(b"", 7)),
+            {"ok": True},
+        ])
+        client = _client(opener)
+        self.assertEqual(client.request("/api/task/x"), {"ok": True})
+        self.assertEqual(opener.calls, 2)
+
+    def test_get_exhausted_incomplete_read_is_bridge_error(self):
+        opener = _Opener([_IncompleteResponse(http.client.IncompleteRead(b"", 7))])
+        client = _client(opener)
+        with self.assertRaises(bridge.BridgeError) as raised:
+            client.request("/api/column/p?page=2")
+        self.assertEqual(opener.calls, 3)
+        message = str(raised.exception)
+        self.assertIn("Kaneo 请求失败: IncompleteRead(", message)
+        self.assertIn("GET /api/column/p", message)
+        self.assertIn("尝试 3 次", message)
+
+    def test_put_incomplete_read_is_converted_without_retry(self):
+        opener = _Opener([_IncompleteResponse(http.client.IncompleteRead(b"", 7))])
+        client = _client(opener)
+        with self.assertRaises(bridge.BridgeError) as raised:
+            client.request("/api/task/status/x", "PUT", {"status": "in-progress"})
+        self.assertEqual(opener.calls, 1)
+        message = str(raised.exception)
+        self.assertIn("IncompleteRead(", message)
+        self.assertIn("PUT /api/task/status/x", message)
+        self.assertNotIn("尝试", message)
 
     def _proxy_handler(self, env):
         with patch.dict(os.environ, env, clear=False), \
@@ -132,6 +188,46 @@ class BridgeResilienceTest(unittest.TestCase):
         with patch.dict(os.environ, {"KANEO_PROXY": "socks5://127.0.0.1:7890"}, clear=False):
             with self.assertRaisesRegex(bridge.BridgeError, "KANEO_PROXY"):
                 bridge._build_opener()
+
+    def test_proxy_port_must_be_an_in_range_integer(self):
+        for value in ("http://127.0.0.1:not-a-port",
+                      "http://127.0.0.1:70000",
+                      "http://127.0.0.1:0"):
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {"KANEO_PROXY": value}, clear=False):
+                    with self.assertRaisesRegex(bridge.BridgeError, "端口") as raised:
+                        bridge._build_opener()
+                # 代理值可能内嵌凭据，报错不得回显。
+                self.assertNotIn(value, str(raised.exception))
+
+    def test_portless_proxy_is_accepted(self):
+        handler = self._proxy_handler({"KANEO_PROXY": "https://proxy.example.test"})
+        self.assertEqual(handler.proxies, {"http": "https://proxy.example.test",
+                                           "https": "https://proxy.example.test"})
+
+    def test_known_token_is_redacted_from_transport_message(self):
+        token = "fixture-bearer-93ab77c1de02"
+        opener = _Opener([URLError(f"proxy rejected credential {token}")])
+        client = _client(opener)
+        client.token = token
+        with self.assertRaises(bridge.BridgeError) as raised:
+            client.request("/api/task/x")
+        message = str(raised.exception)
+        self.assertNotIn(token, message)
+        self.assertIn("«redacted»", message)
+
+    def test_known_token_is_redacted_before_truncation(self):
+        token = "fixture-bearer-93ab77c1de02"
+        reason = "x" * (bridge.ERROR_DETAIL_LIMIT - 10) + token
+        opener = _Opener([URLError(reason)])
+        client = _client(opener)
+        client.token = token
+        with self.assertRaises(bridge.BridgeError) as raised:
+            client.request("/api/task/x")
+        message = str(raised.exception)
+        # 若先截断后脱敏，200 字边界会留下 token 的前 10 个字符。
+        self.assertNotIn(token[:10], message)
+        self.assertIn("«redacted»", message)
 
 
 if __name__ == "__main__":

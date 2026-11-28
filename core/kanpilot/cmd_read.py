@@ -659,7 +659,10 @@ def _doctor_kaneo_ping(timeout: float, conn) -> dict:
         client = remote.get_client()
         if hasattr(client, "timeout"):
             client.timeout = timeout  # 探测超时独立于 KANEO_TIMEOUT
-        client.request("/api/project?" + urlencode({"workspaceId": workspace_id}))
+        client.request(
+            "/api/project?" + urlencode({"workspaceId": workspace_id}),
+            retry=0,
+        )
     except Exception as exc:
         timed_out = _probe_timed_out(exc)
         detail = str(exc) or exc.__class__.__name__

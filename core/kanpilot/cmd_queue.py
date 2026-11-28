@@ -67,6 +67,7 @@ def confirm_plan_inline(conn, task, now, *, expected_plan_sha256, actor, note=No
     row, created = db.create_request(conn, now, "dispatch", f"dispatch:{task['task_id']}",
                                     task_id=task["task_id"], payload={"note": note} if note else None,
                                     requested_by=actor)
+    _rebind_dispatch_recovery(conn, task, now, actor, row, created=created)
     extra = db.task_extra(db.require_task(conn, task["task_id"]))
     if extra.pop("plan_execution_hold", None):
         db.update_task(conn, task["task_id"], now, extra_json=extra)
@@ -195,6 +196,8 @@ def cmd_enqueue(ctx, payload: dict) -> dict:
             payload=request_payload, requested_by=requested_by,
             not_before=payload.get("not_before"),
         )
+        if kind == "dispatch":
+            _rebind_dispatch_recovery(conn, task, now, actor, row, created=created)
         return {
             "request": derive.request_view(row, ctx.now),
             "deduplicated": not created,
@@ -337,6 +340,22 @@ def _new_cycle_request(
     )
 
 
+def _dispatch_recovery_source_request(conn, task):
+    row = conn.execute(
+        "SELECT * FROM requests WHERE task_id=? AND kind='dispatch' "
+        "AND status IN ('claimed','failed') AND run_id=? "
+        "ORDER BY rowid DESC LIMIT 1",
+        (task["task_id"], task["run_id"]),
+    ).fetchone()
+    if row is None:
+        raise util.KanpilotError("conflict", "原派发请求缺少可核验的失败或占用记录")
+    result = util.jload(row["result_json"]) or {}
+    if row["status"] == "failed" and (
+            result.get("outcome") != "failed" or result.get("send_state") != "unknown"):
+        raise util.KanpilotError("conflict", "原派发请求的发送结果与恢复条件不符")
+    return row
+
+
 def _release_claimed_dispatch(conn, task, now, actor, via) -> None:
     """重排派发前释放残留的 claimed dispatch 请求（kp-nx01）。
 
@@ -403,6 +422,155 @@ _AUTO_RESUME_TARGETS = {
 
 def _resolution_snapshot(task):
     return tuple(task[key] for key in ("status", "stage", "run_id", "failure_code", "failure_stage", "project_id", "repository", "plan_path", "plan_sha256", "plan_generated_at", "source_path", "source_sha256", "requirements_sha256", "session_id", "sent", "send_state", "lock_retained", "extra_json"))
+
+
+def _dispatch_recovery_ui_unsent(task):
+    evidence = task["ui_evidence"]
+    if evidence is None or evidence == "":
+        return True
+    if isinstance(evidence, str):
+        evidence = util.jload(evidence)
+        if evidence is None:
+            return False
+    return (isinstance(evidence, dict)
+            and not evidence.get("message_visible")
+            and not evidence.get("session_id")
+            and not evidence.get("turn_id"))
+
+
+def dispatch_recovery_candidate(conn, task):
+    return bool(core.is_automation_managed(task) and task["status"] == "needs_user"
+                and task["failure_code"] == "remote_conflict"
+                and (task["failure_stage"] or task["stage"]) in _DISPATCH_STAGES
+                and task["run_id"] and task["project_id"] and task["repository"]
+                and task["plan_path"] and task["plan_sha256"] and task["plan_generated_at"]
+                and task["source_path"] and task["source_sha256"] and task["requirements_sha256"]
+                and not task["sent"] and not task["sent_at"]
+                and task["send_state"] == "unknown"
+                and task["lock_retained"] and task["manual_recovery_required"]
+                and not task["session_id"] and not task["session_title"]
+                and not task["send_evidence"]
+                and _dispatch_recovery_ui_unsent(task)
+                and not task["transition_verified_at"])
+
+
+def dispatch_recovery_unstarted(conn, task):
+    from . import round_store
+    row = round_store.get_round(conn, task["task_id"], task["run_id"])
+    return bool(row is not None and row["save_state"] == "active"
+                and row["backend"] in constants.EXEC_BACKENDS
+                and not row["started_at"] and not row["pid"]
+                and not row["session_id"] and not row["session_title"]
+                and not task["sent"] and not task["sent_at"]
+                and not task["session_id"] and not task["session_title"]
+                and not task["send_evidence"] and _dispatch_recovery_ui_unsent(task)
+                and not task["transition_verified_at"])
+
+
+def _set_dispatch_recovery_state(conn, task, now, actor, state, request_id=None, run_id=None, reason=None):
+    resolution = util.jload(task["resolution"])
+    resolution = resolution if isinstance(resolution, dict) else {}
+    recovery = resolution.get("dispatch_recovery")
+    if not isinstance(recovery, dict) or recovery.get("state") not in ("queued", "claimed", "transitioned"):
+        return
+    if request_id is not None and recovery.get("request_id") != request_id:
+        return
+    recovery = dict(recovery, state=state)
+    if request_id is not None:
+        recovery["request_id"] = request_id
+    if run_id is not None:
+        recovery["run_id"] = run_id
+    if reason is not None:
+        recovery["reason"] = reason
+    resolution["dispatch_recovery"] = recovery
+    db.update_task(conn, task["task_id"], now, resolution=util.jdump(resolution))
+    db.add_event(conn, now, "dispatch_recovery_" + state, task_id=task["task_id"],
+                 request_id=request_id or recovery.get("request_id"), actor=actor,
+                 detail={"source_run_id": recovery.get("source_run_id"), "run_id": run_id,
+                         "reason": reason})
+
+
+def fail_dispatch_recovery(conn, task, now, actor, reason):
+    recovery = core.dispatch_recovery(task)
+    if recovery and recovery.get("state") in ("queued", "claimed", "transitioned"):
+        _set_dispatch_recovery_state(
+            conn, task, now, actor, "failed",
+            request_id=recovery.get("request_id"), reason=reason,
+        )
+
+
+def defer_dispatch_recovery(conn, task, now, actor, request_id, reason):
+    task = db.require_task(conn, task["task_id"])
+    recovery = core.dispatch_recovery(task)
+    if (not recovery or recovery.get("state") != "queued"
+            or recovery.get("request_id") != request_id
+            or core.dispatch_recovery_identity(task) != recovery.get("identity")
+            or not core.dispatch_recovery_source_matches(conn, task, recovery)
+            or task["status"] != "ready"):
+        return
+    request = db.get_request(conn, request_id)
+    result = util.jload(request["result_json"]) if request is not None else None
+    if request is None or request["status"] != "failed" or request["run_id"] or not isinstance(result, dict):
+        return
+    resolution = util.jload(task["resolution"])
+    recovery = dict(recovery, retry_pending_request_id=request_id,
+                    retry_request_result=result, reason=reason)
+    resolution["dispatch_recovery"] = recovery
+    db.update_task(conn, task["task_id"], now, resolution=util.jdump(resolution))
+    db.add_event(conn, now, "dispatch_recovery_retry_pending", task_id=task["task_id"],
+                 request_id=request_id, actor=actor,
+                 detail={"source_run_id": recovery.get("source_run_id"),
+                         "source_request_id": recovery.get("source_request_id"),
+                         "reason": reason})
+
+
+def _dispatch_recovery_retry_matches(conn, task, recovery, request):
+    previous = db.get_request(conn, recovery.get("retry_pending_request_id"))
+    result = util.jload(previous["result_json"]) if previous is not None else None
+    return bool(
+        recovery.get("state") == "queued"
+        and recovery.get("request_id") == recovery.get("retry_pending_request_id")
+        and core.dispatch_recovery_identity(task) == recovery.get("identity")
+        and core.dispatch_recovery_source_matches(conn, task, recovery)
+        and task["status"] == "ready" and task["send_state"] == "not_sent"
+        and not task["sent"] and not task["sent_at"]
+        and not task["session_id"] and not task["send_evidence"]
+        and not task["transition_verified_at"]
+        and dispatch_recovery_unstarted(conn, task)
+        and previous is not None and previous["task_id"] == task["task_id"]
+        and previous["kind"] == "dispatch" and previous["status"] == "failed"
+        and not previous["run_id"] and isinstance(result, dict)
+        and result == recovery.get("retry_request_result")
+        and request["task_id"] == task["task_id"] and request["kind"] == "dispatch"
+        and request["status"] == "queued" and not request["run_id"]
+    )
+
+
+def _rebind_dispatch_recovery(conn, task, now, actor, request, *, created):
+    recovery = core.dispatch_recovery(task)
+    if not recovery or recovery.get("state") not in ("queued", "claimed", "transitioned"):
+        return
+    if recovery.get("request_id") == request["request_id"]:
+        util.require(not recovery.get("retry_pending_request_id")
+                     and core.dispatch_recovery_matches(conn, task, recovery, request["request_id"]),
+                     "派发恢复授权已失效，请重新核对任务", "conflict")
+        return
+    util.require(actor == "user" and created
+                 and _dispatch_recovery_retry_matches(conn, task, recovery, request),
+                 "派发恢复重试必须由用户显式确认，且原身份、失败请求和未启动证据未变化",
+                 "conflict")
+    resolution = util.jload(task["resolution"])
+    previous_request_id = recovery["request_id"]
+    recovery = dict(recovery, request_id=request["request_id"])
+    recovery.pop("retry_pending_request_id", None)
+    recovery.pop("retry_request_result", None)
+    resolution["dispatch_recovery"] = recovery
+    db.update_task(conn, task["task_id"], now, resolution=util.jdump(resolution))
+    db.add_event(conn, now, "dispatch_recovery_rebound", task_id=task["task_id"],
+                 request_id=request["request_id"], actor=actor,
+                 detail={"previous_request_id": previous_request_id,
+                         "source_run_id": recovery.get("source_run_id"),
+                         "source_request_id": recovery.get("source_request_id")})
 
 
 def execution_retry_candidate(conn, task, *, engine_empty=False, verification_retry=False):
@@ -886,8 +1054,20 @@ def _record_engine_fix(conn, task, now, fix, plan, before):
 
 def _accept_remote_for_resolution(ctx, payload):
     task = db.require_task(ctx.conn, payload["task_id"])
-    if not core.is_automation_managed(task) or not (payload["action"] == "replan" or (payload["action"] == "resume" and task["failure_code"] == "remote_conflict")):
+    stage = task["failure_stage"] or task["stage"]
+    dispatch_resume = (payload["action"] == "resume" and task["failure_code"] == "remote_conflict"
+                       and stage in _DISPATCH_STAGES)
+    if (not core.is_automation_managed(task)
+            or not (payload["action"] == "replan"
+                    or (payload["action"] == "resume" and task["failure_code"] == "remote_conflict"))):
         return None
+    if dispatch_resume:
+        if payload.get("actor", "user") != "user":
+            raise util.KanpilotError("conflict", "派发恢复必须由用户明确确认")
+        if not dispatch_recovery_candidate(ctx.conn, task) or not dispatch_recovery_unstarted(ctx.conn, task):
+            raise util.KanpilotError("conflict", "原派发轮次已有启动或发送证据，请使用发送恢复或重新规划")
+        if task["sent"] not in (None, 0):
+            raise util.KanpilotError("conflict", "原派发已有发送记录，不能按未启动恢复")
     round_snapshot = None
     plus_preflight = None
     if payload["action"] == "replan":
@@ -913,7 +1093,6 @@ def _accept_remote_for_resolution(ctx, payload):
                     raise util.KanpilotError("conflict", "旧执行轮次证据已变化，请重新核验")
                 round_snapshot = dict(refreshed)
     from . import remote, bridge
-    stage = task["failure_stage"] or task["stage"]
     try:
         live = remote.get_task(remote.get_client(), task["task_id"])
     except bridge.BridgeError as exc:
@@ -924,18 +1103,19 @@ def _accept_remote_for_resolution(ctx, payload):
     if plus_preflight and (t.get("id") != task["task_id"] or t.get("status") != constants.IN_PROGRESS_SLUG
                            or live.get("requirements_sha256") != task["requirements_sha256"]):
         raise util.KanpilotError("remote_conflict", "Plus 未发送恢复要求原任务、需求不变且远端仍为 In Progress")
-    if payload["action"] == "resume" and stage in _DISPATCH_STAGES:
-        # 派发写入后不明（kp-nx01）：只认"远端确实已切到 in-progress"这一种情况；
-        # 否则要求用户先在 Kaneo 调整，避免本地重发与远端已在跑错位。
-        if t.get("status") != constants.IN_PROGRESS_SLUG:
+    if dispatch_resume:
+        if (t.get("id") != task["task_id"]
+                or t.get("status") != constants.IN_PROGRESS_SLUG
+                or live.get("requirements_sha256") != task["requirements_sha256"]):
             raise util.KanpilotError(
-                "conflict", "派发中途需先在 Kaneo 把任务切到 In Progress 再继续")
+                "conflict", "派发中途需先在 Kaneo 把同一任务切到 In Progress，且需求必须保持不变")
     if payload["action"] == "resume":
         required = {"monitor": {"in-progress", "in-review", "done"}, "delivery": {"in-review", "done"}, "review": {"in-review", "done"}}.get(stage)
         if required and t.get("status") not in required:
             raise util.KanpilotError("conflict", "请先在 Kaneo 调整到 " + "/".join(sorted(required)) + " 再继续")
     return {"requirements_sha256": live.get("requirements_sha256"), "kaneo_status": t.get("status"), "stage": stage,
-            "snapshot": _resolution_snapshot(task), "round_snapshot": round_snapshot, "plus_preflight": plus_preflight}
+            "snapshot": _resolution_snapshot(task), "round_snapshot": round_snapshot, "plus_preflight": plus_preflight,
+            "dispatch_resume": dispatch_resume}
 
 
 def cmd_resolve(ctx, payload: dict) -> dict:
@@ -1096,6 +1276,10 @@ def cmd_resolve(ctx, payload: dict) -> dict:
         if accepted_remote:
             if task["status"] != "needs_user" or accepted_remote["snapshot"] != _resolution_snapshot(task):
                 raise util.KanpilotError("conflict", "任务处置状态已变化")
+            if accepted_remote.get("dispatch_resume") and (
+                    not dispatch_recovery_candidate(conn, task)
+                    or not dispatch_recovery_unstarted(conn, task)):
+                raise util.KanpilotError("conflict", "原派发轮次或发送证据已变化")
             if accepted_remote.get("plus_preflight"):
                 from . import plus_preflight_replan
                 proof = accepted_remote["plus_preflight"]
@@ -1108,11 +1292,15 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 old_round = round_store.get_round(conn, task["task_id"], task["run_id"])
                 if old_round is None or dict(old_round) != accepted_remote["round_snapshot"]:
                     raise util.KanpilotError("conflict", "旧执行轮次证据已变化，请重新核验")
-            db.update_task(conn, task["task_id"], now, requirements_sha256=accepted_remote["requirements_sha256"], kaneo_status=accepted_remote["kaneo_status"], kaneo_checked_at=now)
-            db.add_event(conn, now, "requirements_accepted", task_id=task["task_id"], actor=actor)
+            db.update_task(conn, task["task_id"], now, kaneo_status=accepted_remote["kaneo_status"], kaneo_checked_at=now)
+            if not accepted_remote.get("dispatch_resume"):
+                db.update_task(conn, task["task_id"], now,
+                               requirements_sha256=accepted_remote["requirements_sha256"])
+                db.add_event(conn, now, "requirements_accepted", task_id=task["task_id"], actor=actor)
             task = db.require_task(conn, task["task_id"])
         resolution = {"action": requested_action, "note": note, "at": now, "actor": actor}
         new_request = None
+        recovery_request = None
         send_reset = {}
 
         if action in ("resume", "accept_verification"):
@@ -1188,6 +1376,14 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                                       "transition_started_at": None,
                                       "transition_verified_at": None,
                                       "dispatch_lease_expires_at": None}
+                        source_request = _dispatch_recovery_source_request(conn, task)
+                        recovery_request = {
+                            "identity": core.dispatch_recovery_identity(task),
+                            "source_run_id": task["run_id"],
+                            "source_request_id": source_request["request_id"],
+                            "source_request_result": util.jload(source_request["result_json"]) or {},
+                            "state": "queued",
+                        }
                         _release_claimed_dispatch(conn, task, now, actor,
                                                   "resolve resume")
                     else:
@@ -1225,6 +1421,17 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                                      unknown_delivery_streak=0)
             if kind:
                 new_request, _ = _new_cycle_request(conn, now, task, kind, requested_by=actor)
+            if recovery_request is not None:
+                util.require(new_request is not None and new_request["status"] == "queued",
+                             "派发恢复请求未能重新排队", "conflict")
+                recovery_request["request_id"] = new_request["request_id"]
+                resolution["dispatch_recovery"] = recovery_request
+                db.update_task(conn, task["task_id"], now,
+                               resolution=util.jdump(resolution))
+                db.add_event(conn, now, "dispatch_recovery_queued", task_id=task["task_id"],
+                             request_id=new_request["request_id"], actor=actor,
+                             detail={"source_run_id": recovery_request["source_run_id"],
+                                     "source_request_id": recovery_request["source_request_id"]})
 
         elif action == "retry":
             from . import plan_answers
@@ -1258,6 +1465,8 @@ def cmd_resolve(ctx, payload: dict) -> dict:
                 # 面板提交材料；不再自动创建 plan 请求。
                 new_request = None
             else:
+                if kind == "dispatch":
+                    _release_claimed_dispatch(conn, task, now, actor, "resolve retry")
                 new_request, _ = _new_cycle_request(conn, now, task, kind)
 
         elif action == "restore":

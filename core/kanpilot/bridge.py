@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import sys
@@ -38,6 +39,18 @@ def _ssl_context():
         return None
 
 
+try:  # 包模式复用统一脱敏；bridge 也能作为独立脚本运行，此时无包根，退回本地替换。
+    from .util import redact as _redact
+except ImportError:  # pragma: no cover - 仅独立脚本方式触发
+    def _redact(text, secrets=None):
+        if not isinstance(text, str):
+            return text
+        for secret in secrets or ():
+            if isinstance(secret, str) and len(secret) >= 8:
+                text = text.replace(secret, "«redacted»")
+        return text
+
+
 MAX_RESPONSE = 10 * 1024 * 1024
 MAX_CREATE_PAYLOAD = 1024 * 1024
 DEFAULT_TIMEOUT = 10.0
@@ -61,13 +74,25 @@ def fail(message: str) -> None:
 
 
 def _proxy_from_env() -> str:
-    """显式代理才用：KANEO_PROXY=http(s)://host:port（kp-nx01）。"""
+    """显式代理才用：KANEO_PROXY=http(s)://host:port（kp-nx01）。
+
+    报错不回显原值：代理地址可能内嵌凭据，只说明期望形态。
+    """
     raw = (os.environ.get("KANEO_PROXY") or "").strip()
     if not raw:
         return ""
-    parsed = urlparse(raw)
+    try:
+        parsed = urlparse(raw)
+    except ValueError as exc:
+        raise BridgeError("KANEO_PROXY 必须是 http(s)://host:port 形式的代理地址") from exc
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise BridgeError("KANEO_PROXY 必须是 http(s)://host:port 形式的代理地址")
+    try:
+        port = parsed.port
+    except ValueError as exc:  # 非数字、负数或超过 65535
+        raise BridgeError("KANEO_PROXY 端口必须是 1-65535 的整数") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise BridgeError("KANEO_PROXY 端口必须是 1-65535 的整数")
     return raw
 
 
@@ -92,11 +117,16 @@ def _build_opener(*extra_handlers):
 
 
 def _transport_message(exc: BaseException, method: str, path: str,
-                       attempts: int, elapsed: float) -> str:
-    """把连接层失败写成可判断的一句话：原因 + 目标 + 尝试次数（kp-nx01）。"""
+                       attempts: int, elapsed: float,
+                       secrets: tuple[str, ...] = ()) -> str:
+    """把连接层失败写成可判断的一句话：原因 + 目标 + 尝试次数（kp-nx01）。
+
+    已知凭据先脱敏再截断：若先截断，token 恰好跨过 200 字边界时会留下
+    半截值，精确替换随之失效。
+    """
     reason = getattr(exc, "reason", None)
     text = str(reason if reason is not None else exc).strip() or type(exc).__name__
-    text = " ".join(text.split())[:ERROR_DETAIL_LIMIT]
+    text = " ".join(_redact(text, secrets).split())[:ERROR_DETAIL_LIMIT]
     target = path.split("?", 1)[0]
     suffix = f"（尝试 {attempts} 次，{elapsed:.1f}s）" if attempts > 1 else ""
     return f"Kaneo 请求失败: {type(exc).__name__}({text}) {method} {target}{suffix}"
@@ -150,7 +180,6 @@ class Client:
             raise BridgeError("KANEO_TIMEOUT 必须是数字") from exc
         if self.timeout <= 0:
             raise BridgeError("KANEO_TIMEOUT 必须大于 0")
-        self.read_timeout = min(self.timeout, GET_TIMEOUT_CAP)
         self._opener = _build_opener()
 
     def request(self, path: str, method: str = "GET", body: Any = None,
@@ -164,7 +193,7 @@ class Client:
         if retry is None:
             retry = DEFAULT_READ_RETRIES if method == "GET" else 0
         attempts = max(1, int(retry) + 1)
-        timeout = self.read_timeout if method == "GET" else self.timeout
+        timeout = min(self.timeout, GET_TIMEOUT_CAP) if method == "GET" else self.timeout
         started = time.monotonic()
         transport_error: Optional[BaseException] = None
         for attempt in range(attempts):
@@ -178,12 +207,13 @@ class Client:
                 if exc.code == 401:
                     raise BridgeError("Kaneo 登录已失效，请刷新 Kaneo 登录凭据") from exc
                 raise BridgeError(f"Kaneo 请求失败: HTTP {exc.code}") from exc
-            except (URLError, TimeoutError, OSError) as exc:
+            except (URLError, TimeoutError, OSError,
+                    http.client.IncompleteRead) as exc:
                 transport_error = exc
         else:
             raise BridgeError(_transport_message(
                 transport_error, method, path, attempts,
-                time.monotonic() - started,
+                time.monotonic() - started, secrets=(self.token,),
             )) from transport_error
         if not raw:
             return None

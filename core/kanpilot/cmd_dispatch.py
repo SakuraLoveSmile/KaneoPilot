@@ -6,19 +6,27 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from . import bridge, constants, core, db, remote, util, git_delivery
+from . import bridge, constants, core, db, remote, util, git_delivery, round_store
+
+
+def _remote_identity_matches(task, state: dict) -> bool:
+    state_task = state.get("task") or {}
+    return (
+        state_task.get("id") == task["task_id"]
+        and state_task.get("projectId") == task["project_id"]
+        and (
+            not task["requirements_sha256"]
+            or state.get("requirements_sha256") == task["requirements_sha256"]
+        )
+    )
 
 
 def _transition_verified(task, state: dict) -> bool:
     """远端是否已是本轮要求的 in-progress，且项目与需求未变（kp-nx01）。"""
     state_task = state.get("task") or {}
     return (
-        state_task.get("status") == constants.IN_PROGRESS_SLUG
-        and state_task.get("projectId") == task["project_id"]
-        and (
-            not task["requirements_sha256"]
-            or state.get("requirements_sha256") == task["requirements_sha256"]
-        )
+        _remote_identity_matches(task, state)
+        and state_task.get("status") == constants.IN_PROGRESS_SLUG
     )
 
 
@@ -37,6 +45,64 @@ def _entry(ctx, payload, allowed):
             f"expected {'|'.join(allowed)}",
         )
     return task, request
+
+
+def _require_send_entry(ctx, payload, allowed):
+    task, request = _entry(ctx, payload, allowed)
+    recovery = core.dispatch_recovery(task)
+    if recovery and recovery.get("state") in ("queued", "claimed", "transitioned"):
+        util.require(
+            core.dispatch_recovery_matches(
+                ctx.conn, task, recovery, request["request_id"]),
+            "dispatch recovery authorization no longer matches this run",
+            "conflict",
+        )
+    return task, request
+
+
+def _require_start_entry(ctx, payload):
+    task, request = _require_send_entry(ctx, payload, ("submitting",))
+    util.require(task["transition_verified_at"], "transition not verified", "conflict")
+    return task, request
+
+
+def _record_begin_send_failure(conn, task, request, now, payload, code,
+                               message, send_state, lock_retained):
+    core.block_task(
+        conn, task, now, message, code, "kaneo-dispatch",
+        send_state=send_state, lock_retained=lock_retained,
+        manual_recovery_required=1 if send_state == "unknown" else 0,
+    )
+    core.finish_request(
+        conn, request, now, "failed", "failed",
+        result={"outcome": "failed", "stage": "begin-send",
+                "run_id": payload["run_id"], "failure_stage": task["status"],
+                "reason": message, "send_state": send_state},
+        note=message, send_state=send_state,
+    )
+    if core.dispatch_recovery(task):
+        from . import cmd_queue
+        cmd_queue._set_dispatch_recovery_state(
+            conn, task, now, "kaneo-dispatch", "failed",
+            request_id=request["request_id"], run_id=payload["run_id"],
+            reason=message,
+        )
+    db.add_event(
+        conn, now, "dispatch_failed", task_id=task["task_id"],
+        request_id=request["request_id"], actor="kaneo-dispatch",
+        detail={"run_id": payload["run_id"], "send_state": send_state,
+                "reason": message, "failure_stage": task["status"]},
+    )
+
+
+def _fail_begin_send(ctx, payload, code, message, send_state, lock_retained):
+    conn, now = ctx.conn, ctx.now_iso
+    with db.write_txn(conn):
+        task, request = _require_send_entry(ctx, payload, ("prepared", "submitting"))
+        _record_begin_send_failure(
+            conn, task, request, now, payload, code, message,
+            send_state, lock_retained,
+        )
 
 
 def cmd_dispatch_prepare(ctx, payload: dict) -> dict:
@@ -67,18 +133,22 @@ def cmd_dispatch_prepare(ctx, payload: dict) -> dict:
 
 def cmd_dispatch_begin_send(ctx, payload: dict) -> dict:
     conn, now = ctx.conn, ctx.now_iso
-    task, _request = _entry(ctx, payload, ("prepared",))
+    task, _request = _require_send_entry(ctx, payload, ("prepared",))
     from . import harnesses
     execution = round_store.require_round(conn, task["task_id"], payload["run_id"])
     if not harnesses.supports_role(execution["backend"], "execution"):
         raise util.KanpilotError(
             "exec_backend_not_plus", "执行端缺少受约束执行与结构化验证报告能力，不能发送新执行；请选择 Plus 或 Codex CLI")
+    util.require(
+        util.sha256_file(Path(task["plan_path"])) == task["plan_sha256"],
+        "plan changed since dispatch validation", "validation_failed",
+    )
     if (core.is_pr_delivery(task) or _manual_branch_delivery(task)
             or core.execution_retry_of(task) or core.review_repair_of(task)):
         # Recheck outside the transaction before any remote status mutation.
         _ensure_worktree(task, task["task_id"], payload["run_id"], conn)
     with db.write_txn(conn):
-        task, _request = _entry(ctx, payload, ("prepared",))
+        task, _request = _require_send_entry(ctx, payload, ("prepared",))
         owner = f"begin-send:{payload['run_id']}"
         core.acquire_lifecycle(conn, owner)
 
@@ -93,7 +163,8 @@ def cmd_dispatch_begin_send(ctx, payload: dict) -> dict:
         # in-progress。重跑这一步既不该判冲突，也不该再写一次。
         already_in_progress = live_task.get("status") == constants.IN_PROGRESS_SLUG
         pre_ok = (
-            live_task.get("projectId") == task["project_id"]
+            live_task.get("id") == task["task_id"]
+            and live_task.get("projectId") == task["project_id"]
             and (already_in_progress
                  or live_task.get("status") == task["original_todo_slug"])
             and (
@@ -103,26 +174,16 @@ def cmd_dispatch_begin_send(ctx, payload: dict) -> dict:
             )
         )
         if not pre_ok:
-            with db.write_txn(conn):
-                task = db.require_task(conn, task["task_id"])
-                core.block_task(
-                    conn, task, now,
-                    f"remote changed before transition: status "
-                    f"{live_task.get('status')} != {task['original_todo_slug']}",
-                    "remote_conflict", "kaneo-dispatch",
-                    send_state="unknown", lock_retained=1,
-                    manual_recovery_required=1,
-                )
-            raise util.KanpilotError(
-                "remote_conflict", "remote changed before transition"
+            message = (
+                f"remote changed before transition: status "
+                f"{live_task.get('status')} != {task['original_todo_slug']}"
             )
+            _fail_begin_send(
+                ctx, payload, "remote_conflict", message, "unknown", 1,
+            )
+            raise util.KanpilotError("remote_conflict", message)
         with db.write_txn(conn):
-            task = db.require_task(conn, task["task_id"])
-            core.require_task_run(task, payload["run_id"])
-            if task["status"] != "prepared":
-                raise util.KanpilotError(
-                    "conflict", "state changed during begin-send"
-                )
+            task, _request = _require_send_entry(ctx, payload, ("prepared",))
             db.update_task(
                 conn, task["task_id"], now,
                 status="submitting", transition_started_at=now,
@@ -148,50 +209,57 @@ def cmd_dispatch_begin_send(ctx, payload: dict) -> dict:
             except bridge.BridgeError as exc:
                 read_error = exc
         after_task = (after or {}).get("task") or {}
-        if after is not None and _transition_verified(task, after):
-            pass
-        elif after is not None and after_task.get("status") == task["original_todo_slug"]:
-            # 复读成功且远端仍在原列：写入确定没生效，按"未发送"收尾，可直接重试。
-            reason = write_error or read_error or "远端状态未切换"
-            with db.write_txn(conn):
-                task = db.require_task(conn, task["task_id"])
-                core.block_task(
-                    conn, task, now, f"远端状态未切换：{reason}",
-                    "remote_unavailable", "kaneo-dispatch",
-                    send_state="not_sent", lock_retained=0,
-                )
-            raise util.KanpilotError(
-                "remote_unavailable", f"transition not applied: {reason}"
-            ) from (write_error if isinstance(write_error, BaseException) else None)
-        else:
-            # 读不到 / 读到别的状态：写入是否生效不明 → 保留占用，交人工。
-            detail = read_error or write_error or (
-                f"remote status {after_task.get('status')}")
-            with db.write_txn(conn):
-                task = db.require_task(conn, task["task_id"])
-                core.block_task(
-                    conn, task, now, str(detail), "remote_conflict",
-                    "kaneo-dispatch", send_state="unknown",
-                    lock_retained=1, manual_recovery_required=1,
-                )
-            raise util.KanpilotError(
-                "remote_conflict",
-                f"transition verification failed: {detail}",
-            ) from (detail if isinstance(detail, BaseException) else None)
+        failure, cause = None, None
         with db.write_txn(conn):
-            db.update_task(
-                conn, task["task_id"], now,
-                kaneo_status=constants.IN_PROGRESS_SLUG,
-                kaneo_checked_at=now, transition_verified_at=now,
+            task, _request = _require_send_entry(
+                ctx, payload, ("prepared", "submitting"),
             )
-            db.add_event(
-                conn, now, "kaneo_transition", task_id=task["task_id"],
-                actor="kaneo-dispatch",
-                detail={"from": task["original_todo_slug"],
-                        "to": constants.IN_PROGRESS_SLUG,
-                        "reused": already_in_progress,
-                        "write_failed": write_error is not None},
-            )
+            if after is not None and _transition_verified(task, after):
+                db.update_task(
+                    conn, task["task_id"], now,
+                    kaneo_status=constants.IN_PROGRESS_SLUG,
+                    kaneo_checked_at=now, transition_verified_at=now,
+                )
+                db.add_event(
+                    conn, now, "kaneo_transition", task_id=task["task_id"],
+                    actor="kaneo-dispatch",
+                    detail={"from": task["original_todo_slug"],
+                            "to": constants.IN_PROGRESS_SLUG,
+                            "reused": already_in_progress,
+                            "write_failed": write_error is not None},
+                )
+                recovery = core.dispatch_recovery(task)
+                if recovery and recovery.get("state") == "claimed":
+                    from . import cmd_queue
+                    cmd_queue._set_dispatch_recovery_state(
+                        conn, task, now, "kaneo-dispatch", "transitioned",
+                        request_id=_request["request_id"], run_id=payload["run_id"],
+                    )
+            else:
+                if (after is not None
+                        and _remote_identity_matches(task, after)
+                        and after_task.get("status") == task["original_todo_slug"]):
+                    reason = write_error or read_error or "远端状态未切换"
+                    code = "remote_unavailable"
+                    message = f"远端状态未切换：{reason}"
+                    send_state, lock_retained = "not_sent", 0
+                    cause = write_error if isinstance(write_error, BaseException) else None
+                else:
+                    detail = read_error or write_error or (
+                        f"remote status {after_task.get('status')}")
+                    code = "remote_conflict"
+                    message = str(detail)
+                    send_state, lock_retained = "unknown", 1
+                    cause = detail if isinstance(detail, BaseException) else None
+                _record_begin_send_failure(
+                    conn, task, _request, now, payload, code, message,
+                    send_state, lock_retained,
+                )
+                failure = util.KanpilotError(code, message)
+        if failure is not None:
+            if cause is not None:
+                raise failure from cause
+            raise failure
         return {
             "status": "submitting",
             "action": "click visible Send once; verify message and attachment",
@@ -213,7 +281,7 @@ def cmd_dispatch_confirm(ctx, payload: dict) -> dict:
         return {"status": "running", "already_confirmed": True}
 
     with db.write_txn(conn):
-        task, request = _entry(ctx, payload, ("submitting", "running"))
+        task, request = _require_send_entry(ctx, payload, ("submitting", "running"))
         util.require(
             task["transition_verified_at"],
             "transition not verified",
@@ -273,6 +341,12 @@ def cmd_dispatch_confirm(ctx, payload: dict) -> dict:
             result={"outcome": "succeeded", "send_state": "sent"},
             send_state="sent", evidence=evidence,
         )
+        if core.dispatch_recovery(task):
+            from . import cmd_queue
+            cmd_queue._set_dispatch_recovery_state(
+                conn, task, now, "kaneo-dispatch", "completed",
+                request_id=request["request_id"], run_id=payload["run_id"],
+            )
         interval = util.monitor_interval(conn)
         db.create_request(
             conn, now, "monitor", f"monitor:{task['task_id']}",
@@ -300,16 +374,39 @@ def cmd_dispatch_fail(ctx, payload: dict) -> dict:
         raise util.KanpilotError(
             "bad_request", "send_state must be not_sent|unknown"
         )
-    # Idempotent: already recorded for this run.
-    task = db.require_task(conn, payload["task_id"])
-    if (
-        task["run_id"] == payload["run_id"]
-        and task["status"] == "needs_user"
-    ):
-        return {
-            "status": "needs_user", "send_state": task["send_state"],
-            "already_recorded": True,
-        }
+    # Idempotent: preserve an already recorded send outcome while still closing
+    # a matching claimed request left by an older interrupted failure path.
+    with db.write_txn(conn):
+        task = db.require_task(conn, payload["task_id"])
+        if task["run_id"] == payload["run_id"] and task["status"] == "needs_user":
+            request = conn.execute(
+                "SELECT * FROM requests WHERE task_id=? AND stage='dispatch' "
+                "AND status='claimed' AND run_id=? ORDER BY rowid DESC LIMIT 1",
+                (task["task_id"], payload["run_id"]),
+            ).fetchone()
+            if request is not None:
+                persisted = task["send_state"] or send_state
+                core.finish_request(
+                    conn, request, now, "failed", "failed",
+                    result={"outcome": "failed", "reason": task["failure_reason"],
+                            "stage": task["failure_stage"] or task["stage"] or "dispatch",
+                            "run_id": payload["run_id"],
+                            "failure_stage": task["failure_stage"],
+                            "send_state": persisted, "already_recorded": True},
+                    note=task["failure_reason"], send_state=persisted,
+                )
+            recovery = core.dispatch_recovery(task)
+            if recovery and recovery.get("state") in ("queued", "claimed", "transitioned"):
+                from . import cmd_queue
+                cmd_queue._set_dispatch_recovery_state(
+                    conn, task, now, "kaneo-dispatch", "failed",
+                    request_id=recovery.get("request_id"), run_id=payload["run_id"],
+                    reason=task["failure_reason"],
+                )
+            return {
+                "status": "needs_user", "send_state": task["send_state"],
+                "already_recorded": True,
+            }
 
     with db.write_txn(conn):
         task, request = _entry(
@@ -333,6 +430,14 @@ def cmd_dispatch_fail(ctx, payload: dict) -> dict:
                     "send_state": send_state},
             note=payload["reason"], send_state=send_state,
         )
+        recovery = core.dispatch_recovery(task)
+        if recovery and recovery.get("state") in ("queued", "claimed", "transitioned"):
+            from . import cmd_queue
+            cmd_queue._set_dispatch_recovery_state(
+                conn, task, now, "kaneo-dispatch", "failed",
+                request_id=request["request_id"], run_id=payload["run_id"],
+                reason=payload["reason"],
+            )
         core.release_dispatch_serial(conn, payload["run_id"])
         db.add_event(
             conn, now, "dispatch_failed", task_id=task["task_id"],
@@ -494,15 +599,15 @@ def cmd_dispatch_start(ctx, payload: dict) -> dict:
     """dispatch-start（protocol §5.18.3）：可用性复核 → 意图落盘 → worktree →
     拉起 worker → 记 pid → 等首个 session 事件。同一轮次只启动一次进程。"""
     conn, now = ctx.conn, ctx.now_iso
-    task, _request = _entry(ctx, payload, ("submitting",))
+    task, _request = _require_send_entry(ctx, payload, ("submitting",))
     task_id, run_id = task["task_id"], payload["run_id"]
     round_row = round_store.require_round(conn, task_id, run_id)
     backend = round_row["backend"]
     if backend == "codex":
-        return _dispatch_start_codex(ctx, task, _request, run_id, round_row)
+        return _dispatch_start_codex(ctx, task, _request, run_id, round_row, payload)
     if backend == "pi_desktop":
         return _dispatch_start_pi_desktop(
-            ctx, task, _request, run_id, round_row
+            ctx, task, _request, run_id, round_row, payload
         )
     if backend != "pi":
         raise util.KanpilotError(
@@ -563,7 +668,7 @@ def _require_session_naming_capability(conn, config_snapshot) -> None:
             + util.redact(exc.message),
         )
 
-def _dispatch_start_codex(ctx, task, request, run_id, round_row) -> dict:
+def _dispatch_start_codex(ctx, task, request, run_id, round_row, payload) -> dict:
     """Start one identity-bound CLI worker; unknown starts are never resent."""
     from . import codex_environment, codex_execution, execution_contract, process_owner, runtime_client, runtime_operations, verify_evidence
     conn, now, task_id = ctx.conn, ctx.now_iso, task["task_id"]
@@ -574,6 +679,9 @@ def _dispatch_start_codex(ctx, task, request, run_id, round_row) -> dict:
     scope = runtime_client.stable_scope_id("execution", task_id=task_id, run_id=run_id)
     operation = "codex-start:" + run_id
     with db.write_txn(conn):
+        _fresh_task, fresh_request = _require_start_entry(ctx, payload)
+        util.require(fresh_request["request_id"] == request["request_id"],
+                     "dispatch request changed before startup intent", "stale_run")
         fresh = round_store.require_round(conn, task_id, run_id)
         if fresh["started_at"]:
             if not fresh["pid"]:
@@ -581,7 +689,8 @@ def _dispatch_start_codex(ctx, task, request, run_id, round_row) -> dict:
             session, _ = _pi_session_view(conn, task_id, run_id, backend="codex")
             return {"status": "started" if session else "starting", "pid": fresh["pid"],
                     "session_id": session, "worktree_path": fresh["worktree_path"], "deduplicated": True}
-        round_store.mark_intent(conn, task_id, run_id, now)
+        util.require(round_store.mark_intent(conn, task_id, run_id, now),
+                     "无法落盘 Codex 启动意图", "conflict")
         runtime_operations.begin_operation(conn, scope, operation, "codex", "codex_execution_start",
                                            {"task_id": task_id, "run_id": run_id, "config": config}, now=now)
     directory = None
@@ -642,7 +751,7 @@ def _dispatch_start_codex(ctx, task, request, run_id, round_row) -> dict:
             "session_id": session, "worktree_path": str(worktree), "deduplicated": False}
 
 
-def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
+def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row, payload) -> dict:
     """pi_desktop 分支 dispatch-start（§5.23.3）：连接探测 → 意图落盘 →
     worktree → 计划哈希复核 → 拉起 kanpilot.pi_desktop_worker。"""
     conn, now = ctx.conn, ctx.now_iso
@@ -685,6 +794,9 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
 
     # 2. 意图先落盘（同一轮次只允许一次真实启动；非空 → 幂等返回）。
     with db.write_txn(conn):
+        _fresh_task, fresh_request = _require_start_entry(ctx, payload)
+        util.require(fresh_request["request_id"] == request["request_id"],
+                     "dispatch request changed before startup intent", "stale_run")
         fresh = round_store.require_round(conn, task_id, run_id)
         if fresh["started_at"]:
             if not fresh["pid"]:
@@ -701,7 +813,8 @@ def _dispatch_start_pi_desktop(ctx, task, request, run_id, round_row) -> dict:
                 "worktree_path": fresh["worktree_path"],
                 "deduplicated": True,
             }
-        round_store.mark_intent(conn, task_id, run_id, now)
+        util.require(round_store.mark_intent(conn, task_id, run_id, now),
+                     "无法落盘 pi_desktop 启动意图", "conflict")
 
     run_dir = None
     try:
